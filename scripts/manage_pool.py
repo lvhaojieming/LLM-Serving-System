@@ -11,11 +11,16 @@ import time
 
 from manage_lab import ROOT, OWNER, kubectl, load_config, names, remote
 
+POOL_CONFIG = ROOT / "deploy/pools/ascend-awq.json"
+
 
 def configuration():
     cluster = load_config(ROOT / "deploy/lab/cluster.json")
-    pool = json.loads((ROOT / "deploy/pools/ascend-awq.json").read_text())
-    npu = json.loads((ROOT / "deploy/lab/npu.json").read_text())
+    pool = json.loads(POOL_CONFIG.read_text())
+    runtime = (ROOT / pool.get("runtime_config", "deploy/lab/npu.json")).resolve()
+    if not runtime.is_relative_to(ROOT.resolve()):
+        raise ValueError("Runtime configuration must remain in the formal project")
+    npu = json.loads(runtime.read_text())
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", pool["pool"]) or pool["namespace"] != "heteroserve":
         raise ValueError("Unexpected pool identity")
     if not re.fullmatch(r"[a-f0-9]{64}", pool["weights_manifest_sha256"]):
@@ -24,6 +29,8 @@ def configuration():
         raise ValueError("Model nodes must belong to the fixed lab")
     if pool["termination_seconds"] <= pool["drain_seconds"]:
         raise ValueError("Termination budget must cover draining and engine shutdown")
+    if type(pool["replicas"]) is not int or pool["replicas"] < 1:
+        raise ValueError("The initial pool requires a positive manual replica count")
     return cluster, pool, npu
 
 
@@ -248,11 +255,16 @@ def status():
 
 def verify():
     cluster, pool, npu = configuration()
-    data = json.loads(kubectl(cluster, ["get", "pods", "-n", pool["namespace"], "-l", "heteroserve.io/pool=" + pool["pool"], "-o", "json"]).stdout)
-    pods = [p for p in data["items"] if not p["metadata"].get("deletionTimestamp") and
-            any(c["type"] == "Ready" and c["status"] == "True" for c in p["status"].get("conditions", []))]
-    if len(pods) != pool["replicas"]:
-        raise RuntimeError("Expected replica count is not Ready; inspect startup and scheduling events")
+    deadline = time.monotonic() + pool["startup_seconds"]
+    while True:
+        data = json.loads(kubectl(cluster, ["get", "pods", "-n", pool["namespace"], "-l", "heteroserve.io/pool=" + pool["pool"] + ",app.kubernetes.io/name=expert", "-o", "json"]).stdout)
+        pods = [p for p in data["items"] if not p["metadata"].get("deletionTimestamp") and
+                any(c["type"] == "Ready" and c["status"] == "True" for c in p["status"].get("conditions", []))]
+        if len(pods) == pool["replicas"]:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Expected replica count is not Ready; inspect startup and scheduling events")
+        time.sleep(3)
     checker = """import json,sys,time,urllib.request
 model=sys.argv[1]
 def get(path):return json.load(urllib.request.urlopen('http://127.0.0.1:8000'+path,timeout=10))
@@ -293,9 +305,12 @@ print(json.dumps({'passed':True,'identity':identity,'ordinary_answer':answer,'st
 
 
 def main():
+    global POOL_CONFIG
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["render", "apply", "status", "verify", "router", "prepare-router"])
+    parser.add_argument("--config", default=str(POOL_CONFIG), help="Reusable expert-pool configuration")
     args = parser.parse_args()
+    POOL_CONFIG = Path(args.config)
     {"render": render, "apply": apply, "status": status, "verify": verify, "router": router, "prepare-router": prepare_router}[args.action]()
 
 

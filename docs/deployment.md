@@ -187,6 +187,10 @@ Router 的 ServiceAccount 仅有项目 Namespace 内服务发现读取权限，�
 | SSE 排空 | 输出期间删除模型 Pod，44 秒的 SSE 完整结束；约 93 秒恢复目标副本 |
 | 引擎失去响应 | SIGSTOP 仅作用于自有模型进程组；约 43 秒退出 Ready、225 秒容器重启、322 秒恢复 |
 | 自愿维护 | cordon/drain `.209`，两个专家在 `.210` 恢复，保留一份路由容量；约 98 秒完成容量迁移，随后 uncordon 并恢复分布 |
+| 节点容器失联 | 约 56 秒检测 NotReady，约 450 秒在另一节点补足专家副本；最低保留 1 个专家和 1 个 Router，真实推理仍可完成 |
+| 安全移除与重加入 | `.210` 排空后移出集群，保留原 Docker ID 重加入；Node UID 改变，设备重新识别，约 311 秒恢复完整基线 |
+| 缩容与更新排空 | 分别在 SSE 输出期间执行缩容、滚动更新，约 43 秒的输出均完整收到 `[DONE]`；更新约 196 秒恢复目标容量 |
+| 更新失败与回滚 | 刻意使用未缓存的固定摘要，检测 `ErrImageNeverPull`；回滚至原固定镜像，约 99 秒恢复 |
 
 未做物理服务器断电、NPU 硬件损伤注入，也未宣称能恢复已被截断的生成请求。
 节点容器停止测试与真实物理机故障必须分别记录；不能用前者替代后者的生产认证。
@@ -205,10 +209,13 @@ python3 scripts/verify_lifecycle.py delete
 python3 scripts/verify_lifecycle.py drain
 python3 scripts/verify_lifecycle.py cache
 python3 scripts/verify_lifecycle.py shortage
+python3 scripts/verify_lifecycle.py scale_drain
+python3 scripts/verify_lifecycle.py update_drain
+python3 scripts/verify_lifecycle.py rollback
 ```
 
 故障和维护命令只针对配置中固定的自有实验节点，结束后恢复原 Docker ID 和部署目标。
-运行 `engine`、`maintenance`、`node_failure` 前确认没有本项目之外的流量依赖这些实例。
+运行 `engine`、`maintenance`、`node_failure`、`remove_rejoin` 前确认没有本项目之外的流量依赖这些实例。
 更新使用 `maxSurge:0/maxUnavailable:1`，无需备用卡；单副本更新会中断，双副本更新保留部分容量。
 PDB `minAvailable:1` 约束自愿驱逐，不替代更新策略或保证节点故障下的可用性。
 回滚应在实验控制平面中 `kubectl rollout undo deployment/<pool> -n heteroserve`，

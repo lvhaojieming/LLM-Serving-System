@@ -185,18 +185,75 @@ with urllib.request.urlopen(request,timeout=180) as response:
         if victim["metadata"].get("labels", {}).get(OWNER) != cluster["name"]:
             raise RuntimeError("Streaming worker ownership does not match")
         started = time.monotonic()
-        kubectl(cluster, ["delete", "pod", victim["metadata"]["name"], "-n", pool["namespace"], "--wait=false"])
+        operation = pool.get("verification_operation", "delete")
+        if operation in {"scale", "update"}:
+            kubectl(cluster, ["annotate", "pod", victim["metadata"]["name"], "-n", pool["namespace"], "controller.kubernetes.io/pod-deletion-cost=-1000", "--overwrite"])
+        if operation == "scale":
+            kubectl(cluster, ["scale", "deployment", pool["pool"], "-n", pool["namespace"], "--replicas=" + str(pool["replicas"] - 1)])
+        elif operation == "update":
+            kubectl(cluster, ["rollout", "restart", "deployment/" + pool["pool"], "-n", pool["namespace"]])
+        else:
+            kubectl(cluster, ["delete", "pod", victim["metadata"]["name"], "-n", pool["namespace"], "--wait=false"])
         final = json.loads(process.stdout.readline())
         if process.wait(timeout=240) or not final["done"]:
             raise RuntimeError("SSE was truncated during graceful Pod termination")
-        recovered = wait_ready(cluster, pool, pool["replicas"])
+        if operation == "update":
+            kubectl(cluster, ["rollout", "status", "deployment/" + pool["pool"], "-n", pool["namespace"], "--timeout=1200s"], timeout=1260)
+        final_count = pool["replicas"] - 1 if operation == "scale" else pool["replicas"]
+        recovered = wait_ready(cluster, pool, final_count)
+        if first["uid"] in {p["metadata"]["uid"] for p in recovered}:
+            raise RuntimeError("Streaming worker was not actually retired by the requested operation")
         wait_discovered(cluster, pool, [p["metadata"]["uid"] for p in recovered])
-        return {"passed": True, "deleted_uid": first["uid"], "stream": final,
+        return {"passed": True, "operation": operation, "retired_uid": first["uid"], "stream": final,
                 "total_recovery_seconds": time.monotonic() - started, "replacement_uids": [p["metadata"]["uid"] for p in recovered]}
     finally:
         if process.poll() is None:
             process.terminate()
             process.wait(timeout=10)
+
+
+def scale_drain(cluster, pool, npu):
+    original = pool["replicas"]
+    try:
+        kubectl(cluster, ["scale", "deployment", pool["pool"], "-n", pool["namespace"], "--replicas=" + str(original + 1)])
+        changed = {**pool, "replicas": original + 1, "verification_operation": "scale"}
+        ready = wait_ready(cluster, changed, original + 1)
+        wait_discovered(cluster, changed, [p["metadata"]["uid"] for p in ready])
+        return drain(cluster, changed, npu)
+    finally:
+        kubectl(cluster, ["scale", "deployment", pool["pool"], "-n", pool["namespace"], "--replicas=" + str(original)])
+        wait_ready(cluster, pool, original)
+
+
+def update_drain(cluster, pool, npu):
+    return drain(cluster, {**pool, "verification_operation": "update"}, npu)
+
+
+def rollback(cluster, pool, npu):
+    wait_ready(cluster, pool, pool["replicas"])
+    started = time.monotonic()
+    try:
+        missing = npu["model_image"].split("@")[0] + "@sha256:" + "0" * 64
+        kubectl(cluster, ["set", "image", "deployment/" + pool["pool"], "expert=" + missing, "-n", pool["namespace"]])
+        deadline = time.monotonic() + 90
+        failure = None
+        while time.monotonic() < deadline:
+            for pod in pods(cluster, pool):
+                for container in pod["status"].get("containerStatuses", []):
+                    waiting = container.get("state", {}).get("waiting", {})
+                    if waiting.get("reason") in {"ErrImageNeverPull", "ImagePullBackOff", "ErrImagePull"}:
+                        failure = waiting
+            if failure:
+                break
+            time.sleep(2)
+        if not failure:
+            raise RuntimeError("Deliberately unavailable image was not reported")
+    finally:
+        kubectl(cluster, ["rollout", "undo", "deployment/" + pool["pool"], "-n", pool["namespace"]])
+        kubectl(cluster, ["rollout", "status", "deployment/" + pool["pool"], "-n", pool["namespace"], "--timeout=1200s"], timeout=1260)
+        ready = wait_ready(cluster, pool, pool["replicas"])
+        wait_discovered(cluster, pool, [p["metadata"]["uid"] for p in ready])
+    return {"passed": True, "detected_failure": failure, "recovered_seconds": time.monotonic() - started, "restored_image": npu["model_image"]}
 
 
 def maintenance(cluster, pool, npu):
@@ -330,9 +387,57 @@ print('SURVIVING_GATEWAY_INFERENCE_PASSED')
             wait_ready(cluster, pool, pool["replicas"])
 
 
+def remove_rejoin(cluster, pool, npu):
+    """Drain and unregister one owned agent, then rejoin using its existing container."""
+    node = next(n for n in cluster["nodes"] if n["host"] == "10.107.206.210")
+    name = names(cluster, node)[0]
+    identity = cluster["locked_container_ids"][node["host"]]
+    if remote(node["host"], ["docker", "inspect", name, "--format", "{{.Id}}"]).stdout.strip() != identity:
+        raise RuntimeError("Cannot remove a changed node container")
+    started = time.monotonic()
+    previous = json.loads(kubectl(cluster, ["get", "node", name, "-o", "json"]).stdout)["metadata"]["uid"]
+    removed = False
+    try:
+        kubectl(cluster, ["cordon", name])
+        kubectl(cluster, ["drain", name, "--ignore-daemonsets", "--delete-emptydir-data", "--timeout=600s"], timeout=660)
+        ready = wait_ready(cluster, pool, pool["replicas"])
+        if any(p["spec"]["nodeName"] == name for p in ready):
+            raise RuntimeError("Cannot unregister a node with active expert replicas")
+        remote(node["host"], ["docker", "stop", "--time", "15", identity])
+        kubectl(cluster, ["delete", "node", name])
+        removed = not kubectl(cluster, ["get", "node", name, "--ignore-not-found=true"]).stdout.strip()
+        if not removed:
+            raise RuntimeError("Node remained registered")
+    finally:
+        remote(node["host"], ["docker", "start", identity])
+        deadline = time.monotonic() + 300
+        joined = None
+        while time.monotonic() < deadline:
+            response = kubectl(cluster, ["get", "node", name, "--ignore-not-found=true", "-o", "json"]).stdout
+            if response.strip():
+                joined = json.loads(response)
+                if any(c["type"] == "Ready" and c["status"] == "True" for c in joined["status"]["conditions"]) and joined["status"].get("allocatable", {}).get(npu["resource"]) == "8":
+                    break
+            time.sleep(3)
+        else:
+            raise TimeoutError("Retained agent container failed to rejoin Ready with expected devices")
+        kubectl(cluster, ["label", "node", name, "heteroserve.io/hardware=" + pool["hardware"], "heteroserve.io/backend=" + pool["backend"],
+            "heteroserve.io/npu-ready=true", "heteroserve.io/purpose=inference", "--overwrite"])
+        kubectl(cluster, ["uncordon", name])
+        wait_ready(cluster, pool, pool["router_replicas"], "router")
+        current = wait_ready(cluster, pool, pool["replicas"])
+        if len({p["spec"]["nodeName"] for p in current}) == 1:
+            kubectl(cluster, ["delete", "pod", current[0]["metadata"]["name"], "-n", pool["namespace"], "--wait=false"])
+            wait_ready(cluster, pool, pool["replicas"])
+    if joined["metadata"]["uid"] == previous:
+        raise RuntimeError("Expected a new Kubernetes Node identity after unregister/rejoin")
+    return {"passed": True, "node_removed": removed, "old_node_uid": previous, "new_node_uid": joined["metadata"]["uid"],
+            "docker_id_preserved": identity, "total_seconds": time.monotonic() - started}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["routing", "scale", "delete", "cache", "shortage", "drain", "maintenance", "engine", "node_failure"])
+    parser.add_argument("action", choices=["routing", "scale", "delete", "cache", "shortage", "drain", "scale_drain", "update_drain", "rollback", "maintenance", "engine", "node_failure", "remove_rejoin"])
     args = parser.parse_args()
     cluster, pool, npu = configuration()
     result = {"action": args.action, **globals()[args.action](cluster, pool, npu)}

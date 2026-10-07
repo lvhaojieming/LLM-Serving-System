@@ -73,7 +73,7 @@ for asset,source in mapping.items():
  if not src.is_dir(): raise RuntimeError('Missing existing asset: '+source)
  if src.stat().st_dev!=root.stat().st_dev: raise RuntimeError('Hardlink reuse requires the same filesystem')
  dst.mkdir(exist_ok=True)
- count=0; size=0
+ count=0; size=0; linked=0; copied=0
  for base,dirs,files in os.walk(src,followlinks=False):
   relative=Path(base).relative_to(src); out=dst/relative; out.mkdir(exist_ok=True)
   for d in list(dirs):
@@ -89,13 +89,15 @@ for asset,source in mapping.items():
    s=s.resolve()
    if t.exists():
     if not os.path.samefile(s,t) and (asset!='driver' or s.read_bytes()!=t.read_bytes()): raise RuntimeError('Existing published file differs: '+str(t))
+    if os.path.samefile(s,t): linked+=1
+    else: copied+=1
    else:
-    try: os.link(s,t)
+    try: os.link(s,t); linked+=1
     except PermissionError:
      if asset!='driver': raise
-     shutil.copy2(s,t)
+     shutil.copy2(s,t); copied+=1
    count+=1; size+=s.stat().st_size
- results.append({'asset':asset,'source':source,'files':count,'logical_bytes':size,'method':'hardlink'})
+ results.append({'asset':asset,'source':source,'files':count,'logical_bytes':size,'hardlinked_files':linked,'protected_metadata_copies':copied,'method':'hardlink with protected driver metadata copy' if copied else 'hardlink'})
 (root/'publication.json').write_text(json.dumps(results,indent=2))
 print(json.dumps(results))
 """

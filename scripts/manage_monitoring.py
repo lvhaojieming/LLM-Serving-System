@@ -126,11 +126,57 @@ def render():
     (ROOT / "deploy/monitoring/stack.yaml").write_text(yaml.safe_dump_all(objects(cluster), sort_keys=False), encoding="utf-8")
 
 
+def verify():
+    import time
+    import urllib.parse
+    cluster = load_config(ROOT / "deploy/lab/cluster.json")
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        pods = json.loads(kubectl(cluster, ["get", "pods", "-n", NAMESPACE, "-o", "json"]).stdout)["items"]
+        ready = [p for p in pods if not p["metadata"].get("deletionTimestamp") and any(c["type"] == "Ready" and c["status"] == "True" for c in p["status"].get("conditions", []))]
+        if len(ready) == 3:
+            break
+        time.sleep(3)
+    else:
+        raise TimeoutError("Monitoring components are not all Ready")
+    prom = next(p["metadata"]["name"] for p in ready if p["metadata"]["labels"]["app"] == "prometheus")
+    observations = {}
+    for query in ['sum(kube_node_status_condition{condition="Ready",status="true"})', 'sum(kube_node_status_allocatable{resource=~"huawei.*"})',
+                  'sum(up{job="inference"})', 'sum(heteroserve_worker_ready)', 'count(vllm:time_to_first_token_seconds_count)']:
+        url = "http://127.0.0.1:9090/api/v1/query?" + urllib.parse.urlencode({"query": query})
+        response = json.loads(kubectl(cluster, ["exec", "-n", NAMESPACE, prom, "--", "wget", "-qO-", url]).stdout)
+        observations[query] = response["data"]["result"]
+        if not observations[query]:
+            raise RuntimeError("Expected monitoring series is absent: " + query)
+    targets = json.loads(kubectl(cluster, ["exec", "-n", NAMESPACE, prom, "--", "wget", "-qO-", "http://127.0.0.1:9090/api/v1/targets"]).stdout)
+    if any(t["health"] != "up" for t in targets["data"]["activeTargets"]):
+        raise RuntimeError("A monitoring target is not being scraped successfully")
+    server = next(n for n in cluster["nodes"] if n["role"] == "server")
+    grafana = next(p for p in ready if p["metadata"]["labels"]["app"] == "grafana")
+    pid = remote(server["host"], ["docker", "inspect", names(cluster, server)[0], "--format", "{{.State.Pid}}"]).stdout.strip()
+    checker = """import json,sys,base64,urllib.request
+from pathlib import Path
+password=Path(sys.argv[1]).read_text().strip()
+headers={'Authorization':'Basic '+base64.b64encode(('admin:'+password).encode()).decode()}
+request=urllib.request.Request('http://'+sys.argv[2]+':3000/api/dashboards/uid/heteroserve',headers=headers)
+data=json.load(urllib.request.urlopen(request,timeout=10))
+assert data['dashboard']['uid']=='heteroserve' and data['meta']['provisioned']
+print(json.dumps({'dashboard_uid':data['dashboard']['uid'],'provisioned':True,'panels':len(data['dashboard']['panels'])}))
+"""
+    dashboard = json.loads(remote(server["host"], ["nsenter", "-t", pid, "-n", "python3", "-c", checker,
+        cluster["state_directory"] + "/monitoring/grafana-admin-password", grafana["status"]["podIP"]]).stdout)
+    result = {"passed": True, "queries": observations, "scrape_targets": len(targets["data"]["activeTargets"]), "dashboard": dashboard}
+    path = ROOT / "artifacts/kubernetes/monitoring-verification.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(json.dumps(result, indent=2), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["render", "apply"])
+    parser.add_argument("action", choices=["render", "apply", "verify"])
     args = parser.parse_args()
-    {"render": render, "apply": apply}[args.action]()
+    {"render": render, "apply": apply, "verify": verify}[args.action]()
 
 
 if __name__ == "__main__":
