@@ -1,0 +1,26 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: heteroserve-discovery
+  namespace: heteroserve
+rules:
+  - apiGroups: [""]
+    resources: [pods, services]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: heteroserve-discovery
+  namespace: heteroserve
+subjects:
+  - kind: ServiceAccount
+    name: heteroserve-discovery
+    namespace: heteroserve
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: heteroserve-discovery

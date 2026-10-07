@@ -1,0 +1,11 @@
+{
+  "observed_at": "2026-10-07",
+  "status": "blocked",
+  "namespace": "heteroserve",
+  "live_cluster": {"server_version": "v1.28.2", "api_server": "https://10.107.204.181:8443"},
+  "selected_node": {"address": "10.107.206.217", "name": "nh-dc-nm130-h06-20u-server10", "hardware": "Ascend 910B4", "architecture": "arm64", "containerd": "1.6.16", "ready": true, "unschedulable": true, "npu_allocatable": {}, "default_runtime": "runc"},
+  "node217_user_kubeconfig": {"path": "/root/.kube/config", "api_server": "https://10.107.206.235:6443", "reachable": false},
+  "candidate_npu_resource": "huawei.com/Ascend910",
+  "candidate_runtime_class": "ascend",
+  "blockers": ["Project deploy credential required", ".217 is cordoned and does not advertise NPU resources", "Validate CRI Ascend runtime and Device Plugin", "Reserve a genuinely free device; Docker occupation is outside Kubernetes accounting", "Verify image availability through CRI and registry", "Kubernetes 1.28 is upstream EOL; existing cluster lifecycle belongs to its administrator"]
+}

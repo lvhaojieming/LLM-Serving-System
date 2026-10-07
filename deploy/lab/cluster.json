@@ -1,0 +1,25 @@
+{
+  "name": "heteroserve-lab",
+  "image": "rancher/k3s@sha256:c20f2c044a28cf217440464a810fb81715a48192716a5bc99eaf2c3113a9cfb4",
+  "image_config_id": "sha256:d1777321da2d2b79f804709fb9e2d5152dd227909d25cd167d22d289f05456fc",
+  "version": "v1.34.12+k3s1",
+  "architecture": "arm64",
+  "purpose": "Two-host CPU deployment validation; NPU integration is a separate gate",
+  "pod_cidr": "172.26.0.0/16",
+  "service_cidr": "172.27.0.0/16",
+  "api_port": 16443,
+  "cpus_per_node": 4,
+  "memory_per_node": "8g",
+  "resource_limits_enabled": false,
+  "network_tuning": {"flannel_tx_checksum_offload": false},
+  "state_directory": "/root/zhangjinhao/LLM-Serving-System/state",
+  "locked_container_ids": {
+    "10.107.206.209": "40f8386de710839112eaca7d8e1a67763ba5985be9600a032db0b9c7b6d2e5f0",
+    "10.107.206.217": "7a18461b7d3e644a07d1c2d018f07ca8d196ea8fa49e8661ab02a352f0a39a54"
+  },
+  "nodes": [
+    {"host": "10.107.206.217", "role": "server", "subnet": "172.29.217.0/24", "address": "172.29.217.2"},
+    {"host": "10.107.206.209", "role": "agent", "subnet": "172.29.209.0/24", "address": "172.29.209.2"}
+  ],
+  "available_hosts": ["10.107.206.209", "10.107.206.210", "10.107.206.211", "10.107.206.212", "10.107.206.213", "10.107.206.214", "10.107.206.215", "10.107.206.216", "10.107.206.217"]
+}

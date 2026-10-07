@@ -1,0 +1,43 @@
+# Applied by the existing cluster administrator; bind the real identity to this group.
+# Do not apply with kubelet.conf and do not grant cluster-admin to the application.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: heteroserve-deployer
+  namespace: heteroserve
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, deployments/scale, replicasets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [services, configmaps, secrets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods, pods/log, events]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: heteroserve-deployer
+  namespace: heteroserve
+subjects:
+  - kind: Group
+    name: heteroserve-deployers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: heteroserve-deployer

@@ -1,0 +1,4 @@
+# Reuse the existing development Python environment.
+PyYAML>=6,<7
+jsonschema>=4.22,<5
+pytest>=8,<9

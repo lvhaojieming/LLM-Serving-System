@@ -1,0 +1,26 @@
+{
+  "host": "10.107.206.209",
+  "resource": "huawei.com/Ascend910",
+  "plugin_image": "docker.io/library/ascend-k8sdeviceplugin@sha256:d90cf0d80f1970b2b2b80e899be5519a9f070dace1c9c4e01111e89bade1962e",
+  "model_image": "docker.io/heteroserve/ascend-runtime@sha256:440ec6e9625b2344a4c37733f591beeb3a9f8ade57c35dc74d873ce754cb69b4",
+  "model_image_source": "swr.cn-north-4.myhuaweicloud.com/ddn-k8s/quay.io/ascend/vllm-ascend@sha256:f16f8237ebec368dc7d031ed52cbdcaae24e4fa5af065b9b74971490045776a1",
+  "model_image_config_id": "sha256:3fa99377d9d0ec7ea3f4af12e94c544a4d4b9fecfac021d30d85187492584d2b",
+  "driver_source": "/usr/local/Ascend/driver",
+  "model_source": "/root/zhangjinhao/model/Qwen3-14B-AWQ-Ascend-INT4",
+  "adapter_source": "/root/zhangjinhao/moqe-runtime",
+  "served_model": "moqe-qwen3-awq",
+  "model_memory_limit": "6Gi",
+  "validation": {
+    "compiler_processes": 1,
+    "cpu_threads": 2,
+    "result_timeout_seconds": 300,
+    "memory_limit": "6Gi",
+    "compute_execution": "sequential"
+  },
+  "model_parameters": {
+    "dtype": "float16", "max_model_len": 4096, "max_num_seqs": 2,
+    "gpu_memory_utilization": 0.5, "max_num_batched_tokens": 2048,
+    "enforce_eager": true, "disable_frontend_multiprocessing": true,
+    "disable_log_requests": true, "quantization": "moqe_ascend_int4"
+  }
+}

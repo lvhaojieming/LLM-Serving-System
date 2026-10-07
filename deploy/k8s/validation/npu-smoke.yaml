@@ -1,0 +1,78 @@
+# Suspended until a free device, the CRI runtime and Device Plugin are verified.
+# The digest was observed in Docker on .209; CRI availability on .217 is unverified.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: heteroserve-npu-smoke
+  namespace: heteroserve
+  labels:
+    app.kubernetes.io/part-of: heteroserve
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: heteroserve
+        app.kubernetes.io/component: validation
+    spec:
+      serviceAccountName: heteroserve-validation
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        kubernetes.io/hostname: nh-dc-nm130-h06-20u-server10
+        kubernetes.io/arch: arm64
+      # Must correspond to a real, validated CRI handler. A RuntimeClass is not an installer.
+      runtimeClassName: ascend
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: validation
+          image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/quay.io/ascend/vllm-ascend@sha256:f16f8237ebec368dc7d031ed52cbdcaae24e4fa5af065b9b74971490045776a1
+          imagePullPolicy: IfNotPresent
+          command: [/bin/bash, -c]
+          args:
+            - |
+              set -euo pipefail
+              source /usr/local/Ascend/ascend-toolkit/set_env.sh
+              python3 - <<'PY'
+              import json, os
+              import torch, torch_npu
+              count = torch.npu.device_count()
+              if count != 1:
+                  raise RuntimeError(f"Expected exactly one allocated NPU, observed {count}")
+              device = torch.device("npu:0")
+              x = torch.ones((32, 32), device=device)
+              y = x @ x
+              torch.npu.synchronize()
+              assert torch.equal(y.cpu(), torch.full((32, 32), 32.0))
+              print(json.dumps({"passed": True, "pod_uid": os.environ["POD_UID"],
+                                "node": os.environ["NODE_NAME"], "allocated_npus": count,
+                                "torch_version": torch.__version__}))
+              PY
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+              huawei.com/Ascend910: "1"
+            limits:
+              cpu: "2"
+              memory: 4Gi
+              huawei.com/Ascend910: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
