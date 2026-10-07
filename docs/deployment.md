@@ -152,7 +152,7 @@ DaemonSet 使用实验节点已有的固定 K3s 镜像和 ethtool，节点重启
 `70a289a9eb8ed35d8a62aa466738c2cd5906df68df844c7731c98840230654f9`；两台目标节点的六个权重分片均逐一校验。
 模型和适配器在目标节点预先准备，再以只读挂载提供给 Pod。Kubernetes 不负责自动复制权重。
 
-两个模型副本和两个路由副本使用内部 Service。每个模型 Pod 申请 `huawei.com/Ascend910: 1`，
+当前两个模型副本和一个二级路由副本使用内部 Service。每个模型 Pod 申请 `huawei.com/Ascend910: 1`，
 CPU/内存使用调度 requests（4 CPU、16 GiB），不恢复已经取消的 CPU/内存 limits。
 路由使用官方 ARM64 `vllm-router==0.1.15`，wheel 及两个缺失依赖的版本和 SHA-256 均固定在池配置。
 依赖通过校验后发布到现有节点卷，只补缺失项，不修改原模型环境，不构建新镜像。
@@ -170,6 +170,11 @@ CPU/内存使用调度 requests（4 CPU、16 GiB），不恢复已经取消的 C
 驱动及本地模型需要精确的只读 hostPath，项目 Namespace 对 Pod Security admission 采用必要例外。
 模型和 Router 容器均非 privileged，不使用 hostPID/hostNetwork，禁止权限提升并移除额外 capabilities。
 Router 的 ServiceAccount 仅有项目 Namespace 内服务发现读取权限，无 Secret 读取或工作负载写权限。
+
+当前 `router_replicas: 1`，同一进程统一维护池入口在途计数，模型端仍逐实例执行 8 请求上限。
+这不提供 Router 入口高可用；Router 故障或更新期间入口会中断。重启后的入口计数从零开始，
+模型端仍保护已有请求的实例容量；跨副本协调、持久化计数和 token 工作量统计留到后续实现。
+下表节点失联时仍有 Router 接流量的记录来自此前双 Router 验收，不能作为当前单 Router 的高可用保证。
 生产集群如采用经过认证的设备 runtime、CSI/PVC，可替换本地存储入口并收紧 Namespace 策略。
 
 ## 实测验收记录

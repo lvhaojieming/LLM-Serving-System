@@ -16,7 +16,7 @@
   "termination_seconds": 300,
   "scratch_limit": "20Gi",
   "requests_per_worker": 8,
-  "router_replicas": 2,
+  "router_replicas": 1,
   "router_nodes": ["heteroserve-lab-209", "heteroserve-lab-210"],
   "worker_request_memory": "16Gi",
   "worker_request_cpu": "4",

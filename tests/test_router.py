@@ -85,3 +85,40 @@ def test_api_outage_expires_cache_and_stops_forwarding_without_router_restart():
             assert status["calls"] == before
             assert app.state.router["active"] == 0
     asyncio.run(scenario())
+
+
+def test_single_router_rejects_over_budget_and_cancellation_releases_its_slot():
+    async def scenario():
+        started = asyncio.Event()
+        blocked = asyncio.Event()
+        pods, slices = inventory()
+        async def api(request):
+            return httpx.Response(200, json=pods if request.url.path.endswith("/pods") else slices)
+        async def core(request):
+            if request.url.path == "/workers":
+                return httpx.Response(200, json={"workers": [{"url": "http://10.0.0.1:8000"}]})
+            started.set()
+            await blocked.wait()
+            return httpx.Response(200, json={"ok": True}, headers={"x-heteroserve-pod-uid": "new"})
+        config = {"pool": "awq", "namespace": "ns", "expert": "awq", "model": "model", "api_url": "http://api", "core_url": "http://core",
+                  "discovery_cache_seconds": 15, "discovery_interval_seconds": .005, "requests_per_worker": 1, "max_request_bytes": 100, "drain_seconds": 1}
+        app = router.create_app(config, api_transport=httpx.MockTransport(api), core_transport=httpx.MockTransport(core), start_core=False)
+        async with app.router.lifespan_context(app), httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://router") as client:
+            for _ in range(100):
+                if app.state.discovery.endpoints:
+                    break
+                await asyncio.sleep(.005)
+            ongoing = asyncio.create_task(client.post("/v1/chat/completions", json={"model": "awq"}))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                rejection = await client.post("/v1/chat/completions", json={"model": "awq"})
+                assert rejection.status_code == 429 and rejection.headers["retry-after"] == "1"
+                assert app.state.router["active"] == 1
+            finally:
+                ongoing.cancel()
+                await asyncio.gather(ongoing, return_exceptions=True)
+            assert app.state.router["active"] == 0
+            blocked.set()
+            assert (await client.post("/v1/chat/completions", json={"model": "awq"})).status_code == 200
+            assert app.state.router["active"] == 0
+    asyncio.run(scenario())
