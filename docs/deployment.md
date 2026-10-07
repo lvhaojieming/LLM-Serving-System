@@ -1,7 +1,8 @@
 # 跨机器 Kubernetes 部署与验收
 
-目标是验证 Kubernetes 真正创建、放置、重建和管理跨机器工作负载，再接入昇腾 NPU 和真实模型。
-当前实验集群只管理明确标记的实验资源；应用层重构等待部署阶段验收。
+当前工程已接入三台物理服务器的独立 K3s 实验节点，使用真实昇腾模型进行准入和生命周期验收。
+Kubernetes 管理节点、设备资源及 Deployment；官方 vLLM Router 负责负载均衡和原生 Pod 发现。
+应用接口补充真实模型健康、在途排空、Pod UID 核对及有限发现缓存。
 
 ## 实验与现有集群的职责
 
@@ -12,9 +13,10 @@
 它不需要原共享集群的应用部署权限，也不会赋予原共享集群的权限。
 privileged 容器不能作为对宿主机管理员的安全隔离边界；设备归属必须单独确认。
 
-用户已指定 `.209` 至 `.217`，共九台候选节点。当前只启用 `.217` server 和 `.209` agent。
-每个实验节点容器限制 4 CPU、8 GiB 内存和 16384 PID。嵌套节点上报的 Node capacity 可能与外层容器配额不同，
-因此验证工作负载还有独立 ResourceQuota，不能直接用 Node capacity 宣称可用实验资源。
+用户已指定 `.209` 至 `.217`，共九台候选节点。当前 `.217` 为控制节点，`.209`、`.210` 为推理节点。
+三只节点容器长期复用并锁定 ID；外层 CPU、内存、swap、进程上限和项目 CPU/内存 limits 已按用户要求取消。
+原 4 CPU、8 GiB 只保留为创建预算记录。应用保留合理的调度 requests 和一实例一张 NPU 的 requests/limits。
+模型缓存临时卷有 20 GiB 上限；监控数据保留 7 天、TSDB 数据规模上限 5 GB。
 
 ## 版本与已知边界
 
@@ -24,7 +26,8 @@ privileged 容器不能作为对宿主机管理员的安全隔离边界；设备
 
 这是兼容性实验基线，不是长期生产版本选择。Kubernetes 1.34 上游支持在 2026-10-27 结束。
 目前实验节点实际内置 containerd 为 `2.2.7-k3s1`；不能用宿主机的 `1.6.16` 或报告中的候选 `2.1.4` 代替它。
-昇腾 runtime/Device Plugin 与这个组合的兼容性尚未验收。NPU 阶段需要重新锁定并验证完整版本矩阵。
+已实测设备插件、非特权模型 Pod、真实推理及故障恢复；这不等于厂商已认证整个嵌套版本矩阵。
+正式生产集群仍须确认发行版支持周期、驱动/固件/CANN/runtime 对应矩阵及目标集群验收。
 
 目前九台候选节点中，`.212` 使用 cgroup v2，其余使用 cgroup v1。
 Usernetes rootless 路线尚不满足大多数节点的前置条件，因此当前评估 K3s 的 rootful 容器路线。
@@ -102,7 +105,7 @@ torch/torch-npu 均为 2.5.1，Ascend910B4，进程可见设备数均为 1，其
 精确矩阵测试及三次 CPU 参考比较均通过，最大绝对误差为 0。
 Pod 不使用 privileged、hostPID 或 hostNetwork，删除测试 Pod 后释放分配。
 机器可读结果保留在 `artifacts/kubernetes/npu-isolation.json`，不提交运行产物。
-两台外层实验容器 ID 保持不变；真实模型 Pod 尚未启动，后续仍须进行真实推理及目标集群验收。
+上述是先期设备验收。随后真实模型 Pod 已部署并通过普通及完整 SSE 推理，三只外层容器均未重建。
 
 ### 复现 NPU 验证
 
@@ -142,7 +145,88 @@ DaemonSet 使用实验节点已有的固定 K3s 镜像和 ethtool，节点重启
 使用该入口前应确认设备归属和占用，限制当前进程的可见设备，并复用匹配的 CANN / torch-npu 环境。
 不要根据微型矩阵迭代时间推断模型吞吐或延迟。
 
-## 参考
+## 当前专家与路由部署
+
+`deploy/pools/ascend-awq.json` 定义当前专家池，`deploy/lab/npu.json` 固定已复用的运行镜像及 vLLM 参数。
+模型是 Qwen3-14B-AWQ 经既有工具转换的 `moqe_ascend_int4` 布局，转换清单 SHA-256 为
+`70a289a9eb8ed35d8a62aa466738c2cd5906df68df844c7731c98840230654f9`；两台目标节点的六个权重分片均逐一校验。
+模型和适配器在目标节点预先准备，再以只读挂载提供给 Pod。Kubernetes 不负责自动复制权重。
+
+两个模型副本和两个路由副本使用内部 Service。每个模型 Pod 申请 `huawei.com/Ascend910: 1`，
+CPU/内存使用调度 requests（4 CPU、16 GiB），不恢复已经取消的 CPU/内存 limits。
+路由使用官方 ARM64 `vllm-router==0.1.15`，wheel 及两个缺失依赖的版本和 SHA-256 均固定在池配置。
+依赖通过校验后发布到现有节点卷，只补缺失项，不修改原模型环境，不构建新镜像。
+
+`worker.py` 启动已存在的 vLLM 后端，并验证模型身份和实际生成结果后才 Ready。
+请求容量上限为每实例 8 个在途请求；vLLM 引擎同时执行序列数为 2，其余允许请求在引擎内等待。
+排空立即拒绝新请求；在途 SSE 继续处理，240 秒预算到期时明确取消，容器退出总预算为 300 秒。
+首次启动预算为 1200 秒。健康检查失败使实例先退出就绪，再由 liveness 触发恢复；正常排队不直接触发重启。
+
+`router.py` 不实现负载均衡算法。官方 Router 负责请求转发、Power-of-two 选择、原生 Pod 发现及指标。
+补充接口对照 Pod UID 与 EndpointSlice 就绪/退出状态，发现读取失败后保留最多 15 秒缓存，
+到期拒绝新分流；既有请求继续执行。它也通过官方 `/workers` 管理 API 清除已失效注册地址。
+节点失联实验实际发现原生注册地址仍可能残留，因此保留这项一致性补充，不将它伪装成原生内置保证。
+
+驱动及本地模型需要精确的只读 hostPath，项目 Namespace 对 Pod Security admission 采用必要例外。
+模型和 Router 容器均非 privileged，不使用 hostPID/hostNetwork，禁止权限提升并移除额外 capabilities。
+Router 的 ServiceAccount 仅有项目 Namespace 内服务发现读取权限，无 Secret 读取或工作负载写权限。
+生产集群如采用经过认证的设备 runtime、CSI/PVC，可替换本地存储入口并收紧 Namespace 策略。
+
+## 实测验收记录
+
+以下时间是本次实验观测值，不是通用恢复时间或性能承诺。机器可读记录保存在忽略 Git 的 `artifacts/kubernetes/lifecycle/`。
+
+| 场景 | 已取得的结果 |
+|---|---|
+| 三节点网络 | 六个方向的 Pod IP、六个方向的 Service/DNS 和 Pod 重建通过 |
+| 单卡真实推理 | 普通生成和完整 SSE 均返回预期答案，包含 `[DONE]`，记录 Pod UID/节点/物理卡号 |
+| 双副本发现 | `.209`、`.210` 专家均被发现并实际接到请求 |
+| 手动扩缩容 | 2→3→2；新增实例自动发现，Router Pod UID 不变 |
+| 发现读取失败 | 临时拒绝 API list 权限，缓存到期后新请求返回 503，恢复权限后不重启 Router 即恢复 |
+| 删除 Pod | 新 UID 替代旧 UID，约 101 秒恢复就绪与发现 |
+| SSE 排空 | 输出期间删除模型 Pod，44 秒的 SSE 完整结束；约 93 秒恢复目标副本 |
+| 引擎失去响应 | SIGSTOP 仅作用于自有模型进程组；约 43 秒退出 Ready、225 秒容器重启、322 秒恢复 |
+| 自愿维护 | cordon/drain `.209`，两个专家在 `.210` 恢复，保留一份路由容量；约 98 秒完成容量迁移，随后 uncordon 并恢复分布 |
+
+未做物理服务器断电、NPU 硬件损伤注入，也未宣称能恢复已被截断的生成请求。
+节点容器停止测试与真实物理机故障必须分别记录；不能用前者替代后者的生产认证。
+
+## 常用操作与回滚
+
+```bash
+python3 scripts/manage_pool.py render
+python3 scripts/manage_pool.py prepare-router
+python3 scripts/manage_pool.py apply
+python3 scripts/manage_pool.py router
+python3 scripts/manage_pool.py verify
+python3 scripts/verify_lifecycle.py routing
+python3 scripts/verify_lifecycle.py scale
+python3 scripts/verify_lifecycle.py delete
+python3 scripts/verify_lifecycle.py drain
+python3 scripts/verify_lifecycle.py cache
+python3 scripts/verify_lifecycle.py shortage
+```
+
+故障和维护命令只针对配置中固定的自有实验节点，结束后恢复原 Docker ID 和部署目标。
+运行 `engine`、`maintenance`、`node_failure` 前确认没有本项目之外的流量依赖这些实例。
+更新使用 `maxSurge:0/maxUnavailable:1`，无需备用卡；单副本更新会中断，双副本更新保留部分容量。
+PDB `minAvailable:1` 约束自愿驱逐，不替代更新策略或保证节点故障下的可用性。
+回滚应在实验控制平面中 `kubectl rollout undo deployment/<pool> -n heteroserve`，
+同时恢复对应 Git 版本的运行 ConfigMap 和池配置，再做真实模型与路由验收；不能只回滚副本数量。
+
+## 监控
+
+由于没有已有监控，本次只创建一套固定 ARM64 镜像的 Prometheus、Grafana 和 kube-state-metrics。
+`deploy/monitoring/stack.yaml` 可复现配置；镜像平台 digest 固定在 `images.json`。
+Prometheus 保留 7 天、TSDB 数据规模上限 5 GB；数据使用独立 Retain 本地 PV，清理实验不删除有效监控数据。
+Grafana 使用生成的私有 Secret，管理员密码只保存在 `.217` 的
+`/root/zhangjinhao/LLM-Serving-System/state/monitoring/grafana-admin-password`（0600），不进入 Git、命令参数或日志。
+一次校验命令的错误输出曾包含初始凭据，已通过标准输入重置密码、更新 Secret 并验证新凭据。
+
+已确认全部推理抓取目标正常，能够查询 3 个 Ready 节点、16 个 NPU 资源、Pod 重启、专家就绪及原生 vLLM TTFT 指标。
+Grafana 已自动加载 `heteroserve` 面板，共 8 个图表。服务仅使用内部 Service；按需使用受控端口转发访问。
+
+## 参考资料
 
 - [K3s Docker server/agent](https://docs.k3s.io/advanced#running-k3s-in-docker)
 - [K3s 跨节点网络选项](https://docs.k3s.io/networking/basic-network-options)

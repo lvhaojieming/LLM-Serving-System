@@ -1,19 +1,25 @@
 # LLM Serving System
 
-面向昇腾的 LLM 推理系统。当前先完成 Kubernetes 部署与控制能力验收，验收后再重构应用层。
+面向昇腾的 Kubernetes 推理工程。实例生命周期由 Kubernetes 管理，负载均衡与动态发现复用官方 vLLM Router。
+应用只提供真实模型准入、健康检查、排空和发现一致性接口，不重新实现推理引擎或负载均衡算法。
 
 实验采用独立的跨物理主机 K3s 容器集群，管理凭据由实验控制平面生成。
 原共享集群的 kubelet、凭据和暂停服务保持原状。实验基础设施长期复用，参数通过配置调整。
 
 | 入口 | 用途 |
 |---|---|
-| `deploy/lab/cluster.json` | 两机实验集群的固定镜像、端口、网段及资源上限 |
+| `deploy/lab/cluster.json` | 三机实验集群的固定容器 ID、镜像、端口及网段 |
 | `scripts/manage_lab.py` | 预检、创建或复用实验节点、查询状态与跨机验收 |
 | `deploy/lab/npu.json` | 固定实验节点的昇腾镜像与验证资源预算 |
 | `scripts/manage_npu.py` | 驱动占用预检、NPU 分配与计算验收、受限清理 |
 | `deploy/k8s/` | 通用项目权限、网络与暂停状态的 NPU 验证模板 |
 | `scripts/check_kubernetes.py` | Kustomize 渲染、固定 OpenAPI schema 与部署约束检查 |
 | `docs/deployment.md` | 部署边界、权限、版本和验收步骤 |
+| `deploy/pools/ascend-awq.json` | 专家池、模型版本、副本、启动及退出预算 |
+| `deploy/k8s/pools/` | 可渲染的专家与 vLLM Router 部署入口 |
+| `scripts/manage_pool.py` | 渲染、发布、复用 Router 依赖及真实模型验收 |
+| `scripts/verify_lifecycle.py` | 扩缩容、发现、恢复、排空和维护验收 |
+| `deploy/monitoring/` | 一套固定镜像的 Prometheus/Grafana/kube-state-metrics |
 
 在获准使用节点且具备宿主机容器权限的管理机中运行：
 
@@ -28,8 +34,9 @@ python3 scripts/manage_lab.py verify
 `verify` 只在实验集群的验证命名空间创建 CPU HTTP 探针，验证跨机 Pod IP、Service/DNS 和 Deployment 重建。
 它不启动已有推理服务，也不证明 NPU 分配或真实模型推理已经通过。
 
-当前两机网络及 `.209` 的两只普通 Pod NPU 分配与矩阵计算已通过，复现步骤和适用边界见 `docs/deployment.md`。
-真实模型 Pod 尚未验收。
+三节点网络及 `.209`、`.210` 的 NPU 分配和计算已验证。真实 AWQ 专家的普通/SSE 推理、
+双副本发现、扩缩容、Pod 删除恢复、API 读取失败时的缓存过期和在途 SSE 排空均已实际验收。
+详细范围、故障恢复时间和仍未验证的项目见 `docs/deployment.md`；不能把实验通过当作所有目标集群的生产认证。
 
 当前实验资源策略为 `resource_limits_enabled=false`：外层容器的 CPU、内存及进程上限和项目 Pod 的
 CPU/内存 limits 已取消，项目验证配额已删除；NPU 按卡分配保留。原地操作入口为 `scripts/manage_lab.py unlimit`。
@@ -41,3 +48,17 @@ python -m pytest -q tests
 ```
 
 不得将 CPU 验收、静态 YAML 校验或普通 Node Ready 当作昇腾生产部署验收。
+
+专家池操作在已有部署目录执行，不需要重建镜像或模型容器：
+
+```bash
+python3 scripts/manage_pool.py prepare-router
+python3 scripts/manage_pool.py apply
+python3 scripts/manage_pool.py router
+python3 scripts/manage_pool.py verify
+python3 scripts/verify_lifecycle.py routing
+```
+
+`worker.py` 在实例中管理已存在的 vLLM 后端，启动后必须真实生成验收答案才能 Ready。
+`router.py` 使用官方 vLLM Router 的数据面和 worker 管理 API；补充 EndpointSlice/Pod UID 核对、
+有限发现缓存和请求准入。所有服务使用内部 Service，不默认公开推理端口。

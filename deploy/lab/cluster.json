@@ -11,15 +11,49 @@
   "cpus_per_node": 4,
   "memory_per_node": "8g",
   "resource_limits_enabled": false,
-  "network_tuning": {"flannel_tx_checksum_offload": false},
+  "fingerprint_node_hosts": [
+    "10.107.206.217",
+    "10.107.206.209"
+  ],
+  "new_node_hosts": [],
+  "network_tuning": {
+    "flannel_tx_checksum_offload": false
+  },
   "state_directory": "/root/zhangjinhao/LLM-Serving-System/state",
   "locked_container_ids": {
     "10.107.206.209": "40f8386de710839112eaca7d8e1a67763ba5985be9600a032db0b9c7b6d2e5f0",
-    "10.107.206.217": "7a18461b7d3e644a07d1c2d018f07ca8d196ea8fa49e8661ab02a352f0a39a54"
+    "10.107.206.217": "7a18461b7d3e644a07d1c2d018f07ca8d196ea8fa49e8661ab02a352f0a39a54",
+    "10.107.206.210": "5beb6dbc902e42a8111a25d232de426568b2956f6e90496dfe2abe273ae462ea"
   },
   "nodes": [
-    {"host": "10.107.206.217", "role": "server", "subnet": "172.29.217.0/24", "address": "172.29.217.2"},
-    {"host": "10.107.206.209", "role": "agent", "subnet": "172.29.209.0/24", "address": "172.29.209.2"}
+    {
+      "host": "10.107.206.217",
+      "role": "server",
+      "subnet": "172.29.217.0/24",
+      "address": "172.29.217.2"
+    },
+    {
+      "host": "10.107.206.209",
+      "role": "agent",
+      "subnet": "172.29.209.0/24",
+      "address": "172.29.209.2"
+    },
+    {
+      "host": "10.107.206.210",
+      "role": "agent",
+      "subnet": "172.29.210.0/24",
+      "address": "172.29.210.2"
+    }
   ],
-  "available_hosts": ["10.107.206.209", "10.107.206.210", "10.107.206.211", "10.107.206.212", "10.107.206.213", "10.107.206.214", "10.107.206.215", "10.107.206.216", "10.107.206.217"]
+  "available_hosts": [
+    "10.107.206.209",
+    "10.107.206.210",
+    "10.107.206.211",
+    "10.107.206.212",
+    "10.107.206.213",
+    "10.107.206.214",
+    "10.107.206.215",
+    "10.107.206.216",
+    "10.107.206.217"
+  ]
 }

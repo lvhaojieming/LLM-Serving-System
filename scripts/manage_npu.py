@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import re
 import time
+import os
 
 from manage_lab import ROOT, OWNER, kubectl, load_config, names, remote, resource_policy
 
@@ -45,6 +46,7 @@ def preflight():
 def configuration():
     cluster = load_config(ROOT / "deploy/lab/cluster.json")
     npu = json.loads((ROOT / "deploy/lab/npu.json").read_text(encoding="utf-8"))
+    npu["host"] = os.environ.get("HETEROSERVE_NPU_HOST", npu["host"])
     node = next(n for n in cluster["nodes"] if n["host"] == npu["host"])
     name, _, volume = names(cluster, node)
     for fixed_node in cluster["nodes"]:
@@ -54,9 +56,11 @@ def configuration():
     return cluster, npu, node, name, volume
 
 
-def publish():
+def publish(driver_only=False):
     cluster, npu, node, name, volume = configuration()
     mapping = {"driver": npu["driver_source"], "model": npu["model_source"], "adapter": npu["adapter_source"]}
+    if driver_only:
+        mapping = {"driver": mapping["driver"]}
     publisher = """import json,os,sys,subprocess,shutil
 from pathlib import Path
 volume,owner,mapping=sys.argv[1],sys.argv[2],json.loads(sys.argv[3])
@@ -124,7 +128,10 @@ def plugin_objects(cluster, npu, node):
         ("containerd", "/run/k3s/containerd", "/run/containerd", True),
     ]
     labels = {OWNER: cluster["name"], "app": "ascend-device-plugin"}
-    pod = {"serviceAccountName": service_account, "nodeSelector": {"kubernetes.io/hostname": names(cluster, node)[0]},
+    target_nodes = [names(cluster, n)[0] for n in cluster["nodes"] if n["host"] in npu.get("device_hosts", [npu["host"]])]
+    pod = {"serviceAccountName": service_account,
+           "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{
+               "matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": target_nodes}]}]}}},
            "hostPID": True, "containers": [{"name": "device-plugin", "image": npu["plugin_image"], "imagePullPolicy": "Never",
                "command": ["/bin/bash", "-ec"],
                "args": ["mkdir -p /var/log/mindx-dl/devicePlugin; exec device-plugin -volcanoType=false -presetVirtualDevice=true -hotReset=-1 -logFile=/var/log/mindx-dl/devicePlugin/devicePlugin.log -logLevel=0"],
@@ -242,7 +249,7 @@ def isolation_results():
     result = {"passed": passed, "pods": reports, "distinct_assignments": assigned[0] != assigned[1],
               "concurrent_allocation": concurrent_allocation, "compute_execution": "sequential",
               "fixed_containers_preserved": True}
-    path = ROOT / "artifacts/kubernetes/npu-isolation.json"
+    path = ROOT / "artifacts/kubernetes/npu" / npu["host"].rsplit(".", 1)[1] / "isolation.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
@@ -266,9 +273,12 @@ def cleanup():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["preflight", "publish", "plugin", "status", "isolation", "isolation-results", "cleanup"])
+    parser.add_argument("action", choices=["preflight", "publish", "publish-driver", "plugin", "status", "isolation", "isolation-results", "cleanup"])
+    parser.add_argument("--host", help="Authorized lab host to inspect or validate")
     args = parser.parse_args()
-    {"preflight": preflight, "publish": publish, "plugin": plugin, "status": status, "isolation": isolation,
+    if args.host:
+        os.environ["HETEROSERVE_NPU_HOST"] = args.host
+    {"preflight": preflight, "publish": publish, "publish-driver": lambda: publish(driver_only=True), "plugin": plugin, "status": status, "isolation": isolation,
      "isolation-results": isolation_results, "cleanup": cleanup}[args.action]()
 
 

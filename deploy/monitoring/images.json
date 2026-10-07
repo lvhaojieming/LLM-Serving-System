@@ -1,0 +1,17 @@
+[
+  {
+    "name": "prometheus",
+    "version": "v3.15.0",
+    "image": "docker.io/prom/prometheus@sha256:6b41f7a45cfbd1d259a78701ee5e14fc2ad9383c9aa5d0427345a18539bc3c91"
+  },
+  {
+    "name": "grafana",
+    "version": "13.2.3",
+    "image": "docker.io/grafana/grafana@sha256:c474a2845f8cd51bf09c3f24e036225912fdb21cd0c87ac89527c395585bfa22"
+  },
+  {
+    "name": "kube-state-metrics",
+    "version": "v2.20.0",
+    "image": "registry.k8s.io/kube-state-metrics/kube-state-metrics@sha256:92b46557c71ecac53825772e4827dbcd9fca876b1950060f8fb2f2ef0d7a27af"
+  }
+]

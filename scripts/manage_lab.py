@@ -45,8 +45,12 @@ def load_config(path):
         raise ValueError("Unexpected lab data directory")
     if len([n for n in config["nodes"] if n["role"] == "server"]) != 1:
         raise ValueError("The pilot requires exactly one server")
-    if set(config.get("locked_container_ids", {})) != {n["host"] for n in config["nodes"]}:
-        raise ValueError("Every fixed lab node must have a locked container identity")
+    locked = set(config.get("locked_container_ids", {}))
+    joining = set(config.get("new_node_hosts", []))
+    if locked & joining or locked | joining != {n["host"] for n in config["nodes"]}:
+        raise ValueError("Every node must have a fixed identity or explicit join authorization")
+    if any(n["role"] != "agent" for n in config["nodes"] if n["host"] in joining):
+        raise ValueError("Only additional agents may join the fixed control plane")
     if any(not re.fullmatch(r"[0-9a-f]{64}", ident) for ident in config["locked_container_ids"].values()):
         raise ValueError("Locked container identities must be 64 hexadecimal characters")
     if config["cpus_per_node"] != 4 or config["memory_per_node"] != "8g":
@@ -91,7 +95,9 @@ def names(config, node):
 
 def node_args(config, node):
     name, network, volume = names(config, node)
-    identity_config = {k: v for k, v in config.items() if k not in {"image_config_id", "network_tuning", "locked_container_ids", "resource_limits_enabled"}}
+    identity_config = {k: v for k, v in config.items() if k not in {"image_config_id", "network_tuning", "locked_container_ids", "resource_limits_enabled", "fingerprint_node_hosts", "new_node_hosts"}}
+    if config.get("fingerprint_node_hosts"):
+        identity_config["nodes"] = [n for n in config["nodes"] if n["host"] in config["fingerprint_node_hosts"]]
     fingerprint = hashlib.sha256(json.dumps({"cluster": identity_config, "node": node}, sort_keys=True).encode()).hexdigest()
     argv = ["docker", "run", "-d", "--name", name, "--hostname", name,
             "--label", OWNER + "=" + config["name"], "--label", OWNER + ".config=" + fingerprint,
@@ -165,7 +171,7 @@ def ensure_node(config, node):
     print(json.dumps({"event": "node_created", "host": node["host"], "container": name}), flush=True)
 
 
-def kubectl(config, argv, stdin=None):
+def kubectl(config, argv, stdin=None, timeout=90):
     server = next(n for n in config["nodes"] if n["role"] == "server")
     name, _, _ = names(config, server)
     labels = remote(server["host"], ["docker", "inspect", name, "--format", "{{json .Config.Labels}}"])
@@ -173,10 +179,10 @@ def kubectl(config, argv, stdin=None):
         raise RuntimeError("Refusing to use an unowned control plane")
     return remote(server["host"], ["docker", "exec", "-i", name, "kubectl",
                                    "--kubeconfig", "/etc/rancher/k3s/k3s.yaml",
-                                   "--request-timeout=10s", *argv], stdin=stdin)
+                                   "--request-timeout=10s", *argv], stdin=stdin, timeout=timeout)
 
 
-def up(config):
+def up(config, config_path=None):
     preflight(config)
     server = next(n for n in config["nodes"] if n["role"] == "server")
     ensure_node(config, server)
@@ -196,6 +202,14 @@ def up(config):
         writer = "import os,sys; p=sys.argv[1]; os.makedirs(p,mode=0o700,exist_ok=True); os.chmod(p,0o700); f=os.open(p+'/join-token',os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600); os.fchmod(f,0o600); os.write(f,sys.stdin.buffer.read()); os.close(f)"
         remote(node["host"], ["python3", "-c", writer, config["state_directory"]], stdin=token)
         ensure_node(config, node)
+        if node["host"] in config.get("new_node_hosts", []):
+            identity = remote(node["host"], ["docker", "inspect", names(config, node)[0], "--format", "{{.Id}}"]).stdout.strip()
+            if not re.fullmatch(r"[0-9a-f]{64}", identity):
+                raise RuntimeError("New node did not return a complete Docker identity")
+            config["locked_container_ids"][node["host"]] = identity
+            config["new_node_hosts"].remove(node["host"])
+            Path(config_path or ROOT / "deploy/lab/cluster.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+            print(json.dumps({"event": "new_node_identity_locked", "host": node["host"], "container_id": identity}), flush=True)
     apply_network_tuning(config)
     print(kubectl(config, ["get", "nodes", "-o", "wide"]).stdout, flush=True)
 
@@ -277,6 +291,15 @@ def apply_network_tuning(config):
     payload = json.dumps(network_tuning_object(config))
     kubectl(config, ["apply", "--dry-run=server", "-f", "-"], stdin=payload)
     kubectl(config, ["apply", "-f", "-"], stdin=payload)
+    deadline = time.monotonic() + 240
+    while True:
+        daemon = json.loads(kubectl(config, ["get", "daemonset", config["name"] + "-network", "-n", "kube-system", "-o", "json"]).stdout)
+        status = daemon.get("status", {})
+        if status.get("numberReady") == len(config["nodes"]) and status.get("desiredNumberScheduled") == len(config["nodes"]):
+            break
+        if time.monotonic() >= deadline:
+            raise TimeoutError("All node network helpers must be Ready before cross-node validation")
+        time.sleep(3)
     print(json.dumps({"event": "network_tuning_applied", "scope": "private_lab_node_namespaces"}), flush=True)
 
 
@@ -417,7 +440,7 @@ def main():
     elif args.action == "preflight":
         preflight(config)
     elif args.action == "up":
-        up(config)
+        up(config, args.config)
     elif args.action == "verify":
         verify(config)
     elif args.action == "unlimit":
