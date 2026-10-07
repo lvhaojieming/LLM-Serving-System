@@ -1,0 +1,52 @@
+{
+  "host": "0.0.0.0",
+  "port": 8000,
+  "max_inflight": 16,
+  "max_request_bytes": 2097152,
+  "timeout_seconds": 180,
+  "default_max_tokens": 128,
+  "drain_seconds": 240,
+  "router": {
+    "checkpoint": "/assets/router/checkpoint_best.pt",
+    "checkpoint_sha256": "03c64f8099e3ab0c641e8584480cf0f1710a4da96478d59e4d460227b9870529",
+    "tokenizer": "/assets/router/tokenizer",
+    "training_code": "/assets/router/architecture",
+    "embedding_model": "/assets/router/embedding",
+    "device": "npu:0",
+    "expert_mapping": {
+      "qwen3-14b/awq-w4a16/v1": "awq",
+      "qwen3-14b/gptq-w4a16/v1": "gptq"
+    },
+    "embedding_graph": false,
+    "graph_buckets": [64, 128, 256, 512, 1024],
+    "graph_threshold_margin": 0.01
+  },
+  "pools": {
+    "awq": {
+      "enabled": true,
+      "base_url": "http://awq-ascend910b-vllm-router.heteroserve.svc.cluster.local:8000/v1",
+      "model": "awq"
+    },
+    "gptq": {
+      "enabled": false,
+      "base_url": null,
+      "model": "gptq"
+    }
+  },
+  "deployment": {
+    "node": "heteroserve-lab-209",
+    "asset_path": "/var/lib/rancher/k3s/heteroserve-assets/router-model",
+    "asset_source_host": "10.107.206.212",
+    "asset_source_root": "/root/zhangjinhao/router-single-npu",
+    "source_checkpoint": "router-training/contextual-multitask-v7/mlp-seed20261005/checkpoint_best.pt",
+    "source_embedding": "models/Qwen3-Embedding-0.6B",
+    "source_tokenizer": "router-base-embedding",
+    "source_architecture": "MLsys/src/moqe_router"
+  },
+  "migration_source": {
+    "repository": "https://github.com/lvhaojieming/MLsys_inference.git",
+    "commit": "5c81fe24085c9c1260dcb9cf9001909261d52328",
+    "score_semantics": "expert_probabilities",
+    "selection_policy": "checkpoint_binary_threshold"
+  }
+}

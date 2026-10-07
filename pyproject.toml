@@ -12,6 +12,7 @@ dependencies = ["fastapi>=0.110", "httpx>=0.27", "uvicorn>=0.29"]
 [project.scripts]
 heteroserve-worker = "heteroserve.worker:main"
 heteroserve-router = "heteroserve.router:main"
+heteroserve-gateway = "heteroserve.gateway:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

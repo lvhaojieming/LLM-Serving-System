@@ -202,6 +202,39 @@ Router 的 ServiceAccount 仅有项目 Namespace 内服务发现读取权限，�
 
 ## 常用操作与回滚
 
+一级 Router 迁移来源为 `MLsys_inference` 提交 `5c81fe24085c9c1260dcb9cf9001909261d52328`，
+复用 `routing/ascend.py`、`runtime.py`、`embedding_graph.py` 和 Gateway 的输入校验/模板与 SSE 处理。
+来源代码采用本仓库 LICENSE 所保留的 MIT 许可。旧工程保留原状；不迁入 SSH 后端进程控制、实例选择和容器启停。
+在线链路为 `Gateway + learned probability Router -> expert pool Service -> official vLLM Router -> model Pod`。
+V7 checkpoint 输出专家概率，二专家阈值从 checkpoint 读取；不将其当作 regret 或改成 argmax。
+启动验证 checkpoint SHA-256 与输出 ID 映射，仅加载并执行推理，不训练。
+当前只有 AWQ 池可服务；预测 GPTQ 时返回 503，禁止把它伪装成 AWQ。
+Gateway 的 `/ready` 返回 `auto_expert_coverage_complete:false` 表示专家覆盖不完整，不能据此认定多专家链路已完成。
+一级 Gateway 另外独占一张 NPU，用于 embedding encoder；这张卡应计入系统资源成本。
+初版关闭可选 embedding graph，图捕获路径尚未在当前镜像重新验收。
+
+正式一级入口配置是 `deploy/gateway.json`，在管理服务器执行：
+
+```bash
+python3 scripts/manage_gateway.py prepare
+python3 scripts/manage_gateway.py apply
+python3 scripts/manage_gateway.py status
+python3 scripts/manage_gateway.py verify
+```
+
+`prepare` 从已有 `.212` 训练资产读取固定 checkpoint、tokenizer、embedding 和匹配架构包，
+发布到 `.209` 现有节点卷并保留逐文件 SHA-256；不启动原暂停服务，也不安装新环境或构建镜像。
+后续复用已发布的资产，只更新配置与代码时直接 `apply`。
+`render` 生成 `deploy/k8s/gateway.yaml`，不直接编辑生成文件；管理服务器无需安装 PyYAML 才能 `apply`。
+Gateway 单副本采用 Recreate，更新会暂时中断一级入口，已有二级路由与模型部署独立保留。
+
+一级迁移实测：真实 checkpoint 对六条测试输入均输出 AWQ/GPTQ 概率；预测 AWQ 的请求经过池 Service、
+二级 Router 到真实模型，普通和 SSE 均成功；预测 GPTQ 的三个输入明确返回 503。
+输入 `17 + 25` 的 AWQ/GPTQ 概率约为 `0.51519/0.48481`，按原阈值选择 AWQ。
+一级路由观测时间约 62–68 ms，仅为这些短输入的诊断结果，不是吞吐或 SLO 承诺。
+请求结束后一级在途计数归零；完整记录保存在 `artifacts/kubernetes/learned-gateway.json`。
+当前复用镜像中的 torch/torch_npu 2.5.1、transformers 4.51.3，未为迁移重新安装依赖。
+
 ```bash
 python3 scripts/manage_pool.py render
 python3 scripts/manage_pool.py prepare-router

@@ -2,6 +2,8 @@
 
 面向昇腾的 Kubernetes 推理工程。实例生命周期由 Kubernetes 管理，负载均衡与动态发现复用官方 vLLM Router。
 当前采用一个二级 Router 统一维护池入口计数，调度两个模型副本；跨 Router 协调后置。
+一级概率 Router 已从 `MLsys_inference` 迁入 `heteroserve.routing`，Gateway 通过池 Service 接入二级路由。
+入口配置为 `deploy/gateway.json`；当前仅 AWQ 池可用，预测到未部署 GPTQ 时明确返回 503，不自动改选。
 应用只提供真实模型准入、健康检查、排空和发现一致性接口，不重新实现推理引擎或负载均衡算法。
 
 实验采用独立的跨物理主机 K3s 容器集群，管理凭据由实验控制平面生成。

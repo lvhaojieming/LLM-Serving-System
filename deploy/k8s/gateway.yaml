@@ -1,0 +1,510 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: heteroserve-gateway
+  namespace: heteroserve
+  labels:
+    app.kubernetes.io/part-of: heteroserve
+    app.kubernetes.io/name: gateway
+    io.heteroserve.lab: heteroserve-lab
+data:
+  heteroserve--__init__.py: '"""Kubernetes integration interfaces for the existing
+    Ascend inference runtime."""
+
+    '
+  heteroserve--gateway.py: "\"\"\"Learned expert selection above Kubernetes pool Services.\n\
+    \nRouting validation and response-model rewriting are migrated from\nMLsys_inference.\
+    \ Kubernetes and the official L2 Router own replica lifecycle.\n\"\"\"\nimport\
+    \ argparse\nimport asyncio\nfrom contextlib import asynccontextmanager\nfrom dataclasses\
+    \ import asdict\nimport json\nimport logging\nimport math\nfrom pathlib import\
+    \ Path\nimport time\nimport uuid\n\nimport httpx\nfrom fastapi import FastAPI,\
+    \ HTTPException, Request\nfrom fastapi.responses import JSONResponse, StreamingResponse\n\
+    import uvicorn\n\nfrom .routing.runtime import RouterSettings\n\nlog = logging.getLogger(\"\
+    heteroserve.gateway\")\n\n\ndef validate(config):\n    settings = RouterSettings(**config[\"\
+    router\"])\n    if set(settings.expert_mapping.values()) != set(config[\"pools\"\
+    ]):\n        raise ValueError(\"Every checkpoint expert must have an explicit\
+    \ pool entry\")\n    for pool in config[\"pools\"].values():\n        if pool.get(\"\
+    enabled\", True) and (not isinstance(pool.get(\"base_url\"), str) or not pool[\"\
+    base_url\"].startswith(\"http://\")):\n            raise ValueError(\"Enabled\
+    \ pools need an internal HTTP Service URL\")\n    if type(config.get(\"max_inflight\"\
+    , 16)) is not int or config.get(\"max_inflight\", 16) < 1:\n        raise ValueError(\"\
+    Gateway requires a positive request budget\")\n    return settings\n\n\ndef create_app(config,\
+    \ transport=None, router_runtime=None):\n    settings = validate(config)\n   \
+    \ state = {\"inflight\": 0, \"draining\": False, \"router_calls\": 0, \"rejected\"\
+    : 0}\n    runtime = router_runtime\n    routing_slot = asyncio.Semaphore(1)\n\n\
+    \    @asynccontextmanager\n    async def lifespan(app):\n        nonlocal runtime\n\
+    \        if runtime is None:\n            from .routing.ascend import AscendRouterRuntime\n\
+    \            runtime = await asyncio.to_thread(AscendRouterRuntime, settings)\n\
+    \        async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(config.get(\"\
+    timeout_seconds\", 180)), trust_env=False) as client:\n            app.state.client\
+    \ = client\n            app.state.runtime = runtime\n            yield\n     \
+    \       state[\"draining\"] = True\n\n    app = FastAPI(lifespan=lifespan)\n \
+    \   app.state.gateway = state\n\n    @app.get(\"/live\")\n    async def live():\n\
+    \        return {\"live\": True}\n\n    @app.get(\"/ready\")\n    async def ready():\n\
+    \        if runtime is None or state[\"draining\"]:\n            raise HTTPException(503,\
+    \ \"learned gateway is unavailable\")\n        for pool in config[\"pools\"].values():\n\
+    \            if not pool.get(\"enabled\", True):\n                continue\n \
+    \           try:\n                response = await app.state.client.get(pool[\"\
+    base_url\"].removesuffix(\"/v1\") + \"/ready\", timeout=3)\n                if\
+    \ response.status_code == 200:\n                    return {\"ready\": True, \"\
+    auto_expert_coverage_complete\": all(p.get(\"enabled\", True) for p in config[\"\
+    pools\"].values())}\n            except httpx.HTTPError:\n                pass\n\
+    \        raise HTTPException(503, \"no ready downstream expert pool\")\n\n   \
+    \ @app.get(\"/v1/models\")\n    async def models():\n        ids = [\"auto\"]\
+    \ + [key for key, pool in config[\"pools\"].items() if pool.get(\"enabled\", True)]\n\
+    \        return {\"object\": \"list\", \"data\": [{\"id\": key, \"object\": \"\
+    model\", \"owned_by\": \"heteroserve\"} for key in ids]}\n\n    @app.get(\"/metrics\"\
+    )\n    async def metrics():\n        from fastapi.responses import Response\n\
+    \        return Response(\"\\n\".join([f\"heteroserve_gateway_inflight {state['inflight']}\"\
+    ,\n            f\"heteroserve_gateway_router_calls_total {state['router_calls']}\"\
+    ,\n            f\"heteroserve_gateway_rejected_total {state['rejected']}\", \"\
+    \"]), media_type=\"text/plain\")\n\n    @app.post(\"/drain\")\n    async def drain(request:\
+    \ Request):\n        if request.client is None or request.client.host not in {\"\
+    127.0.0.1\", \"::1\"}:\n            raise HTTPException(403, \"drain is local-only\"\
+    )\n        state[\"draining\"] = True\n        deadline = time.monotonic() + config.get(\"\
+    drain_seconds\", 240)\n        while state[\"inflight\"] and time.monotonic()\
+    \ < deadline:\n            await asyncio.sleep(.05)\n        return {\"draining\"\
+    : True, \"remaining_requests\": state[\"inflight\"]}\n\n    @app.post(\"/v1/chat/completions\"\
+    )\n    async def chat(request: Request):\n        if state[\"draining\"]:\n  \
+    \          raise HTTPException(503, \"gateway is draining\")\n        if state[\"\
+    inflight\"] >= config.get(\"max_inflight\", 16):\n            state[\"rejected\"\
+    ] += 1\n            raise HTTPException(429, \"gateway request budget reached\"\
+    , headers={\"Retry-After\": \"1\"})\n        state[\"inflight\"] += 1\n      \
+    \  trace = uuid.uuid4().hex\n        upstream = None\n        streaming = False\n\
+    \        decision = None\n        selected = None\n        async def cleanup():\n\
+    \            try:\n                if upstream is not None:\n                \
+    \    await upstream.aclose()\n            finally:\n                state[\"inflight\"\
+    ] -= 1\n                log.info(json.dumps({\"event\": \"gateway_request_finished\"\
+    , \"request_id\": trace, \"selected_expert\": selected,\n                    \"\
+    decision\": asdict(decision) if decision else None}))\n        try:\n        \
+    \    body = bytearray()\n            async for chunk in request.stream():\n  \
+    \              body.extend(chunk)\n                if len(body) > config.get(\"\
+    max_request_bytes\", 2 * 1024 * 1024):\n                    raise HTTPException(413,\
+    \ \"request body exceeds budget\")\n            try:\n                payload\
+    \ = json.loads(body)\n            except ValueError:\n                raise HTTPException(400,\
+    \ \"request must be valid JSON\")\n            if not isinstance(payload, dict):\n\
+    \                raise HTTPException(400, \"request must be a JSON object\")\n\
+    \            requested = payload.get(\"model\")\n            if not isinstance(requested,\
+    \ str) or requested not in {\"auto\", *config[\"pools\"]}:\n                raise\
+    \ HTTPException(400, \"model must name auto or a configured expert\")\n      \
+    \      if not isinstance(payload.get(\"stream\", False), bool):\n            \
+    \    raise HTTPException(400, \"stream must be boolean\")\n            messages\
+    \ = payload.get(\"messages\")\n            if not isinstance(messages, list) or\
+    \ not messages:\n                raise HTTPException(400, \"messages must be a\
+    \ nonempty list\")\n            selected = requested\n            if requested\
+    \ == \"auto\":\n                if any(not isinstance(m, dict) or m.get(\"role\"\
+    ) not in {\"system\", \"user\", \"assistant\"} or not isinstance(m.get(\"content\"\
+    ), str) for m in messages):\n                    raise HTTPException(400, \"automatic\
+    \ routing requires plain text messages\")\n                if any(k in payload\
+    \ for k in (\"tools\", \"tool_choice\", \"chat_template\", \"documents\", \"add_generation_prompt\"\
+    , \"continue_final_message\", \"truncate_prompt_tokens\", \"add_special_tokens\"\
+    , \"chat_template_content_format\")):\n                    raise HTTPException(400,\
+    \ \"automatic routing uses the canonical chat template\")\n                generation\
+    \ = payload.get(\"max_tokens\", config.get(\"default_max_tokens\", 128))\n   \
+    \             if \"max_completion_tokens\" in payload or type(generation) is not\
+    \ int or generation <= 0:\n                    raise HTTPException(400, \"use\
+    \ a positive integer max_tokens\")\n                kwargs = payload.get(\"chat_template_kwargs\"\
+    , {\"enable_thinking\": False})\n                if not isinstance(kwargs, dict)\
+    \ or set(kwargs) - {\"enable_thinking\"} or type(kwargs.get(\"enable_thinking\"\
+    , False)) is not bool:\n                    raise HTTPException(400, \"only boolean\
+    \ enable_thinking is supported\")\n                kwargs = {\"enable_thinking\"\
+    : kwargs.get(\"enable_thinking\", False)}\n                try:\n            \
+    \        async with routing_slot:\n                        decision = await asyncio.to_thread(runtime.route,\
+    \ messages, generation, kwargs)\n                    state[\"router_calls\"] +=\
+    \ 1\n                except ValueError as exc:\n                    raise HTTPException(400,\
+    \ str(exc)) from exc\n                if set(decision.probabilities) != set(config[\"\
+    pools\"]) or not all(math.isfinite(p) and 0 <= p <= 1 for p in decision.probabilities.values())\
+    \ or not math.isclose(sum(decision.probabilities.values()), 1, abs_tol=1e-4):\n\
+    \                    raise HTTPException(503, \"invalid router expert probabilities\"\
+    )\n                selected = decision.expert\n                payload.update(max_tokens=generation,\
+    \ chat_template=runtime.chat_template, chat_template_kwargs=kwargs)\n        \
+    \    pool = config[\"pools\"].get(selected)\n            if not pool or not pool.get(\"\
+    enabled\", True):\n                raise HTTPException(503, \"router selected\
+    \ an undeployed expert; automatic fallback is disabled\")\n            payload[\"\
+    model\"] = pool[\"model\"]\n            upstream = await app.state.client.send(app.state.client.build_request(\"\
+    POST\", pool[\"base_url\"].rstrip(\"/\") + \"/chat/completions\",\n          \
+    \      json=payload, headers={\"x-request-id\": trace}), stream=True)\n      \
+    \      headers = {\"x-request-id\": trace, \"x-moqe-expert\": selected}\n    \
+    \        for name in [\"x-heteroserve-pod-uid\", \"x-heteroserve-node\"]:\n  \
+    \              if name in upstream.headers:\n                    headers[name]\
+    \ = upstream.headers[name]\n            if decision:\n                headers.update({\"\
+    x-moqe-router-ms\": str(decision.elapsed_ms), \"x-moqe-input-tokens\": str(decision.input_tokens)})\n\
+    \            if upstream.status_code != 200:\n                if \"retry-after\"\
+    \ in upstream.headers:\n                    headers[\"retry-after\"] = upstream.headers[\"\
+    retry-after\"]\n                return JSONResponse({\"error\": {\"message\":\
+    \ \"expert pool rejected request\", \"upstream_status\": upstream.status_code}},\n\
+    \                                    status_code=upstream.status_code, headers=headers)\n\
+    \            if payload.get(\"stream\", False):\n                async def events():\n\
+    \                    try:\n                        async for line in upstream.aiter_lines():\n\
+    \                            if line.startswith(\"data:\") and line[5:].strip()\
+    \ != \"[DONE]\":\n                                event = json.loads(line[5:])\n\
+    \                                if isinstance(event, dict) and \"model\" in event:\n\
+    \                                    event[\"model\"] = requested\n          \
+    \                      line = \"data: \" + json.dumps(event, ensure_ascii=False)\n\
+    \                            yield (line + \"\\n\").encode()\n               \
+    \     finally:\n                        await asyncio.shield(cleanup())\n    \
+    \            streaming = True\n                return StreamingResponse(events(),\
+    \ media_type=\"text/event-stream\", headers=headers)\n            await upstream.aread()\n\
+    \            value = upstream.json()\n            value[\"model\"] = requested\n\
+    \            return JSONResponse(value, headers=headers)\n        except httpx.HTTPError\
+    \ as exc:\n            raise HTTPException(502, \"expert pool is unavailable\"\
+    ) from exc\n        finally:\n            if not streaming:\n                await\
+    \ asyncio.shield(cleanup())\n\n    return app\n\n\ndef main():\n    parser = argparse.ArgumentParser(description=__doc__)\n\
+    \    parser.add_argument(\"--config\", required=True)\n    args = parser.parse_args()\n\
+    \    config = json.loads(Path(args.config).read_text())\n    logging.basicConfig(level=logging.INFO)\n\
+    \    uvicorn.run(create_app(config), host=config.get(\"host\", \"0.0.0.0\"), port=config.get(\"\
+    port\", 8000), workers=1,\n                timeout_graceful_shutdown=config.get(\"\
+    drain_seconds\", 240) + 10)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  heteroserve--routing--__init__.py: ''
+  heteroserve--routing--runtime.py: "from dataclasses import dataclass\nfrom typing\
+    \ import Protocol\nimport hashlib\nfrom pathlib import Path\n\n\n@dataclass(frozen=True)\n\
+    class RouterSettings:\n    checkpoint: str\n    tokenizer: str\n    training_code:\
+    \ str\n    expert_mapping: dict[str, str]\n    checkpoint_sha256: str\n    device:\
+    \ str = \"npu:0\"\n    embedding_graph: bool = False\n    graph_buckets: tuple[int,\
+    \ ...] = (64, 128, 256, 512, 1024)\n    graph_threshold_margin: float = 0.01\n\
+    \    embedding_model: str | None = None\n\n    def __post_init__(self):\n    \
+    \    if not self.expert_mapping or len(set(self.expert_mapping.values())) != len(self.expert_mapping):\n\
+    \            raise ValueError(\"Checkpoint outputs must map to distinct expert\
+    \ pools\")\n        if not self.device.startswith(\"npu:\"):\n            raise\
+    \ ValueError(\"Only Ascend learned routing is supported\")\n        if len(self.checkpoint_sha256)\
+    \ != 64 or any(c not in \"0123456789abcdef\" for c in self.checkpoint_sha256):\n\
+    \            raise ValueError(\"Router checkpoint must have a pinned SHA-256\"\
+    )\n        if type(self.embedding_graph) is not bool or not self.graph_buckets\
+    \ or any(type(n) is not int or n < 2 for n in self.graph_buckets):\n         \
+    \   raise ValueError(\"Invalid embedding graph configuration\")\n        if list(self.graph_buckets)\
+    \ != sorted(set(self.graph_buckets)) or not 0 <= self.graph_threshold_margin <\
+    \ .5:\n            raise ValueError(\"Invalid graph buckets or threshold margin\"\
+    )\n\n    def verify_checkpoint(self):\n        digest = hashlib.sha256(Path(self.checkpoint).read_bytes()).hexdigest()\n\
+    \        if digest != self.checkpoint_sha256:\n            raise ValueError(\"\
+    Router checkpoint checksum mismatch\")\n\n\n@dataclass(frozen=True)\nclass RoutingDecision:\n\
+    \    expert: str\n    probabilities: dict[str, float]\n    input_tokens: int\n\
+    \    elapsed_ms: float\n\n\nclass RouterRuntime(Protocol):\n    chat_template:\
+    \ str\n\n    def route(self, messages: list[dict], max_new_tokens: int, template_kwargs:\
+    \ dict) -> RoutingDecision: ...\n"
+  heteroserve--routing--ascend.py: "\"\"\"Ascend inference for legacy and frozen contextual\
+    \ probability routers.\"\"\"\nimport sys\nimport math\nimport threading\nimport\
+    \ time\nfrom collections.abc import Mapping\nfrom pathlib import Path\n\nfrom\
+    \ .runtime import RouterSettings\nfrom .runtime import RoutingDecision\n\n\nclass\
+    \ AscendRouterRuntime:\n    def __init__(self, settings: RouterSettings):\n  \
+    \      settings.verify_checkpoint()\n        source = Path(settings.training_code)\
+    \ / \"src\"\n        if not (source / \"moqe_router/model.py\").is_file():\n \
+    \           raise ValueError(\"training_code must contain the matching moqe_router\
+    \ architecture\")\n        sys.path.insert(0, str(source))\n        import torch\n\
+    \        import torch_npu  # Registers the NPU backend.\n        from transformers\
+    \ import AutoTokenizer\n        from moqe_router.evaluation import load_router\n\
+    \n        if not settings.device.startswith(\"npu:\"):\n            raise ValueError(\"\
+    Ascend runtime requires an npu device\")\n        self.torch = torch\n       \
+    \ self.device = torch.device(settings.device)\n        torch.npu.set_device(self.device)\n\
+    \        torch.backends.mha.set_fastpath_enabled(False)\n        checkpoint =\
+    \ torch.load(settings.checkpoint, map_location=\"cpu\", weights_only=True)\n \
+    \       if checkpoint.get(\"architecture_version\") == \"frozen-contextual-expert-softmax-v2\"\
+    :\n            from moqe_router.contextual import ContextualPreferenceHead\n \
+    \           from transformers import AutoModel\n            ids = tuple(checkpoint[\"\
+    expert_ids\"])\n            if len(ids) != 2:\n                raise ValueError(\"\
+    The migrated threshold policy requires exactly two experts\")\n            if\
+    \ set(settings.expert_mapping) != set(ids) or len(set(settings.expert_mapping.values()))\
+    \ != len(ids):\n                raise ValueError(\"Expert mapping must match contextual\
+    \ checkpoint outputs\")\n            self.experts = tuple(settings.expert_mapping[id_]\
+    \ for id_ in ids)\n            self.contextual = True\n            self.threshold\
+    \ = checkpoint[\"threshold\"]\n            encoder_path = settings.embedding_model\
+    \ or checkpoint[\"settings\"][\"encoder\"]\n            self.max_prompt_tokens\
+    \ = checkpoint[\"settings\"][\"max_encoder_tokens\"]\n            if settings.embedding_graph\
+    \ and settings.graph_buckets[-1] > self.max_prompt_tokens:\n                raise\
+    \ ValueError(\"Graph bucket exceeds contextual encoder token limit\")\n      \
+    \      self.router = ContextualPreferenceHead(checkpoint[\"feature_dim\"], kind=checkpoint[\"\
+    kind\"],\n                hidden_dim=checkpoint[\"hidden_dim\"], dropout=checkpoint[\"\
+    dropout\"], num_experts=len(ids))\n            self.router.load_state_dict(checkpoint[\"\
+    head_state_dict\"])\n            self.router.eval().requires_grad_(False)\n  \
+    \          self.encoder_tokenizer = AutoTokenizer.from_pretrained(encoder_path,\
+    \ local_files_only=True)\n            self.encoder = AutoModel.from_pretrained(encoder_path,\
+    \ local_files_only=True,\n                torch_dtype=torch.bfloat16, attn_implementation=checkpoint[\"\
+    settings\"][\"attention\"]).to(self.device)\n            self.encoder.eval().requires_grad_(False)\n\
+    \            self.embedding_graphs = None\n            self.graph_threshold_margin\
+    \ = settings.graph_threshold_margin\n            if settings.embedding_graph:\n\
+    \                from .embedding_graph import EmbeddingGraphs\n              \
+    \  self.embedding_graphs = EmbeddingGraphs(self.encoder, self.device, settings.graph_buckets)\n\
+    \            self.tokenizer = AutoTokenizer.from_pretrained(settings.tokenizer,\
+    \ local_files_only=True)\n            self.chat_template = self.tokenizer.get_chat_template()\n\
+    \            if not self.chat_template:\n                raise ValueError(\"Canonical\
+    \ tokenizer must supply a chat template\")\n            self.lock = threading.Lock()\n\
+    \            self.route([{\"role\": \"user\", \"content\": \"Hello\"}], 128, {\"\
+    enable_thinking\": False})\n            return\n        if settings.embedding_graph\
+    \ or settings.embedding_model is not None:\n            raise ValueError(\"Embedding\
+    \ graph/model settings require a contextual V7 checkpoint\")\n        self.contextual\
+    \ = False\n        self.max_prompt_tokens = checkpoint[\"training_config\"][\"\
+    max_prompt_tokens\"]\n        ids = tuple(checkpoint[\"architecture_config\"][\"\
+    expert_ids\"])\n        if set(settings.expert_mapping) != set(ids):\n       \
+    \     raise ValueError(\"Expert mapping must match every checkpoint expert id\
+    \ exactly\")\n        if len(set(settings.expert_mapping.values())) != len(ids):\n\
+    \            raise ValueError(\"Each checkpoint output must map to a distinct\
+    \ expert pool\")\n        self.experts = tuple(settings.expert_mapping[id_] for\
+    \ id_ in ids)\n        del checkpoint\n        self.router, self.embedding, _\
+    \ = load_router(settings.checkpoint, self.device)\n        self.router.requires_grad_(False)\n\
+    \        self.tokenizer = AutoTokenizer.from_pretrained(settings.tokenizer, local_files_only=True)\n\
+    \        self.chat_template = self.tokenizer.get_chat_template()\n        if not\
+    \ self.chat_template:\n            raise ValueError(\"Canonical tokenizer must\
+    \ supply a chat template\")\n        self.lock = threading.Lock()\n        self.route([{\"\
+    role\": \"user\", \"content\": \"Hello\"}], 128, {\"enable_thinking\": False})\n\
+    \n    def route(self, messages, max_new_tokens, template_kwargs):\n        with\
+    \ self.lock:\n            torch = self.torch\n            torch.npu.set_device(self.device)\
+    \  # Device context is thread-local.\n            started = time.perf_counter()\n\
+    \            ids = self.tokenizer.apply_chat_template(\n                messages,\
+    \ chat_template=self.chat_template, tokenize=True,\n                add_generation_prompt=True,\
+    \ return_dict=False, **template_kwargs,\n            )\n            if isinstance(ids,\
+    \ Mapping):\n                ids = ids[\"input_ids\"]\n            if ids and\
+    \ isinstance(ids[0], list):\n                ids = ids[0]\n            if not\
+    \ ids or len(ids) > self.max_prompt_tokens:\n                raise ValueError(f\"\
+    Prompt must have 1..{self.max_prompt_tokens} tokens; no truncation\")\n      \
+    \      if self.contextual:\n                from moqe_router.contextual import\
+    \ last_valid_pool, prompt_features\n                text = self.tokenizer.decode(ids,\
+    \ skip_special_tokens=False, clean_up_tokenization_spaces=False)\n           \
+    \     encoded = self.encoder_tokenizer(text, truncation=False, return_tensors=\"\
+    pt\")\n                if encoded[\"input_ids\"].shape[1] > self.max_prompt_tokens:\n\
+    \                    raise ValueError(\"Full prompt exceeds embedding context;\
+    \ no truncation\")\n                encoded = {k: v.to(self.device) for k, v in\
+    \ encoded.items()}\n                with torch.inference_mode():\n           \
+    \         def predict(pooled):\n                        features = prompt_features(pooled,\
+    \ torch.tensor([len(ids)], device=self.device),\n                            torch.tensor([max_new_tokens],\
+    \ device=self.device)).cpu()\n                        return self.router(features).float().softmax(-1)[0].tolist()\n\
+    \                    pooled = self.embedding_graphs.pooled(encoded['input_ids'])\
+    \ if self.embedding_graphs else None\n                    used_graph = pooled\
+    \ is not None\n                    if not used_graph:\n                      \
+    \  hidden = self.encoder(**encoded, use_cache=False).last_hidden_state\n     \
+    \                   pooled = last_valid_pool(hidden, encoded[\"attention_mask\"\
+    ])\n                    probabilities = predict(pooled)\n                    #\
+    \ Bucket padding can change BF16 rounding. Use original\n                    #\
+    \ execution near the expert decision boundary.\n                    if used_graph\
+    \ and abs(probabilities[1]-self.threshold) <= self.graph_threshold_margin:\n \
+    \                       self.embedding_graphs.fallbacks += 1\n               \
+    \         hidden = self.encoder(**encoded, use_cache=False).last_hidden_state\n\
+    \                        probabilities = predict(last_valid_pool(hidden, encoded['attention_mask']))\n\
+    \                    if not all(math.isfinite(p) for p in probabilities):\n  \
+    \                      raise RuntimeError(\"Router produced nonfinite probabilities\"\
+    )\n                index = int(probabilities[1] > self.threshold)\n          \
+    \      return RoutingDecision(self.experts[index], dict(zip(self.experts, probabilities)),\n\
+    \                    len(ids), (time.perf_counter() - started) * 1000)\n     \
+    \       tokens = torch.tensor([ids], dtype=torch.long, device=self.device)\n \
+    \           mask = torch.ones_like(tokens, dtype=torch.bool)\n            generation\
+    \ = torch.tensor([max_new_tokens], dtype=torch.long, device=self.device)\n   \
+    \         with torch.inference_mode(), torch.autocast(\"npu\", dtype=torch.bfloat16):\n\
+    \                logits = self.router(self.embedding(tokens), mask, generation)\n\
+    \                if not bool(torch.isfinite(logits).all().cpu()):\n          \
+    \          raise RuntimeError(\"Router produced nonfinite logits\")\n        \
+    \        probabilities = logits.float().softmax(-1).cpu()[0].tolist()\n      \
+    \      index = max(range(len(probabilities)), key=probabilities.__getitem__)\n\
+    \            return RoutingDecision(self.experts[index], dict(zip(self.experts,\
+    \ probabilities)),\n                                   len(ids), (time.perf_counter()\
+    \ - started) * 1000)\n"
+  heteroserve--routing--embedding_graph.py: "\"\"\"Warm, bounded shape graphs for\
+    \ a single unpadded causal Qwen3 prompt.\"\"\"\n\n\nclass EmbeddingGraphs:\n \
+    \   def __init__(self, encoder, device, buckets):\n        import torch\n    \
+    \    import torch_npu\n        if encoder.config.model_type != 'qwen3' or getattr(encoder,\
+    \ 'has_sliding_layers', False):\n            raise ValueError('Embedding graphs\
+    \ require full causal Qwen3 attention')\n        self.entries = {}\n        self.hits\
+    \ = 0\n        self.fallbacks = 0\n        self.oversize = 0\n        # Capture\
+    \ before readiness; a first request never pays capture latency.\n        with\
+    \ torch.inference_mode():\n            for size in buckets:\n                ids\
+    \ = torch.zeros((1, size), dtype=torch.long, device=device)\n                positions\
+    \ = torch.arange(size, device=device).unsqueeze(0)\n                def forward():\n\
+    \                    # Same SDPA causal path as a single all-valid prompt.\n \
+    \                   # Right padding cannot influence preceding valid tokens.\n\
+    \                    return encoder(input_ids=ids, position_ids=positions,\n \
+    \                       attention_mask={'full_attention': None}, use_cache=False).last_hidden_state\n\
+    \                for _ in range(3):\n                    forward()\n         \
+    \       torch.npu.synchronize()\n                graph = torch_npu.npu.NPUGraph()\n\
+    \                with torch_npu.npu.graph(graph):\n                    hidden\
+    \ = forward()\n                graph.replay()\n                torch.npu.synchronize()\n\
+    \                self.entries[size] = (ids, positions, graph, hidden)\n\n    def\
+    \ pooled(self, tokens):\n        length = tokens.shape[1]\n        if tokens.shape[0]\
+    \ != 1:\n            raise ValueError('Embedding graphs serve exactly one prompt\
+    \ at a time')\n        bucket = next((n for n in self.entries if n >= length),\
+    \ None)\n        if bucket is None:\n            self.oversize += 1\n        \
+    \    return None\n        ids, positions, graph, hidden = self.entries[bucket]\n\
+    \        ids[:, :length].copy_(tokens)\n        graph.replay()\n        self.hits\
+    \ += 1\n        return hidden[:, length-1, :]\n"
+  gateway.json: "{\n  \"host\": \"0.0.0.0\",\n  \"port\": 8000,\n  \"max_inflight\"\
+    : 16,\n  \"max_request_bytes\": 2097152,\n  \"timeout_seconds\": 180,\n  \"default_max_tokens\"\
+    : 128,\n  \"drain_seconds\": 240,\n  \"router\": {\n    \"checkpoint\": \"/assets/router/checkpoint_best.pt\"\
+    ,\n    \"checkpoint_sha256\": \"03c64f8099e3ab0c641e8584480cf0f1710a4da96478d59e4d460227b9870529\"\
+    ,\n    \"tokenizer\": \"/assets/router/tokenizer\",\n    \"training_code\": \"\
+    /assets/router/architecture\",\n    \"embedding_model\": \"/assets/router/embedding\"\
+    ,\n    \"device\": \"npu:0\",\n    \"expert_mapping\": {\n      \"qwen3-14b/awq-w4a16/v1\"\
+    : \"awq\",\n      \"qwen3-14b/gptq-w4a16/v1\": \"gptq\"\n    },\n    \"embedding_graph\"\
+    : false,\n    \"graph_buckets\": [\n      64,\n      128,\n      256,\n      512,\n\
+    \      1024\n    ],\n    \"graph_threshold_margin\": 0.01\n  },\n  \"pools\":\
+    \ {\n    \"awq\": {\n      \"enabled\": true,\n      \"base_url\": \"http://awq-ascend910b-vllm-router.heteroserve.svc.cluster.local:8000/v1\"\
+    ,\n      \"model\": \"awq\"\n    },\n    \"gptq\": {\n      \"enabled\": false,\n\
+    \      \"base_url\": null,\n      \"model\": \"gptq\"\n    }\n  },\n  \"deployment\"\
+    : {\n    \"node\": \"heteroserve-lab-209\",\n    \"asset_path\": \"/var/lib/rancher/k3s/heteroserve-assets/router-model\"\
+    ,\n    \"asset_source_host\": \"10.107.206.212\",\n    \"asset_source_root\":\
+    \ \"/root/zhangjinhao/router-single-npu\",\n    \"source_checkpoint\": \"router-training/contextual-multitask-v7/mlp-seed20261005/checkpoint_best.pt\"\
+    ,\n    \"source_embedding\": \"models/Qwen3-Embedding-0.6B\",\n    \"source_tokenizer\"\
+    : \"router-base-embedding\",\n    \"source_architecture\": \"MLsys/src/moqe_router\"\
+    \n  },\n  \"migration_source\": {\n    \"repository\": \"https://github.com/lvhaojieming/MLsys_inference.git\"\
+    ,\n    \"commit\": \"5c81fe24085c9c1260dcb9cf9001909261d52328\",\n    \"score_semantics\"\
+    : \"expert_probabilities\",\n    \"selection_policy\": \"checkpoint_binary_threshold\"\
+    \n  }\n}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: heteroserve-gateway
+  namespace: heteroserve
+  labels: &id001
+    app.kubernetes.io/part-of: heteroserve
+    app.kubernetes.io/name: gateway
+    io.heteroserve.lab: heteroserve-lab
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: *id001
+  template:
+    metadata:
+      labels: *id001
+      annotations:
+        heteroserve.io/runtime-sha256: 772fdda2c447f4d675bb0f34e3864ccf5772cf05da2d9ad45b71dfd5533780b4
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 300
+      nodeSelector:
+        kubernetes.io/hostname: heteroserve-lab-209
+        heteroserve.io/npu-ready: 'true'
+      containers:
+      - name: gateway
+        image: docker.io/heteroserve/ascend-runtime@sha256:440ec6e9625b2344a4c37733f591beeb3a9f8ade57c35dc74d873ce754cb69b4
+        imagePullPolicy: Never
+        command:
+        - bash
+        - -ec
+        args:
+        - source /usr/local/Ascend/ascend-toolkit/set_env.sh; source /usr/local/Ascend/nnal/atb/set_env.sh;
+          exec python3 -m heteroserve.gateway --config /opt/runtime/gateway.json
+        env:
+        - name: PYTHONPATH
+          value: /opt/runtime:/workspace/zhangjinhao/moqe-runtime/python-deps
+        - name: HOME
+          value: /scratch
+        - name: HF_HUB_OFFLINE
+          value: '1'
+        - name: TRANSFORMERS_OFFLINE
+          value: '1'
+        - name: MOQE_ASCEND_INT4_ADAPTER
+          value: '0'
+        - name: TE_PARALLEL_COMPILER
+          value: '1'
+        - name: OMP_NUM_THREADS
+          value: '4'
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          requests:
+            cpu: '2'
+            memory: 4Gi
+            huawei.com/Ascend910: '1'
+          limits:
+            huawei.com/Ascend910: '1'
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          httpGet:
+            path: /live
+            port: http
+          periodSeconds: 5
+          failureThreshold: 240
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 3
+          timeoutSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - python3
+              - -c
+              - import urllib.request;urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/drain',method='POST'),timeout=245).read()
+        volumeMounts:
+        - name: runtime
+          mountPath: /opt/runtime
+          readOnly: true
+        - name: assets
+          mountPath: /assets/router
+          readOnly: true
+        - name: driver
+          mountPath: /usr/local/Ascend/driver
+          readOnly: true
+        - name: deps
+          mountPath: /workspace/zhangjinhao/moqe-runtime/python-deps
+          readOnly: true
+        - name: scratch
+          mountPath: /scratch
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: runtime
+        configMap:
+          name: heteroserve-gateway
+          items:
+          - key: heteroserve--__init__.py
+            path: heteroserve/__init__.py
+          - key: heteroserve--gateway.py
+            path: heteroserve/gateway.py
+          - key: heteroserve--routing--__init__.py
+            path: heteroserve/routing/__init__.py
+          - key: heteroserve--routing--runtime.py
+            path: heteroserve/routing/runtime.py
+          - key: heteroserve--routing--ascend.py
+            path: heteroserve/routing/ascend.py
+          - key: heteroserve--routing--embedding_graph.py
+            path: heteroserve/routing/embedding_graph.py
+          - key: gateway.json
+            path: gateway.json
+      - name: scratch
+        emptyDir:
+          sizeLimit: 2Gi
+      - name: tmp
+        emptyDir:
+          sizeLimit: 1Gi
+      - name: assets
+        hostPath:
+          path: /var/lib/rancher/k3s/heteroserve-assets/router-model
+          type: Directory
+      - name: driver
+        hostPath:
+          path: /usr/local/Ascend/driver
+          type: Directory
+      - name: deps
+        hostPath:
+          path: /var/lib/rancher/k3s/heteroserve-assets/adapter/python-deps
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: heteroserve-gateway
+  namespace: heteroserve
+  labels: &id001
+    app.kubernetes.io/part-of: heteroserve
+    app.kubernetes.io/name: gateway
+    io.heteroserve.lab: heteroserve-lab
+spec:
+  selector: *id001
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
