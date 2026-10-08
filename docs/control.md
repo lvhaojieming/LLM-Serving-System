@@ -88,9 +88,60 @@ python3 scripts/control.py set pool drain_seconds=300 termination_seconds=360 --
 服务暂停期间不要执行 `apply`，因为它会恢复配置声明的副本数。
 
 当前保留一个二级 Router、一实例一张 NPU、固定容器身份和取消 CPU/内存硬限制的约定。
-未提供通过此入口直接增加物理节点、启停旧容器、修改镜像/模型身份或自动回滚功能；
-这些仍需对应的正式管理流程。更换权重或启用 GPTQ 需要真实模型兼容验收。
+总控不自动停止旧模型容器、不修改镜像/模型身份，也不自动回滚。
+更换权重或启用 GPTQ 需要真实模型兼容验收。
 配置回退使用 Git 恢复经过验证的配置，再显式 apply 和 verify，不能仅回退 Deployment 而保留新 ConfigMap。
 
 此入口不自动提交或推送 Git，不自动准备所有资产，也不自动执行故障注入实验。
 验收记录继续写入现有 `artifacts/kubernetes/`，不复制结果目录。
+
+## 接入和退出算力节点
+
+在 `.209` 运行总控，选择 **11**，再选择接入、退出或恢复中断的退出操作，输入完整 IP。
+菜单先读取真实状态并显示计划，确认后执行。命令行等价入口：
+
+```bash
+# 只预检和显示计划，不修改集群
+python3 scripts/control.py node remove 10.107.206.216
+# 保持目标模型副本数，迁移完成后退出；保留容器、卷、镜像和权重
+python3 scripts/control.py node remove 10.107.206.216 --execute
+# 明确重新接入刚才退出的节点，复用相同容器 ID
+python3 scripts/control.py node add 10.107.206.216 --execute
+# 退出中途失败后，先检查计划，再明确恢复
+python3 scripts/control.py node recover 10.107.206.216
+python3 scripts/control.py node recover 10.107.206.216 --execute
+```
+
+`add/remove` 不隐式修改模型副本数量。新候选节点数量不能超过副本数；需要时先通过菜单 2 调整副本数。
+节点接入后仍由调度器放置副本，软拓扑分布不等于严格一机一副本。验收要求新节点上实际运行一个正式模型实例并被 Router 请求覆盖，否则操作不能报告成功。
+
+接入仅适配现有 Ascend 910B4、8 张独占卡的实验节点。检查授权地址、外层容器身份和驱动独占记录；
+已有占卡服务不会被自动停止。新节点首次接入确实需要一个长期复用的 K3s 节点容器；重新接入复用原容器。
+镜像从当前源节点流式导入，已有模型和适配器先核对 SHA-256，缺少的目录才复制；文件不一致时停止，不覆盖。
+权重发布、设备插件、双 Pod 设备隔离复用已有脚本。临时单卡模型 Pod 使用 `expert-candidate` 标签，
+不匹配正式 Service 或 Router，完成模型、普通/SSE 推理以及 Router 到目标 Pod 的网络检查后清理。
+最后更新正式节点候选配置、应用 Deployment，验证整个专家池和 Gateway。
+
+退出先检查剩余节点的就绪、标签、污点、NPU、CPU、内存及 Pod 数量预算，
+同时读取物理设备独占记录，不能仅凭 allocatable 判断有空闲卡。
+承载 Gateway、Router 候选配置或其他未纳管工作负载的节点被拒绝，必须先完成对应服务迁移。
+仅支持退出工作节点，控制平面不能通过此入口退出。
+随后 cordon、drain，遵守 PDB、preStop 和退出预算，不使用 `--force` 或 `--disable-eviction`。
+`--delete-emptydir-data` 仅在已核验该节点只含项目专家 Pod 和允许的 DaemonSet 后使用，清除的是这些 Pod 的临时缓存。
+服务迁移通过普通/SSE 及全副本路由验收后，记录退休状态，停止固定节点容器、删除 Kubernetes Node 记录。
+不运行卸载脚本，不删除 Docker 容器、卷、宿主机模型和数据目录。
+
+`cluster.json` 的 `nodes` 和 `locked_container_ids` 同时保留活跃与已退出节点的身份档案；
+`retired_node_hosts` 标记已退出的工作节点，常规 `up` 和集群验证忽略它们。
+已授权的 `.208` 存入 `authorized_additional_hosts`，不改变旧容器的创建指纹。
+部署候选节点和可用设备仍使用现有 pool、npu 配置，没有第二套业务配置。
+编辑 pool 的节点亲和性会触发模型滚动更新，可能需要多轮加载模型。
+
+节点流程和总控配置写入使用同一个进程锁；不要绕过总控并行运行底层部署命令或直接改配置。
+失败保留 `artifacts/kubernetes/nodes/<末段IP>/<操作>.json` 的阶段、错误和验收记录。
+排空失败不会继续停止节点，保持 cordon 供检查；`recover` 只处理有对应中断退出记录的同一容器。
+已经成功退出的节点用 `add` 明确重新接入；普通 `up` 不会擅自恢复暂停状态。
+接入失败的节点可能已注册但仍处于禁止生产模型调度状态，应检查最后阶段、修复原因后重试 `add`；不得把注册成功当作推理验收成功。
+
+行为依据：[Kubernetes drain](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/)、
+[K3s 节点身份与重新注册](https://docs.k3s.io/architecture#node-password-secrets)。

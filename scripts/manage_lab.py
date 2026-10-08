@@ -8,10 +8,41 @@ import re
 import shlex
 import subprocess
 import time
+from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER = "io.heteroserve.lab"
 PROBE_IMAGE = "busybox@sha256:d82c2ab94640ded77cf76514ce6a84870761105058a4a9e51b05a8a79be97a6c"
+
+
+def active_nodes(config):
+    """Retain retired container identities without starting or scheduling them."""
+    return [n for n in config["nodes"] if n["host"] not in config.get("retired_node_hosts", [])]
+
+
+@contextmanager
+def operation_lock(root=ROOT):
+    """Serialize controller mutations; an interrupted process releases the OS lock."""
+    path = root / "state/node-operation.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        if not handle.tell():
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        import os
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def resource_policy(config, value):
@@ -35,6 +66,10 @@ def resource_policy(config, value):
 
 def load_config(path):
     config = json.loads(Path(path).read_text(encoding="utf-8"))
+    return validate_config(config)
+
+
+def validate_config(config):
     if config["name"] != "heteroserve-lab":
         raise ValueError("Unexpected lab identity")
     if not re.fullmatch(r"rancher/k3s@sha256:[0-9a-f]{64}", config["image"]):
@@ -63,7 +98,7 @@ def load_config(path):
     hosts = set()
     for node in config["nodes"]:
         ipaddress.ip_address(node["host"])
-        if node["host"] not in config["available_hosts"] or node["host"] in hosts:
+        if node["host"] not in config["available_hosts"] + config.get("authorized_additional_hosts", []) or node["host"] in hosts:
             raise ValueError("Nodes must be unique and user-authorized")
         hosts.add(node["host"])
         if node["role"] not in {"server", "agent"}:
@@ -74,6 +109,10 @@ def load_config(path):
         networks.append(subnet)
     if any(a.overlaps(b) for i, a in enumerate(networks) for b in networks[i + 1:]):
         raise ValueError("Lab networks overlap")
+    retired = config.get("retired_node_hosts", [])
+    if not isinstance(retired, list) or len(set(retired)) != len(retired) or not set(retired) <= {
+            n["host"] for n in config["nodes"] if n["role"] == "agent"}:
+        raise ValueError("Only registered agents may be retired")
     return config
 
 
@@ -95,7 +134,7 @@ def names(config, node):
 
 def node_args(config, node):
     name, network, volume = names(config, node)
-    identity_config = {k: v for k, v in config.items() if k not in {"image_config_id", "network_tuning", "locked_container_ids", "resource_limits_enabled", "fingerprint_node_hosts", "new_node_hosts"}}
+    identity_config = {k: v for k, v in config.items() if k not in {"image_config_id", "network_tuning", "locked_container_ids", "resource_limits_enabled", "fingerprint_node_hosts", "new_node_hosts", "retired_node_hosts", "authorized_additional_hosts"}}
     if config.get("fingerprint_node_hosts"):
         identity_config["nodes"] = [n for n in config["nodes"] if n["host"] in config["fingerprint_node_hosts"]]
     fingerprint = hashlib.sha256(json.dumps({"cluster": identity_config, "node": node}, sort_keys=True).encode()).hexdigest()
@@ -195,7 +234,7 @@ def up(config, config_path=None):
         time.sleep(2)
     else:
         raise TimeoutError("Lab server did not create its join token")
-    for node in config["nodes"]:
+    for node in active_nodes(config):
         if node["role"] != "agent":
             continue
         # Token is carried on stdin, persisted privately, and is never logged.
@@ -237,7 +276,7 @@ prefixes += [p['Subnet'] for n in nets if n not in owned for p in n.get('IPAM',{
 print(json.dumps({'prefixes':prefixes,'port_conflicts':conflicts,'memory_available_kib':int(memory['MemAvailable'].split()[0]),'foreign_named_network':foreign,'owned_subnets':owned_subnets}))
 """
     planned = [ipaddress.ip_network(config[k]) for k in ("pod_cidr", "service_cidr")]
-    for node in config["nodes"]:
+    for node in active_nodes(config):
         name, network, _ = names(config, node)
         existing = remote(node["host"], ["docker", "inspect", name, "--format", "{{json .Config.Labels}}"], check=False)
         if existing.returncode == 0:
@@ -268,7 +307,7 @@ def network_tuning_object(config):
                 "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
                 "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{
                     "matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In",
-                                          "values": [names(config, n)[0] for n in config["nodes"]]}]}]}}},
+                                          "values": [names(config, n)[0] for n in active_nodes(config)]}]}]}}},
                 "tolerations": [{"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"}],
                 "containers": [{"name": "network-tuning", "image": config["image"], "imagePullPolicy": "IfNotPresent",
                     "command": ["/bin/sh", "-ec"], "args": [tune],
@@ -282,7 +321,7 @@ def network_tuning_object(config):
 
 def apply_network_tuning(config):
     # Only private bridge-backed lab node containers may host this network helper.
-    for node in config["nodes"]:
+    for node in active_nodes(config):
         name, network, _ = names(config, node)
         state = remote(node["host"], ["docker", "inspect", name, "--format", '{"labels":{{json .Config.Labels}},"network":{{json .HostConfig.NetworkMode}}}'])
         info = json.loads(state.stdout)
@@ -295,7 +334,7 @@ def apply_network_tuning(config):
     while True:
         daemon = json.loads(kubectl(config, ["get", "daemonset", config["name"] + "-network", "-n", "kube-system", "-o", "json"]).stdout)
         status = daemon.get("status", {})
-        if status.get("numberReady") == len(config["nodes"]) and status.get("desiredNumberScheduled") == len(config["nodes"]):
+        if status.get("numberReady") == len(active_nodes(config)) and status.get("desiredNumberScheduled") == len(active_nodes(config)):
             break
         if time.monotonic() >= deadline:
             raise TimeoutError("All node network helpers must be Ready before cross-node validation")
@@ -310,7 +349,7 @@ def validation_objects(config):
                 "labels": {OWNER: config["name"], "pod-security.kubernetes.io/enforce": "restricted"}}},
                {"apiVersion": "v1", "kind": "ResourceQuota", "metadata": {"name": "validation-budget", "namespace": namespace},
                 "spec": {"hard": {"pods": "8", "requests.cpu": "2", "limits.cpu": "4", "requests.memory": "1Gi", "limits.memory": "2Gi"}}}]
-    for node in config["nodes"]:
+    for node in active_nodes(config):
         node_name, _, _ = names(config, node)
         probe = "probe-" + node["host"].rsplit(".", 1)[1]
         labels = {OWNER: config["name"], "app": probe}
@@ -341,7 +380,7 @@ def unlimit(config):
     if config.get("resource_limits_enabled", True):
         raise RuntimeError("Set resource_limits_enabled=false before removing limits")
     results = []
-    for node in config["nodes"]:
+    for node in active_nodes(config):
         ensure_node(config, node)
         name, _, _ = names(config, node)
         identity = config["locked_container_ids"][node["host"]]
@@ -376,7 +415,7 @@ def wait_ready_probes(config, namespace, old_uid=None, timeout=240):
         pods = json.loads(kubectl(config, ["get", "pods", "-n", namespace, "-l", OWNER + "=" + config["name"], "-o", "json"]).stdout)["items"]
         ready = [p for p in pods if not p["metadata"].get("deletionTimestamp") and
                  any(c["type"] == "Ready" and c["status"] == "True" for c in p["status"].get("conditions", []))]
-        if len(ready) == len(config["nodes"]) and (not old_uid or all(p["metadata"]["uid"] != old_uid for p in ready)):
+        if len(ready) == len(active_nodes(config)) and (not old_uid or all(p["metadata"]["uid"] != old_uid for p in ready)):
             return ready
         time.sleep(3)
     raise TimeoutError("Validation Pods were not Ready before the deadline; inspect events and image pulls")
@@ -385,7 +424,7 @@ def wait_ready_probes(config, namespace, old_uid=None, timeout=240):
 def verify(config):
     namespace = config["name"] + "-validation"
     snapshot = json.loads(kubectl(config, ["get", "nodes", "-o", "json"]).stdout)["items"]
-    expected = {names(config, n)[0] for n in config["nodes"]}
+    expected = {names(config, n)[0] for n in active_nodes(config)}
     ready = {n["metadata"]["name"] for n in snapshot if any(c["type"] == "Ready" and c["status"] == "True" for c in n["status"]["conditions"])}
     if not expected <= ready:
         raise RuntimeError("All configured physical nodes must be Ready before validation")
@@ -435,7 +474,7 @@ def main():
     args = parser.parse_args()
     config = load_config(args.config)
     if args.action == "plan":
-        print(json.dumps({"nodes": [{"host": n["host"], "command": node_args(config, n)} for n in config["nodes"]],
+        print(json.dumps({"nodes": [{"host": n["host"], "command": node_args(config, n)} for n in active_nodes(config)],
                           "npu_managed": False}, indent=2))
     elif args.action == "preflight":
         preflight(config)

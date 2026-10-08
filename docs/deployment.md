@@ -316,6 +316,26 @@ python3 scripts/manage_monitoring.py verify
 本次 NPU 测试 Pod 和新建的 `.211`、`.216` 网络探针 Deployment/Service 在验收后清理，已有基线探针保留。
 上述结果证明四节点扩容链路通过；此前的完整故障注入、缩容及排空测试没有在四节点规模全部重跑，也未进行吞吐/SLO 压测。
 
+## 总控节点退出与重新接入验收（2026-10-08）
+
+使用 `control.py node remove 10.107.206.216 --execute` 和 `node add ... --execute` 完成实机闭环。
+退出前校验剩余三节点容量，cordon/drain 后四个模型副本迁到剩余节点并通过普通/SSE、全副本路由和 Gateway 验收；
+随后停止 `.216` 的实验容器并删除 Node 记录，容器 `ef0800923fab40a416f69320244113847ee97f5199948f733ebefd393ee6ba95`、卷和模型均保留。
+
+重新接入复用同一容器、全部镜像、权重和适配器。双 Pod 分别获分配 7、0 号 NPU，其他七卡访问被拒绝，矩阵计算误差零。
+临时 `expert-candidate` 模型完成普通与 SSE 推理，Router 到该 Pod 的跨节点检查通过，且未进入正式发现列表。
+临时模型验收后更新正式候选节点并滚动部署；最终五个 Node Ready，四个推理节点各一个模型副本，32 个可分配 NPU，
+所有正式副本均被真实路由请求覆盖，Gateway、Router UID 和所有外层容器 ID 保持不变，原业务配置恢复。
+现有 Prometheus/Grafana 验证通过。临时模型 Pod/ConfigMap、两个隔离 Pod 已清理，旧 `vllm-ascend` 仍保持暂停。
+
+实机还确认入口节点退出被保护条件拦截，节点操作期间并发总控写入被进程锁拒绝。
+接入首次遇到 Docker Hub 短名称与 containerd 完整镜像名称不匹配，修复规范化逻辑并添加回归测试后重试通过；失败阶段记录保留。
+本地复用 `MLsys_train/.venv`，97 项测试通过。结果为 `artifacts/kubernetes/node-lifecycle-acceptance.json`，
+阶段、文件哈希和模型结果位于 `artifacts/kubernetes/nodes/216/{remove,add}.json`；操作方法见 [总控说明](control.md)。
+
+本轮实机测试覆盖现有节点的退出和重新接入；首次创建全新节点、缺失资产传输分支未在本轮实机执行。
+未进行持续压测或额外的在途 SSE 故障注入；`recover` 命令由单元测试覆盖，实机验证的是失败接入修复后重试。
+
 ## 参考资料
 
 - [K3s Docker server/agent](https://docs.k3s.io/advanced#running-k3s-in-docker)

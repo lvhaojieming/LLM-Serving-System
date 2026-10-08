@@ -14,6 +14,9 @@
 
 | 入口 | 用途 |
 |---|---|
+| `scripts/control.py` | 中文总控菜单：配置、部署、验收、日志及算力节点接入/退出（菜单 11） |
+| `scripts/manage_nodes.py` | 复用现有管理器的节点容量检查、排空、保留容器退出与重新接入 |
+| `docs/control.md` | 总控参数、节点操作、保护条件及失败恢复说明 |
 | `deploy/lab/cluster.json` | 五机实验集群（四个推理节点及 `.217` 控制节点）的固定容器 ID、镜像、端口及网段 |
 | `scripts/manage_lab.py` | 预检、创建或复用实验节点、查询状态与跨机验收 |
 | `deploy/lab/npu.json` | 固定实验节点的昇腾镜像与验证资源预算 |

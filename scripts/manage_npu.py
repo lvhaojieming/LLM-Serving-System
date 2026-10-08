@@ -6,7 +6,7 @@ import re
 import time
 import os
 
-from manage_lab import ROOT, OWNER, kubectl, load_config, names, remote, resource_policy
+from manage_lab import ROOT, OWNER, kubectl, load_config, names, remote, resource_policy, active_nodes
 
 
 def exclusive_reservations(table):
@@ -49,7 +49,7 @@ def configuration():
     npu["host"] = os.environ.get("HETEROSERVE_NPU_HOST", npu["host"])
     node = next(n for n in cluster["nodes"] if n["host"] == npu["host"])
     name, _, volume = names(cluster, node)
-    for fixed_node in cluster["nodes"]:
+    for fixed_node in active_nodes(cluster):
         identity = remote(fixed_node["host"], ["docker", "inspect", names(cluster, fixed_node)[0], "--format", "{{.Id}}"])
         if identity.stdout.strip() != cluster["locked_container_ids"][fixed_node["host"]]:
             raise RuntimeError("Fixed Docker container identity changed on " + fixed_node["host"])
@@ -130,7 +130,7 @@ def plugin_objects(cluster, npu, node):
         ("containerd", "/run/k3s/containerd", "/run/containerd", True),
     ]
     labels = {OWNER: cluster["name"], "app": "ascend-device-plugin"}
-    target_nodes = [names(cluster, n)[0] for n in cluster["nodes"] if n["host"] in npu.get("device_hosts", [npu["host"]])]
+    target_nodes = [names(cluster, n)[0] for n in active_nodes(cluster) if n["host"] in npu.get("device_hosts", [npu["host"]])]
     pod = {"serviceAccountName": service_account,
            "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{
                "matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": target_nodes}]}]}}},

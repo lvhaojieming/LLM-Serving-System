@@ -9,8 +9,9 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from contextlib import nullcontext
 
-from manage_lab import ROOT, kubectl, load_config, names
+from manage_lab import ROOT, kubectl, load_config, names, active_nodes, operation_lock
 
 FILES = {"gateway": "deploy/gateway.json", "pool": "deploy/pools/ascend-awq.json",
          "engine": "deploy/lab/npu.json"}
@@ -60,7 +61,7 @@ def validate(configs, cluster):
                     raise ValueError(field + " must be between 0 and 1")
             elif type(value) is not int or value < 1:
                 raise ValueError(field + " must be a positive integer")
-    nodes = {names(cluster, node)[0]: node["host"] for node in cluster["nodes"]}
+    nodes = {names(cluster, node)[0]: node["host"] for node in active_nodes(cluster)}
     device_nodes = {name for name, host in nodes.items() if host in engine["device_hosts"]}
     for field, allowed in (("model_nodes", device_nodes), ("router_nodes", set(nodes))):
         selected = pool[field]
@@ -89,6 +90,11 @@ def parse_value(old, raw):
 
 
 def edit(root, section, assignments, write=False, expected=None):
+    with operation_lock(root) if write else nullcontext():
+        return edit_locked(root, section, assignments, write, expected)
+
+
+def edit_locked(root, section, assignments, write=False, expected=None):
     path = root / FILES[section]
     before = path.read_text(encoding="utf-8")
     configs = read_configs(root)
@@ -216,7 +222,7 @@ def edit_interactive(section):
             old = lookup(original[section], key)
             if key in {"deployment.node", "model_nodes", "router_nodes"}:
                 cluster = load_config(ROOT / "deploy/lab/cluster.json")
-                eligible = [names(cluster, n)[0] for n in cluster["nodes"]
+                eligible = [names(cluster, n)[0] for n in active_nodes(cluster)
                             if key == "router_nodes" or n["host"] in original["engine"]["device_hosts"]]
                 print("已配置候选节点: " + ", ".join(eligible))
             print("列表用英文逗号分隔；布尔值填 true/false；回车保留。")
@@ -242,7 +248,7 @@ def interactive():
             print("1. 查看/修改一级路由和 Gateway\n2. 查看/修改专家池和二级 Router\n"
                   "3. 查看/修改模型推理参数\n4. 查看全部原始配置（含固定参数、模型和节点）\n"
                   "5. 离线校验配置\n6. 查询集群实际状态\n7. 应用已有配置并验收\n"
-                  "8. 执行推理验收\n9. 查看日志\n10. 准备已有资产\n0. 退出")
+                  "8. 执行推理验收\n9. 查看日志\n10. 准备已有资产\n11. 接入/退出算力节点\n0. 退出")
             answer = input("请选择: ").strip()
             if answer == "0":
                 return
@@ -254,6 +260,8 @@ def interactive():
                                      ensure_ascii=False, indent=2))
                 elif answer == "5":
                     main(["check"])
+                elif answer == "11":
+                    node_menu()
                 elif answer in {"6", "7", "8", "9", "10"}:
                     action = {"6": "status", "7": "apply", "8": "verify", "9": "logs", "10": "prepare"}[answer]
                     target = choose_target(action)
@@ -267,6 +275,21 @@ def interactive():
         print("\n已退出；尚未保存的编辑已丢弃，已保存或已执行的操作不会自动撤销。")
 
 
+def node_menu():
+    print("1. 接入/重新接入节点  2. 安全退出节点  3. 恢复中断的退出操作  回车返回")
+    choice = input("操作: ").strip()
+    if not choice:
+        return
+    if choice not in {"1", "2", "3"}:
+        raise ValueError("请选择 1、2 或 3")
+    host = input("已授权服务器的完整 IP: ").strip()
+    action = {"1": "add", "2": "remove", "3": "recover"}[choice]
+    main(["node", action, host])
+    print("将执行节点流程和真实验收；保留外层容器、卷、模型。失败时保留阶段记录，不强制排空。")
+    if input("输入 y 执行，其他输入返回: ").strip().lower() == "y":
+        main(["node", action, host, "--execute"])
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action")
@@ -278,6 +301,10 @@ def main(argv=None):
     setter.add_argument("assignments", nargs="+", metavar="KEY=VALUE")
     setter.add_argument("--write", action="store_true")
     sub.add_parser("check", help="Offline configuration validation (not live acceptance)")
+    node = sub.add_parser("node", help="Plan or execute reversible worker membership")
+    node.add_argument("operation", choices=["add", "remove", "recover"])
+    node.add_argument("host", help="Authorized physical host IP")
+    node.add_argument("--execute", action="store_true", help="Execute the inspected membership change")
     for action in ("apply", "status", "verify", "prepare"):
         command = sub.add_parser(action)
         command.add_argument("target", choices=["pool", "gateway", "cluster", "all"])
@@ -286,6 +313,10 @@ def main(argv=None):
     logs.add_argument("target", choices=["pool", "router", "gateway"])
     logs.add_argument("--tail", type=int, default=100)
     args = parser.parse_args(argv)
+    if args.action == "node":
+        from manage_nodes import execute
+        execute(args.operation, args.host, args.execute)
+        return
     if args.action in {None, "menu"}:
         interactive()
         return
@@ -315,11 +346,12 @@ def main(argv=None):
     if args.action == "check":
         print("Offline configuration checks passed; device availability, assets and inference require live verification.")
         return
-    for script, action in commands(args.action, args.target):
-        command = [sys.executable, str(ROOT / "scripts" / script), action]
-        print(subprocess.list2cmdline(command), flush=True)
-        if not args.plan:
-            subprocess.run(command, cwd=ROOT, check=True)
+    with operation_lock(ROOT) if args.action in {"apply", "prepare"} and not args.plan else nullcontext():
+        for script, action in commands(args.action, args.target):
+            command = [sys.executable, str(ROOT / "scripts" / script), action]
+            print(subprocess.list2cmdline(command), flush=True)
+            if not args.plan:
+                subprocess.run(command, cwd=ROOT, check=True)
 
 
 if __name__ == "__main__":

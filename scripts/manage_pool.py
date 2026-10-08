@@ -269,6 +269,15 @@ def verify():
         if time.monotonic() >= deadline:
             raise RuntimeError("Expected replica count is not Ready; inspect startup and scheduling events")
         time.sleep(3)
+    result = verify_pods(cluster, pool, npu, pods)
+    path = ROOT / "artifacts/kubernetes/pool-verification.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(json.dumps(result, indent=2), flush=True)
+
+
+def verify_pods(cluster, pool, npu, pods):
+    """Shared real-model check for production workers and isolated onboarding Pods."""
     checker = """import json,sys,time,urllib.request
 model=sys.argv[1]
 def get(path):return json.load(urllib.request.urlopen('http://127.0.0.1:8000'+path,timeout=10))
@@ -302,10 +311,7 @@ print(json.dumps({'passed':True,'identity':identity,'ordinary_answer':answer,'st
             raise RuntimeError("Actual device/Pod identity does not match Kubernetes")
         reports.append(report)
     result = {"passed": True, "pool": pool["pool"], "replicas": reports, "scope": "direct_worker_model_acceptance"}
-    path = ROOT / "artifacts/kubernetes/pool-verification.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    print(json.dumps(result, indent=2), flush=True)
+    return result
 
 
 def main():
