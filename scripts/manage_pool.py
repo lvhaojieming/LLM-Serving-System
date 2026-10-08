@@ -255,6 +255,10 @@ def status():
 
 def verify():
     cluster, pool, npu = configuration()
+    # Scaling while changing node affinity can briefly leave the old revision
+    # at the desired Ready count. Wait for the declared revision before probing.
+    kubectl(cluster, ["rollout", "status", "deployment/" + pool["pool"], "-n", pool["namespace"],
+                      "--timeout=" + str(pool["startup_seconds"]) + "s"], timeout=pool["startup_seconds"] + 60)
     deadline = time.monotonic() + pool["startup_seconds"]
     while True:
         data = json.loads(kubectl(cluster, ["get", "pods", "-n", pool["namespace"], "-l", "heteroserve.io/pool=" + pool["pool"] + ",app.kubernetes.io/name=expert", "-o", "json"]).stdout)

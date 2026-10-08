@@ -188,7 +188,7 @@ metadata:
     heteroserve.io/backend: vllm-ascend
     heteroserve.io/model-version: 70a289a9eb8ed35d
 spec:
-  replicas: 2
+  replicas: 4
   revisionHistoryLimit: 3
   progressDeadlineSeconds: 1320
   strategy:
@@ -226,6 +226,8 @@ spec:
                 values:
                 - heteroserve-lab-209
                 - heteroserve-lab-210
+                - heteroserve-lab-211
+                - heteroserve-lab-216
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname

@@ -5,10 +5,12 @@
   "backend": "vllm-ascend",
   "hardware": "ascend910b4",
   "device_type": "Ascend910B4",
-  "replicas": 2,
+  "replicas": 4,
   "model_nodes": [
     "heteroserve-lab-209",
-    "heteroserve-lab-210"
+    "heteroserve-lab-210",
+    "heteroserve-lab-211",
+    "heteroserve-lab-216"
   ],
   "weights_manifest_sha256": "70a289a9eb8ed35d8a62aa466738c2cd5906df68df844c7731c98840230654f9",
   "startup_seconds": 1200,
@@ -17,7 +19,10 @@
   "scratch_limit": "20Gi",
   "requests_per_worker": 8,
   "router_replicas": 1,
-  "router_nodes": ["heteroserve-lab-209", "heteroserve-lab-210"],
+  "router_nodes": [
+    "heteroserve-lab-209",
+    "heteroserve-lab-210"
+  ],
   "worker_request_memory": "16Gi",
   "worker_request_cpu": "4",
   "discovery_cache_seconds": 15,

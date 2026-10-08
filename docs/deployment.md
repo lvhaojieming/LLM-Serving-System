@@ -1,6 +1,6 @@
 # 跨机器 Kubernetes 部署与验收
 
-当前工程已接入三台物理服务器的独立 K3s 实验节点，使用真实昇腾模型进行准入和生命周期验收。
+当前工程已接入五台物理服务器的独立 K3s 实验节点，其中四台运行模型，使用真实昇腾模型进行准入和生命周期验收。
 Kubernetes 管理节点、设备资源及 Deployment；官方 vLLM Router 负责负载均衡和原生 Pod 发现。
 应用接口补充真实模型健康、在途排空、Pod UID 核对及有限发现缓存。
 
@@ -13,8 +13,9 @@ Kubernetes 管理节点、设备资源及 Deployment；官方 vLLM Router 负责
 它不需要原共享集群的应用部署权限，也不会赋予原共享集群的权限。
 privileged 容器不能作为对宿主机管理员的安全隔离边界；设备归属必须单独确认。
 
-用户已指定 `.209` 至 `.217`，共九台候选节点。当前 `.217` 为控制节点，`.209`、`.210` 为推理节点。
-三只节点容器长期复用并锁定 ID；外层 CPU、内存、swap、进程上限和项目 CPU/内存 limits 已按用户要求取消。
+用户已指定 `.208` 至 `.217`，共十台候选节点；2026-10-08 已完成只读盘点。
+当前 `.217` 为控制节点，`.209`、`.210`、`.211`、`.216` 为推理节点，每台运行一个 AWQ 副本。
+五只节点容器长期复用并锁定 ID；外层 CPU、内存、swap、进程上限和项目 CPU/内存 limits 已按用户要求取消。
 原 4 CPU、8 GiB 只保留为创建预算记录。应用保留合理的调度 requests 和一实例一张 NPU 的 requests/limits。
 模型缓存临时卷有 20 GiB 上限；监控数据保留 7 天、TSDB 数据规模上限 5 GB。
 
@@ -29,16 +30,16 @@ privileged 容器不能作为对宿主机管理员的安全隔离边界；设备
 已实测设备插件、非特权模型 Pod、真实推理及故障恢复；这不等于厂商已认证整个嵌套版本矩阵。
 正式生产集群仍须确认发行版支持周期、驱动/固件/CANN/runtime 对应矩阵及目标集群验收。
 
-目前九台候选节点中，`.212` 使用 cgroup v2，其余使用 cgroup v1。
+此前检查的 `.209`～`.217` 九台候选节点中，`.212` 使用 cgroup v2，其余使用 cgroup v1。
 Usernetes rootless 路线尚不满足大多数节点的前置条件，因此当前评估 K3s 的 rootful 容器路线。
 K3s 官方提供 Docker 中运行 server/agent 的方式；这不等于官方认证了本项目的跨机网络和嵌套 Ascend 组合。
 
 ## 可重复的验收顺序
 
 1. 预检真实路由、Docker 网段、端口、可用内存及已有资源归属。遇到冲突停止，不覆盖宿主机配置。
-2. 创建或复用两个实验节点，确认它们分别关联 `.217` 和 `.209` 的真实地址，全部 Ready。
-3. API server dry-run 后部署两个受限 CPU 探针，分别固定到两个实验 worker 环境。
-4. 双向访问对端 Pod IP 和 Service DNS，校验响应中的 Pod UID、节点名和实际 Pod IP。
+2. 创建或复用配置中的实验节点，确认真实地址及固定 Docker ID，全部 Ready。
+3. API server dry-run 后按配置在每个实验节点部署一个 CPU 探针，遵循当前资源策略。
+4. 每对节点双向访问 Pod IP 和 Service DNS，校验响应中的 Pod UID、节点名和实际 Pod IP。
 5. 删除一个验证 Pod，确认 Deployment 创建新 UID，并重新通过 Ready 检查。
 6. 确认 NPU 归属和可用卡，选择经过验证的设备插件/runtime组合，验证设备发现、分配、隔离和小矩阵计算。
 7. 部署一个真实模型，验证身份、非流式与完整流式输出、取消、排空和重建后的重新验收。
@@ -268,8 +269,52 @@ Grafana 使用生成的私有 Secret，管理员密码只保存在 `.217` 的
 `/root/zhangjinhao/LLM-Serving-System/state/monitoring/grafana-admin-password`（0600），不进入 Git、命令参数或日志。
 一次校验命令的错误输出曾包含初始凭据，已通过标准输入重置密码、更新 Secret 并验证新凭据。
 
-已确认全部推理抓取目标正常，能够查询 3 个 Ready 节点、16 个 NPU 资源、Pod 重启、专家就绪及原生 vLLM TTFT 指标。
+四推理节点扩容后已确认全部抓取目标正常，能够查询 5 个 Ready 节点、32 个 NPU 资源、4 个就绪专家及原生 vLLM TTFT 指标。
 Grafana 已自动加载 `heteroserve` 面板，共 8 个图表。服务仅使用内部 Service；按需使用受控端口转发访问。
+
+## 四推理节点扩容验收（2026-10-08）
+
+盘点范围为 `10.107.206.208`～`.217`，十台均可访问，80 张 Ascend 910B4 健康状态均为 OK。
+盘点同时检查 `npu-smi info`、`/proc/uda/namespace_node` 和容器进程；没有计算进程不代表设备未被独占。
+`.208`、`.211`、`.213`、`.216` 当时仍有旧容器独占全部卡，`.212`、`.217` 也有独占记录；
+`.214` 仅 6、7 号卡未被独占，`.215` 没有未独占卡。该快照不代表这些机器未来始终可用。
+
+用户明确确认 `.211` 的 `ae3a089b7960` 和 `.216` 的 `f441718fce54` 两个旧 `vllm-ascend` 容器属于自己并允许停止。
+停止前再次确认容器 ID 和仅有 Bash 进程，停止后复查独占记录清空；旧容器、文件及 ID 保留。
+新增两只长期使用的 K3s agent 容器并锁定完整 ID，原三只实验容器 ID 保持不变。
+`.217` 继续作为控制节点，不参与模型推理；四个专家分别位于 `.209`、`.210`、`.211`、`.216`。
+
+复用 `.209` 的固定 K3s、设备插件、推理镜像，通过 Docker save/load 和现有 containerd export/import 传输；没有重新构建镜像。
+两台新节点缺少 AWQ 权重，仅复制所需权重，`.211` 补齐适配器，`.216` 复用已有源码与依赖。
+权重及适配器的 171 个有效文件逐项 SHA-256 比较一致（排除 Python 字节码缓存）；模型在节点卷中使用硬链接。
+保留 `.216` 已有 GPTQ 资产，但本次没有启用 GPTQ 专家。
+
+本次实测范围：
+
+- 五节点的 40 项有向 Pod IP、Service/DNS 检查及探针 Pod 重建通过。
+- 两台新增节点分别验证两个 Pod 独占不同设备，每个 Pod 只可访问分配卡，其余七张卡被拒绝；实际矩阵计算误差为零。
+- 四台各一个模型实例，均完成普通推理和完整 SSE，`17 + 25` 均返回 `42`。
+- 单个二级 Router 自动发现四个实例，真实路由请求覆盖全部四个 Pod UID；Router UID 在扩容前后保持一致。
+- Gateway 原概率路由及 AWQ 普通/SSE 链路复验通过；未部署 GPTQ 仍明确返回 503。
+- 现有监控观测到 5 个 Ready 节点、32 张设备资源、4 个就绪专家和 6 个健康抓取目标，无重复部署监控。
+
+`manage_pool.py verify` 现在先等待 Deployment 滚动更新完成，避免把旧版本的 Ready 副本误认为新配置验收通过。
+`verify_lifecycle.py routing` 根据副本数量设置有界请求预算，要求所有 Ready 副本实际收到请求；只发现地址不能通过路由验收。
+配置仍使用 `deploy/lab/cluster.json`、`deploy/lab/npu.json`、`deploy/pools/ascend-awq.json`，总控菜单会直接显示四节点配置。
+Gateway 并发预算仍为 16，每实例预算为 8，四实例池预算为 32；新增容量不会自动改写 Gateway 并发参数。
+
+重跑日常验收：
+
+```bash
+python3 scripts/control.py check
+python3 scripts/control.py verify pool
+python3 scripts/control.py verify gateway
+python3 scripts/manage_monitoring.py verify
+```
+
+完整结果在 `.209` 的 `artifacts/kubernetes/four-node-acceptance.json`；盘点、文件哈希、设备隔离和网络明细保存在同目录及 `npu/211`、`npu/216`。
+本次 NPU 测试 Pod 和新建的 `.211`、`.216` 网络探针 Deployment/Service 在验收后清理，已有基线探针保留。
+上述结果证明四节点扩容链路通过；此前的完整故障注入、缩容及排空测试没有在四节点规模全部重跑，也未进行吞吐/SLO 压测。
 
 ## 参考资料
 

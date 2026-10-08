@@ -3,7 +3,7 @@
 `scripts/control.py` 是运维命令入口，复用原来的 JSON 和管理脚本。
 不增加常驻服务、不占 NPU，也不进入推理请求路径。
 本地可查看、修改、校验配置；连接集群的操作在 `.209` 正式项目目录执行：
-`/root/zhangjinhao/LLM-Serving-System`。使用系统 Python 3.10+，总控本身只依赖标准库。
+`/root/zhangjinhao/LLM-Serving-System`。总控本身只依赖标准库，已在管理节点的 Python 3.9.9 验证；模型容器继续使用原有 Python 环境。
 
 ## 日常流程
 
@@ -63,8 +63,8 @@ python3 scripts/control.py set engine model_parameters.max_num_seqs=2 model_para
 python3 scripts/control.py apply pool
 python3 scripts/control.py verify pool
 
-# 调整可调度位置（这里只选已加入且已配置设备的节点）
-python3 scripts/control.py set pool model_nodes=heteroserve-lab-209,heteroserve-lab-210 --write
+# 当前四个推理节点（只能选择已加入且准备好模型资产的节点）
+python3 scripts/control.py set pool replicas=4 model_nodes=heteroserve-lab-209,heteroserve-lab-210,heteroserve-lab-211,heteroserve-lab-216 --write
 
 # Gateway 换节点：先将现有资产发布到目标节点，再更新部署
 python3 scripts/control.py set gateway deployment.node=heteroserve-lab-210 --write

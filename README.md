@@ -4,7 +4,7 @@
 参数清单、修改、部署和验收用法见 [总控操作说明](docs/control.md)。
 
 面向昇腾的 Kubernetes 推理工程。实例生命周期由 Kubernetes 管理，负载均衡与动态发现复用官方 vLLM Router。
-当前采用一个二级 Router 统一维护池入口计数，调度两个模型副本；跨 Router 协调后置。
+当前采用一个二级 Router 统一维护池入口计数，调度四个模型副本，分别运行在 `.209`、`.210`、`.211`、`.216`；跨 Router 协调后置。
 一级概率 Router 已从 `MLsys_inference` 迁入 `heteroserve.routing`，Gateway 通过池 Service 接入二级路由。
 入口配置为 `deploy/gateway.json`；当前仅 AWQ 池可用，预测到未部署 GPTQ 时明确返回 503，不自动改选。
 应用只提供真实模型准入、健康检查、排空和发现一致性接口，不重新实现推理引擎或负载均衡算法。
@@ -14,7 +14,7 @@
 
 | 入口 | 用途 |
 |---|---|
-| `deploy/lab/cluster.json` | 三机实验集群的固定容器 ID、镜像、端口及网段 |
+| `deploy/lab/cluster.json` | 五机实验集群（四个推理节点及 `.217` 控制节点）的固定容器 ID、镜像、端口及网段 |
 | `scripts/manage_lab.py` | 预检、创建或复用实验节点、查询状态与跨机验收 |
 | `deploy/lab/npu.json` | 固定实验节点的昇腾镜像与验证资源预算 |
 | `scripts/manage_npu.py` | 驱动占用预检、NPU 分配与计算验收、受限清理 |
@@ -40,7 +40,7 @@ python3 scripts/manage_lab.py verify
 `verify` 只在实验集群的验证命名空间创建 CPU HTTP 探针，验证跨机 Pod IP、Service/DNS 和 Deployment 重建。
 它不启动已有推理服务，也不证明 NPU 分配或真实模型推理已经通过。
 
-三节点网络及 `.209`、`.210` 的 NPU 分配和计算已验证。真实 AWQ 专家的普通/SSE 推理、
+五节点网络及四个推理节点的 NPU 分配和计算已验证。真实 AWQ 专家的普通/SSE 推理、
 双副本发现、扩缩容、Pod 删除恢复、API 读取失败时的缓存过期和在途 SSE 排空均已实际验收。
 详细范围、故障恢复时间和仍未验证的项目见 `docs/deployment.md`；不能把实验通过当作所有目标集群的生产认证。
 

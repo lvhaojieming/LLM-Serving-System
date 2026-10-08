@@ -2,6 +2,8 @@
 import importlib.util
 from pathlib import Path
 import sys
+import json
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -28,3 +30,29 @@ def test_pool_is_single_card_and_not_scheduled_where_weights_are_absent():
     service = next(x for x in objects if x["kind"] == "Service")
     assert service["spec"]["selector"] == deploy["spec"]["selector"]["matchLabels"]
     assert spec["terminationGracePeriodSeconds"] > settings["drain_seconds"]
+
+
+@pytest.mark.parametrize("seen,passes", [(["a", "b", "c", "d"], True), (["a", "b"], False), (["a", "b", "c", "foreign"], False)])
+def test_routing_acceptance_requires_traffic_to_all_replicas(monkeypatch, seen, passes):
+    import verify_lifecycle as lifecycle
+    expected = ["a", "b", "c", "d"]
+    monkeypatch.setattr(lifecycle, "wait_ready", lambda *args: [{"metadata": {"uid": uid}} for uid in expected])
+    monkeypatch.setattr(lifecycle, "wait_discovered", lambda *args: {"endpoints": expected})
+    def request(cluster, settings, code, expert, uids):
+        assert set(json.loads(uids)) == set(expected)
+        return json.dumps([{"uid": uid, "answer": "42"} for uid in seen])
+    monkeypatch.setattr(lifecycle, "inside_router", request)
+    if passes:
+        assert lifecycle.routing({}, {"replicas": 4, "expert": "awq"}, {})["passed"]
+    else:
+        with pytest.raises(RuntimeError, match="every Ready worker"):
+            lifecycle.routing({}, {"replicas": 4, "expert": "awq"}, {})
+
+
+def test_model_acceptance_does_not_probe_old_ready_revision(monkeypatch):
+    def incomplete_rollout(cluster, command, **kwargs):
+        assert command[:2] == ["rollout", "status"]
+        raise RuntimeError("rollout incomplete")
+    monkeypatch.setattr(pool, "kubectl", incomplete_rollout)
+    with pytest.raises(RuntimeError, match="rollout incomplete"):
+        pool.verify()

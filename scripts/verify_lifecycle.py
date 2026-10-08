@@ -48,20 +48,22 @@ def wait_discovered(cluster, pool, expected_uids, timeout=120):
 def routing(cluster, pool, npu):
     ready = wait_ready(cluster, pool, pool["replicas"])
     view = wait_discovered(cluster, pool, [p["metadata"]["uid"] for p in ready])
+    expected = {p["metadata"]["uid"] for p in ready}
     code = """import json,sys,urllib.request
 body={'model':sys.argv[1],'messages':[{'role':'user','content':'What is 17 + 25? Reply with the number only.'}],'max_tokens':32,'temperature':0,'chat_template_kwargs':{'enable_thinking':False}}
-records=[]
-for i in range(8):
+records=[];expected=set(json.loads(sys.argv[2]));seen=set()
+for i in range(max(8,20*len(expected))):
  request=urllib.request.Request('http://127.0.0.1:8000/v1/chat/completions',data=json.dumps(body).encode(),headers={'Content-Type':'application/json'})
  with urllib.request.urlopen(request,timeout=120) as response:
   answer=json.load(response)['choices'][0]['message']['content'].strip();assert answer=='42'
   records.append({'uid':response.headers['x-heteroserve-pod-uid'],'node':response.headers['x-heteroserve-node'],'answer':answer})
+  seen.add(records[-1]['uid'])
+ if len(records)>=8 and seen==expected:break
 print(json.dumps(records))
 """
-    records = json.loads(inside_router(cluster, pool, code, pool["expert"]))
-    expected = {p["metadata"]["uid"] for p in ready}
-    if not {r["uid"] for r in records} <= expected:
-        raise RuntimeError("Router used an unexpected worker identity")
+    records = json.loads(inside_router(cluster, pool, code, pool["expert"], json.dumps(sorted(expected))))
+    if {r["uid"] for r in records} != expected:
+        raise RuntimeError("Routing acceptance requires real requests to every Ready worker and no unexpected identity")
     return {"passed": True, "discovered": view["endpoints"], "routed_requests": records}
 
 
