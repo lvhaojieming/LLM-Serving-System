@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 
-from manage_lab import (ROOT, OWNER, PROBE_IMAGE, active_nodes, apply_network_tuning,
+from manage_lab import (ROOT, OWNER, active_nodes, apply_network_tuning,
                         ensure_node, kubectl, load_config, names, node_args, preflight, remote, operation_lock, validate_config)
 from manage_npu import exclusive_reservations
 from manage_pool import pool_objects, verify_pods
@@ -253,25 +253,6 @@ print(json.dumps(result))
     return json.loads(remote(host, ["python3", "-c", code, directory], timeout=600).stdout)
 
 
-def canonical_image(reference):
-    """Match Docker Hub shorthand to containerd's fully qualified references."""
-    head = reference.split("/", 1)[0]
-    if "/" not in reference:
-        return "docker.io/library/" + reference
-    if "." not in head and ":" not in head and head != "localhost":
-        return "docker.io/" + reference
-    return reference
-
-
-def missing_images(required, source, target):
-    available = {canonical_image(v): v for v in source}
-    present = {canonical_image(v) for v in target}
-    absent = [canonical_image(v) for v in required if canonical_image(v) not in present]
-    if any(v not in available for v in absent):
-        raise RuntimeError("Pinned image missing from source runtime: " + str([v for v in absent if v not in available]))
-    return [available[v] for v in dict.fromkeys(absent)]
-
-
 def prepare_assets(cluster, node, npu, pool):
     source, target = npu["host"], node["host"]
     results = {}
@@ -291,18 +272,10 @@ def prepare_assets(cluster, node, npu, pool):
         if actual != expected:
             raise RuntimeError("Existing target assets differ; refusing overwrite: " + directory)
         results[key] = {"sha256": expected, "reused": exists.returncode == 0}
-    source_node = next(n for n in active_nodes(cluster) if n["host"] == source)
-    src_name, dst_name = names(cluster, source_node)[0], names(cluster, node)[0]
-    images = [cluster["image"], PROBE_IMAGE, npu["plugin_image"], npu["model_image"]]
-    # Pause reference comes from the source runtime, never an unpinned registry guess.
-    source_images = remote(source, ["docker", "exec", src_name, "ctr", "-n", "k8s.io", "images", "ls", "-q"]).stdout.splitlines()
-    images += [x for x in source_images if "pause:" in x]
-    present = remote(target, ["docker", "exec", dst_name, "ctr", "-n", "k8s.io", "images", "ls", "-q"]).stdout.splitlines()
-    missing = missing_images(images, source_images, present)
-    if missing:
-        stream(source, ["docker", "exec", src_name, "ctr", "-n", "k8s.io", "images", "export", "--platform", "linux/arm64", "-", *missing],
-               target, ["docker", "exec", "-i", dst_name, "ctr", "-n", "k8s.io", "images", "import", "--platform", "linux/arm64", "--digests", "-"])
-    results["imported_images"] = missing
+    # Operator-provided image environment: do not list, inspect, compare or transfer images.
+    # Normal Pod startup and real inference acceptance remain the compatibility check.
+    results["image_preflight"] = "skipped_preprovisioned_environment"
+    results["imported_images"] = []
     run("manage_npu.py", "publish", "--host", target)
     return results
 
@@ -414,15 +387,11 @@ def add(cluster, node, report, checkpoint):
     preflight(cluster)
     info = inspect_container(cluster, node, allow_missing=True)
     if info is None:
-        source = npu["host"]
-        image = remote(node["host"], ["docker", "image", "inspect", cluster["image_config_id"]], check=False)
-        if image.returncode:
-            stream(source, ["docker", "save", cluster["image_config_id"]], node["host"], ["docker", "load"])
         server = next(n for n in cluster["nodes"] if n["role"] == "server")
         token = remote(server["host"], ["docker", "exec", names(cluster, server)[0], "cat", "/var/lib/rancher/k3s/server/node-token"]).stdout
         writer = "import os,sys;os.makedirs(sys.argv[1],mode=0o700,exist_ok=True);f=os.open(sys.argv[1]+'/join-token',os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600);os.fchmod(f,0o600);os.write(f,sys.stdin.buffer.read());os.close(f)"
         remote(node["host"], ["python3", "-c", writer, cluster["state_directory"]], stdin=token)
-        ensure_node(cluster, node)
+        ensure_node(cluster, node, preprovisioned_images=True)
         info = inspect_container(cluster, node)
         cluster["locked_container_ids"][node["host"]] = info["Id"]
         cluster["new_node_hosts"].remove(node["host"])

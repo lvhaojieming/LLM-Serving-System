@@ -174,7 +174,7 @@ def owned_resource(config, node, kind, name):
     return True
 
 
-def ensure_node(config, node):
+def ensure_node(config, node, *, preprovisioned_images=False):
     name, network, volume = names(config, node)
     locked_id = config.get("locked_container_ids", {}).get(node["host"])
     if locked_id:
@@ -197,14 +197,17 @@ def ensure_node(config, node):
                               "--label", OWNER + "=" + config["name"], network])
     if not owned_resource(config, node, "volume", volume):
         remote(node["host"], ["docker", "volume", "create", "--label", OWNER + "=" + config["name"], volume])
-    # Reuse a verified Docker archive if registry downloading is slow or unavailable.
-    image = remote(node["host"], ["docker", "image", "inspect", config["image_config_id"], "--format", "{{.Id}}"], check=False)
-    if image.returncode:
-        remote(node["host"], ["docker", "pull", config["image"]], timeout=300)
-        image = remote(node["host"], ["docker", "image", "inspect", config["image"], "--format", "{{.Id}}"])
-    if image.stdout.strip() != config["image_config_id"]:
-        raise RuntimeError("Image config digest mismatch; refusing to launch")
+    if not preprovisioned_images:
+        # Legacy lab bootstrap; control node add uses the prepared local environment.
+        image = remote(node["host"], ["docker", "image", "inspect", config["image_config_id"], "--format", "{{.Id}}"], check=False)
+        if image.returncode:
+            remote(node["host"], ["docker", "pull", config["image"]], timeout=300)
+            image = remote(node["host"], ["docker", "image", "inspect", config["image"], "--format", "{{.Id}}"])
+        if image.stdout.strip() != config["image_config_id"]:
+            raise RuntimeError("Image config digest mismatch; refusing to launch")
     launch = node_args(config, node)
+    if preprovisioned_images:
+        launch.insert(launch.index(config["image"]), "--pull=never")
     launch[launch.index(config["image"])] = config["image_config_id"]
     remote(node["host"], launch)
     print(json.dumps({"event": "node_created", "host": node["host"], "container": name}), flush=True)

@@ -164,13 +164,36 @@ def test_retired_control_plane_rejected(config):
         lab.validate_config(config)
 
 
-def test_existing_full_image_references_reuse_short_names():
-    refs = ["rancher/k3s@sha256:abc", "busybox@sha256:def"]
-    cache = ["docker.io/rancher/k3s@sha256:abc", "docker.io/library/busybox@sha256:def"]
-    assert nodes.missing_images(refs, cache, cache) == []
-    assert nodes.missing_images(refs, cache, []) == cache
+def test_prepared_assets_do_not_query_or_transfer_images(config, monkeypatch):
+    pool, npu = nodes.read(nodes.POOL), nodes.read(nodes.NPU)
+    node = nodes.find_node(config, "10.107.206.216")
+    def manifest(host, directory):
+        return {"conversion_manifest.json": pool["weights_manifest_sha256"]} if directory == npu["model_source"] else {"adapter.py": "a" * 64}
+    monkeypatch.setattr(nodes, "asset_manifest", manifest)
+    def existing(host, argv, **kwargs):
+        assert argv[0] == "test", "Image inventory/inspection is forbidden"
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(nodes, "remote", existing)
+    monkeypatch.setattr(nodes, "stream", lambda *a: pytest.fail("Existing environment must not be transferred"))
+    commands = []
+    monkeypatch.setattr(nodes, "run", lambda *a: commands.append(a))
+    result = nodes.prepare_assets(config, node, npu, pool)
+    assert result["image_preflight"] == "skipped_preprovisioned_environment"
+    assert result["imported_images"] == []
+    assert commands == [("manage_npu.py", "publish", "--host", node["host"])]
 
 
-def test_different_image_digest_is_not_reused():
-    with pytest.raises(RuntimeError, match="missing from source"):
-        nodes.missing_images(["rancher/k3s@sha256:abc"], ["docker.io/rancher/k3s@sha256:other"], [])
+def test_preprovisioned_node_launch_never_inspects_or_pulls_images(config, monkeypatch):
+    node = nodes.find_node(config, "10.107.206.212", True)
+    calls = []
+    monkeypatch.setattr(lab, "owned_resource", lambda *a: True)
+    def remote(host, argv, **kwargs):
+        calls.append(argv)
+        if argv[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(returncode=1, stdout="")
+        assert argv[:2] == ["docker", "run"], "No image inspection, pull or import allowed"
+        assert "--pull=never" in argv and config["image_config_id"] in argv
+        return SimpleNamespace(returncode=0, stdout="created")
+    monkeypatch.setattr(lab, "remote", remote)
+    lab.ensure_node(config, node, preprovisioned_images=True)
+    assert len(calls) == 2
