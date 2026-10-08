@@ -1,5 +1,8 @@
 # LLM Serving System
 
+日常统一管理入口：`python3 scripts/control.py`，默认进入中文交互菜单，显示现有配置并按序号修改。
+参数清单、修改、部署和验收用法见 [总控操作说明](docs/control.md)。
+
 面向昇腾的 Kubernetes 推理工程。实例生命周期由 Kubernetes 管理，负载均衡与动态发现复用官方 vLLM Router。
 当前采用一个二级 Router 统一维护池入口计数，调度两个模型副本；跨 Router 协调后置。
 一级概率 Router 已从 `MLsys_inference` 迁入 `heteroserve.routing`，Gateway 通过池 Service 接入二级路由。
