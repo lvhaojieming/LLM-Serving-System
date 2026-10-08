@@ -84,7 +84,7 @@ def test_default_menu_save_only_never_deploys(monkeypatch, project):
 
 def test_menu_abandon_edit_keeps_config(monkeypatch, project):
     before = control.read_configs(project)
-    menu_inputs(monkeypatch, project, ["2", "5", "3", "0", "0"])
+    menu_inputs(monkeypatch, project, ["2", "5", "3", "0", "0", "3"])
     control.main([])
     assert control.read_configs(project) == before
 
@@ -382,3 +382,57 @@ def test_instance_override_can_return_to_inherited_default(monkeypatch, project)
     menu.edit_fields("max_num_seqs=default", fields, "pool", "awq-01")
     assert menu.draft.value("pool", "engine.max_num_seqs", "awq-01") == 2
     assert "engine" not in menu.draft.instances()["awq-01"]
+
+
+@pytest.mark.parametrize("shortcut", ["7", "c"])
+def test_main_menu_can_confirm_new_instance_without_publication_submenu(monkeypatch, project, shortcut):
+    menu_inputs(monkeypatch, project, ["2", "5", "5", "0", shortcut, "y", "0"])
+    monkeypatch.setattr(control.subprocess, "run", lambda *a, **kw: pytest.fail("Save must not deploy"))
+    control.main([])
+    pool = control.read_configs(project)["pool"]
+    assert pool["replicas"] == 5 and "awq-05" in pool["instances"]
+    assert control.publication_record(project)["pending"] == [control.FILES["pool"]]
+
+
+def test_main_menu_update_shortcut_saves_applies_and_verifies(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, ["2", "5", "5", "0", "u", "y", "y", "0"])
+    calls = []
+    monkeypatch.setattr(control, "main", lambda args: calls.append(args))
+    menu.run()
+    assert calls == [["apply", "pool"], ["verify", "pool"]]
+    assert control.read_configs(project)["pool"]["replicas"] == 5
+    assert control.publication_record(project)["pending"] == []
+
+
+def test_exit_with_draft_defaults_to_continue_editing(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, [""])
+    before = (project / control.FILES["pool"]).read_bytes()
+    menu.draft.resize(5)
+    assert menu.exit_menu() is False
+    assert "awq-05" in menu.draft.instances() and menu.draft.changes()
+    assert (project / control.FILES["pool"]).read_bytes() == before
+
+
+def test_exit_can_save_new_instance_without_deploying(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, ["1", "y"])
+    menu.draft.resize(5)
+    monkeypatch.setattr(control, "main", lambda *a: pytest.fail("Save must not deploy"))
+    assert menu.exit_menu() is True
+    assert not menu.draft.changes()
+    assert "awq-05" in control.read_configs(project)["pool"]["instances"]
+
+
+def test_exit_cancelled_confirmation_preserves_draft(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, ["1", "n"])
+    menu.draft.resize(5)
+    assert menu.exit_menu() is False
+    assert menu.draft.changes() and not control.publication_record(project).get("pending")
+
+
+def test_exit_cancelled_update_preserves_confirmed_pending_work(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, ["2", "y", "n"])
+    menu.draft.resize(5)
+    monkeypatch.setattr(control, "main", lambda *a: pytest.fail("Cancelled update must not deploy"))
+    assert menu.exit_menu() is False
+    assert not menu.draft.changes()
+    assert control.publication_record(project)["pending"] == [control.FILES["pool"]]

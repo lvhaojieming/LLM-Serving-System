@@ -9,12 +9,16 @@ import manage_instances as instances
 from manage_lab import ROOT, kubectl, load_config, names, active_nodes
 
 
-def pick(title, options, exit_label="返回"):
+def pick(title, options, exit_label="返回", shortcuts=None):
     print("\n" + title)
     for i, label in enumerate(options, 1):
         print(f"{i}. {label}")
     print("0. " + exit_label)
+    if shortcuts:
+        print("快捷键：" + "；".join(key + " " + label for key, label in shortcuts.items()))
     value = input("选择: ").strip()
+    if value.lower() in (shortcuts or {}):
+        return shortcuts[value.lower()]
     if value in {"", "0"}:
         return None
     if value.isdigit() and 1 <= int(value) <= len(options):
@@ -419,23 +423,49 @@ class Menu:
     def run(self):
         actions = {"系统总览": self.overview, "专家与 vLLM 实例": self.experts,
                    "路由与流量": self.traffic, "算力节点与设备": self.nodes,
-                   "变更发布与验收": self.publish, "日志与监控": self.observability}
+                   "变更发布与验收": self.publish, "日志与监控": self.observability,
+                   "确认保存草稿（暂不更新）": self.confirm_changes,
+                   "确认并更新系统": lambda: self.confirm_changes(update=True)}
         print("HeteroServe 总控 | 编辑草稿 → 确认修改 → 更新系统 → 验收结果")
         try:
             while True:
                 self.context("主菜单")
                 try:
-                    action = pick("功能分组", list(actions), "退出")
+                    if self.draft.changes():
+                        print("有尚未确认的修改：按 7/c 确认保存，或按 8/u 确认并更新系统。")
+                    action = pick("功能分组", list(actions), "退出",
+                                  {"c": "确认保存草稿（暂不更新）", "u": "确认并更新系统"})
                     if not action:
-                        if self.draft.changes():
-                            print("尚有未保存草稿，本次退出丢弃；已保存/已发布操作保留。")
-                        return
+                        if self.exit_menu():
+                            return
+                        continue
                     actions[action]()
                 except c.ERRORS as error:
                     print("操作未完成: " + str(error))
                     print("草稿仍保留；应用失败时查看日志和阶段记录。")
         except (EOFError, KeyboardInterrupt):
             print("\n已退出，未保存草稿已丢弃。")
+
+    def exit_menu(self):
+        if not self.draft.changes():
+            if self.saved:
+                print("已确认待更新的配置记录保留；下次打开可以继续更新。")
+            return True
+        self.draft.summary()
+        choice = pick("尚有未确认草稿，请选择退出方式", ["确认保存并退出（暂不更新）",
+                    "确认并更新成功后退出", "丢弃未确认草稿并退出"], "继续编辑（不退出）")
+        if choice == "确认保存并退出（暂不更新）":
+            self.confirm_changes()
+            return not self.draft.changes()
+        if choice == "确认并更新成功后退出":
+            self.confirm_changes(update=True)
+            return not self.draft.changes() and not c.publication_record().get("pending", [])
+        if choice == "丢弃未确认草稿并退出":
+            self.draft = c.Draft()
+            print("已明确丢弃未确认草稿；已保存配置和运行服务保留。")
+            return True
+        print("已取消退出，草稿保留，继续编辑。")
+        return False
 
 
 def run():
