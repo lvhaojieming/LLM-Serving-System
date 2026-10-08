@@ -3,6 +3,7 @@ kind: Kustomization
 resources:
   - ../base
   - ascend-awq.yaml
+  - ascend-gptq.yaml
 patches:
   - target:
       kind: Namespace

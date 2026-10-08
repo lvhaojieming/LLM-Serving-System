@@ -59,6 +59,13 @@ def configuration():
 def publish(driver_only=False):
     cluster, npu, node, name, volume = configuration()
     mapping = {"driver": npu["driver_source"], "model": npu["model_source"], "adapter": npu["adapter_source"]}
+    pool_config = os.environ.get("HETEROSERVE_POOL_CONFIG")
+    if pool_config and not driver_only:
+        from manage_pool import load_pool, resolve_runtime
+        pool = load_pool(Path(pool_config))
+        runtime = resolve_runtime(pool)
+        mapping.pop("model")
+        mapping[pool.get("model_asset", "model")] = runtime["model_source"]
     if driver_only:
         mapping = {"driver": mapping["driver"]}
     publisher = """import json,os,sys,subprocess,shutil
@@ -72,7 +79,7 @@ for asset,source in mapping.items():
  src=Path(source); dst=root/asset
  if not src.is_dir(): raise RuntimeError('Missing existing asset: '+source)
  if src.stat().st_dev!=root.stat().st_dev: raise RuntimeError('Hardlink reuse requires the same filesystem')
- dst.mkdir(exist_ok=True)
+ dst.mkdir(parents=True,exist_ok=True)
  count=0; size=0; linked=0; copied=0
  for base,dirs,files in os.walk(src,followlinks=False):
   relative=Path(base).relative_to(src); out=dst/relative; out.mkdir(exist_ok=True)
@@ -277,9 +284,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["preflight", "publish", "publish-driver", "plugin", "status", "isolation", "isolation-results", "cleanup"])
     parser.add_argument("--host", help="Authorized lab host to inspect or validate")
+    parser.add_argument("--pool-config", help="Publish this pool's weights into its own asset directory")
     args = parser.parse_args()
     if args.host:
         os.environ["HETEROSERVE_NPU_HOST"] = args.host
+    if args.pool_config:
+        os.environ["HETEROSERVE_POOL_CONFIG"] = args.pool_config
     {"preflight": preflight, "publish": publish, "publish-driver": lambda: publish(driver_only=True), "plugin": plugin, "status": status, "isolation": isolation,
      "isolation-results": isolation_results, "cleanup": cleanup}[args.action]()
 

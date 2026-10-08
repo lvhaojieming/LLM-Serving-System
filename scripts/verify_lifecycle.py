@@ -4,9 +4,11 @@ import json
 import shlex
 import subprocess
 import time
+from pathlib import Path
 
 from manage_lab import ROOT, OWNER, kubectl, names, remote
-from manage_pool import configuration
+import manage_pool
+from manage_pool import configuration, artifact_path
 
 
 def pods(cluster, pool, role="expert"):
@@ -440,10 +442,12 @@ def remove_rejoin(cluster, pool, npu):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["routing", "scale", "delete", "cache", "shortage", "drain", "scale_drain", "update_drain", "rollback", "maintenance", "engine", "node_failure", "remove_rejoin"])
+    parser.add_argument("--config", default=str(manage_pool.POOL_CONFIG))
     args = parser.parse_args()
+    manage_pool.POOL_CONFIG = Path(args.config)
     cluster, pool, npu = configuration()
     result = {"action": args.action, **globals()[args.action](cluster, pool, npu)}
-    path = ROOT / "artifacts/kubernetes/lifecycle" / (args.action + ".json")
+    path = artifact_path(pool, "lifecycle/" + args.action + ".json")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2), flush=True)

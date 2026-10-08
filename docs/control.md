@@ -21,7 +21,7 @@ python3 scripts/control.py
 
 主菜单 `4` 可查看完整 JSON（包括模型、镜像、概率路由资产及节点配置）；
 只允许修改已支持的常用参数。`6` 查询集群状态，`7` 应用已有配置并验收，
-`8` 单独验收，`9` 查看日志，`10` 准备已有资产。
+`8` 单独验收，`9` 查看日志，`10` 准备已有资产，`12` 选择专家池。
 保存配置与执行部署分别确认，退出菜单不会撤销已保存配置或已执行操作。
 部署失败停止后续验收，配置不会自动回滚，可查看日志修正后重试。
 菜单部署复用同样的 CLI，原命令行模式继续可用于脚本：
@@ -77,23 +77,51 @@ python3 scripts/control.py set pool drain_seconds=300 termination_seconds=360 --
 ```
 
 完整可编辑字段和当前值由 `show gateway|pool|engine` 查看。
-`gateway` 对应 `deploy/gateway.json`，`pool` 对应 `deploy/pools/ascend-awq.json`，
-`engine` 对应 `deploy/lab/npu.json` 的模型参数。没有第二份总控配置。
+`gateway` 对应全局 `deploy/gateway.json`；`pool` 对应当前选中的 `ascend-awq.json` 或 `ascend-gptq.json`。
+`engine` 显示由共享昇腾配置与当前专家池 `runtime` 合成的有效参数，修改保存到该池的 `runtime.model_parameters`，不改其他专家或共享硬件配置。
+两个池共用 `deploy/pools/defaults.json` 的模板默认值；独立参数写入各自池配置覆盖默认值。没有第二份总控配置。
 参数变更可能导致 Pod 更新并暂时降低容量，单 Gateway/Router 更新可能中断入口。
 现有外层 Docker 容器与镜像继续复用。
 
 `status all` 查询节点、模型池和 Gateway；`logs pool|router|gateway` 获取有行数上限的日志。
-`prepare pool` 复用并发布 Router 依赖，仅在目标节点缺少资产时使用，不需要每次启动执行。
+`prepare pool` 核验并复用当前专家的模型/适配器，缺少目录才从该池的源节点传输，再发布 Router 依赖；不会检查或传输镜像，不需要每次启动执行。
 `apply all --plan` 查看更新模型、Router、Gateway 的命令顺序。
 服务暂停期间不要执行 `apply`，因为它会恢复配置声明的副本数。
 
-当前保留一个二级 Router、一实例一张 NPU、固定容器身份和取消 CPU/内存硬限制的约定。
+当前每个专家池保留一个二级 Router、一实例一张 NPU、固定容器身份和取消 CPU/内存硬限制的约定。
 总控不自动停止旧模型容器、不修改镜像/模型身份，也不自动回滚。
-更换权重或启用 GPTQ 需要真实模型兼容验收。
+GPTQ 已完成现有昇腾资产的真实模型验收；更换权重仍须重新验收。
 配置回退使用 Git 恢复经过验证的配置，再显式 apply 和 verify，不能仅回退 Deployment 而保留新 ConfigMap。
 
 此入口不自动提交或推送 Git，不自动准备所有资产，也不自动执行故障注入实验。
 验收记录继续写入现有 `artifacts/kubernetes/`，不复制结果目录。
+
+## 分别管理 AWQ 和 GPTQ
+
+当前 AWQ 四个单卡副本，分别位于 `.209/.210/.211/.216`；GPTQ 一个单卡副本位于 `.216`，独占另一张卡。
+两个池各有一个官方 vLLM Router，分别维护本池准入与计数。一级 Router 按原 checkpoint 的概率和阈值选择专家池。
+默认进入 AWQ；菜单 **12 → GPTQ** 后，菜单 **2** 修改 GPTQ 副本、候选节点、请求预算，菜单 **3** 修改 GPTQ 推理参数。
+Gateway 的并发、部署节点及专家启用状态是全局配置，不随专家池切换复制。
+
+```bash
+python3 scripts/control.py --pool gptq show
+python3 scripts/control.py --pool gptq set pool replicas=2 --write
+python3 scripts/control.py --pool gptq set engine model_parameters.max_num_seqs=3 --write
+python3 scripts/control.py --pool gptq apply pool
+python3 scripts/control.py --pool gptq verify pool
+python3 scripts/control.py --pool gptq logs router --tail 100
+# 切换部署节点时，先改候选节点并准备该专家的权重，再应用
+python3 scripts/control.py --pool gptq prepare pool
+python3 scripts/control.py set gateway pools.gptq.enabled=true --write
+python3 scripts/control.py apply gateway
+python3 scripts/control.py verify gateway
+```
+
+`apply/status/verify ... all` 表示当前专家池及全局组件，不隐式操作所有专家池。
+GPTQ 验收与发布结果放在 `artifacts/kubernetes/pools/gptq/`，AWQ 原结果路径保留。
+生成的两个 YAML 共用 `manage_pool.py`，由各池配置渲染，不直接手改 YAML。
+物理节点入群/退出仍是全局流程；选择 AWQ 执行菜单 11，先迁移节点上的其他专家，否则会因未纳管工作负载而阻止退出。
+GPTQ 初版只有 `.216` 的本地权重及单副本，节点故障不能保证自动在其他机器恢复，需先发布权重并增加兼容候选节点/副本。
 
 ## 接入和退出算力节点
 

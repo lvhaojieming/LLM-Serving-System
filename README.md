@@ -4,9 +4,10 @@
 参数清单、修改、部署和验收用法见 [总控操作说明](docs/control.md)。
 
 面向昇腾的 Kubernetes 推理工程。实例生命周期由 Kubernetes 管理，负载均衡与动态发现复用官方 vLLM Router。
-当前采用一个二级 Router 统一维护池入口计数，调度四个模型副本，分别运行在 `.209`、`.210`、`.211`、`.216`；跨 Router 协调后置。
+当前 AWQ 池有四个模型副本，分别运行在 `.209`、`.210`、`.211`、`.216`；GPTQ 池有一个模型副本，运行在 `.216` 的另一张 NPU。
+每个专家池使用一个官方二级 Router 维护本池入口计数；同池跨 Router 副本协调后置。
 一级概率 Router 已从 `MLsys_inference` 迁入 `heteroserve.routing`，Gateway 通过池 Service 接入二级路由。
-入口配置为 `deploy/gateway.json`；当前仅 AWQ 池可用，预测到未部署 GPTQ 时明确返回 503，不自动改选。
+入口配置为 `deploy/gateway.json`，AWQ 与 GPTQ 两个池均已启用；禁用专家时明确返回 503，不自动改选。
 应用只提供真实模型准入、健康检查、排空和发现一致性接口，不重新实现推理引擎或负载均衡算法。
 
 实验采用独立的跨物理主机 K3s 容器集群，管理凭据由实验控制平面生成。
@@ -24,7 +25,8 @@
 | `deploy/k8s/` | 通用项目权限、网络与暂停状态的 NPU 验证模板 |
 | `scripts/check_kubernetes.py` | Kustomize 渲染、固定 OpenAPI schema 与部署约束检查 |
 | `docs/deployment.md` | 部署边界、权限、版本和验收步骤 |
-| `deploy/pools/ascend-awq.json` | 专家池、模型版本、副本、启动及退出预算 |
+| `deploy/pools/ascend-{awq,gptq}.json` | 各专家的模型版本、副本、节点及独立推理参数 |
+| `deploy/pools/defaults.json` | 两个专家池共用的部署默认值及 Router 依赖 |
 | `deploy/k8s/pools/` | 可渲染的专家与 vLLM Router 部署入口 |
 | `scripts/manage_pool.py` | 渲染、发布、复用 Router 依赖及真实模型验收 |
 | `scripts/verify_lifecycle.py` | 扩缩容、发现、恢复、排空和维护验收 |

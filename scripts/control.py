@@ -12,6 +12,7 @@ import tempfile
 from contextlib import nullcontext
 
 from manage_lab import ROOT, kubectl, load_config, names, active_nodes, operation_lock
+from manage_pool import load_pool, resolve_runtime
 
 FILES = {"gateway": "deploy/gateway.json", "pool": "deploy/pools/ascend-awq.json",
          "engine": "deploy/lab/npu.json"}
@@ -20,7 +21,8 @@ FILES = {"gateway": "deploy/gateway.json", "pool": "deploy/pools/ascend-awq.json
 FIELDS = {
     "gateway": {"max_inflight": "入口并发预算", "max_request_bytes": "请求体字节上限",
                 "timeout_seconds": "上游读取超时秒数", "default_max_tokens": "默认输出长度",
-                "deployment.node": "Gateway 节点（迁移前 prepare）"},
+                "deployment.node": "Gateway 节点（迁移前 prepare）",
+                "pools.awq.enabled": "启用 AWQ 专家入口", "pools.gptq.enabled": "启用 GPTQ 专家入口"},
     "pool": {"replicas": "模型副本数，每副本一张卡", "model_nodes": "模型候选节点",
              "router_nodes": "二级 Router 候选节点（迁移前 prepare）",
              "requests_per_worker": "每实例请求预算，同时更新模型和 Router",
@@ -37,7 +39,27 @@ FIELDS = {
 
 def read_configs(root=None):
     root = ROOT if root is None else root
-    return {key: json.loads((root / path).read_text(encoding="utf-8")) for key, path in FILES.items()}
+    pool = load_pool(root / FILES["pool"])
+    return {"gateway": json.loads((root / FILES["gateway"]).read_text(encoding="utf-8")),
+            "pool": pool, "engine": resolve_runtime(pool, root)}
+
+
+def available_pools(root=None):
+    root = ROOT if root is None else root
+    result = {}
+    for path in sorted((root / "deploy/pools").glob("ascend-*.json")):
+        pool = load_pool(path)
+        if pool["expert"] in result:
+            raise ValueError("Duplicate expert configuration")
+        result[pool["expert"]] = str(path.relative_to(root)).replace("\\", "/")
+    return result
+
+
+def select_pool(expert):
+    choices = available_pools()
+    if expert not in choices:
+        raise ValueError("Unknown expert pool: " + expert)
+    FILES["pool"] = choices[expert]
 
 
 def lookup(obj, key):
@@ -53,7 +75,7 @@ def validate(configs, cluster):
             value = lookup(configs[section], field)
             if field in {"deployment.node", "model_nodes", "router_nodes"}:
                 continue
-            if field.endswith("enforce_eager"):
+            if field.endswith(("enforce_eager", ".enabled")):
                 if type(value) is not bool:
                     raise ValueError(field + " must be boolean")
             elif field.endswith("gpu_memory_utilization"):
@@ -71,6 +93,9 @@ def validate(configs, cluster):
             raise ValueError(field + " must contain unique eligible node names")
     if gateway["deployment"]["node"] not in device_nodes:
         raise ValueError("Gateway node must have configured NPU support")
+    for name, entry in gateway["pools"].items():
+        if entry["enabled"] and (not isinstance(entry["base_url"], str) or not entry["base_url"].startswith("http://") or not entry.get("model")):
+            raise ValueError("Enabled expert requires its configured Service URL and model: " + name)
     if pool["router_replicas"] != 1:
         raise ValueError("Current admission accounting requires one L2 Router")
     if pool["startup_seconds"] < 5 or pool["termination_seconds"] < pool["drain_seconds"] + 35:
@@ -95,25 +120,35 @@ def edit(root, section, assignments, write=False, expected=None):
 
 
 def edit_locked(root, section, assignments, write=False, expected=None):
-    path = root / FILES[section]
+    storage = "pool" if section == "engine" else section
+    path = root / FILES[storage]
     before = path.read_text(encoding="utf-8")
+    raw = json.loads(before)
     configs = read_configs(root)
     if expected is not None and configs != expected:
         raise RuntimeError("配置已被其他操作修改，请重新进入编辑菜单")
     candidate = copy.deepcopy(configs)
     for assignment in assignments:
-        key, separator, raw = assignment.partition("=")
+        key, separator, supplied = assignment.partition("=")
         if not separator or key not in FIELDS[section]:
             raise ValueError("Unknown/edit-protected parameter: " + key)
         old = lookup(candidate[section], key)
-        value = parse_value(old, raw)
+        value = parse_value(old, supplied)
         parent = candidate[section]
         parts = key.split(".")
         for part in parts[:-1]:
             parent = parent[part]
         parent[parts[-1]] = value
+        target = raw
+        if section == "engine":
+            target = raw.setdefault("runtime", {})
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+        target[parts[-1]] = value
+    if section == "engine":
+        candidate["pool"]["runtime"] = raw["runtime"]
     validate(candidate, load_config(root / "deploy/lab/cluster.json"))
-    after = json.dumps(candidate[section], ensure_ascii=False, indent=2) + "\n"
+    after = json.dumps(raw, ensure_ascii=False, indent=2) + "\n"
     print("".join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
                                    fromfile=str(path), tofile=str(path))), end="")
     if write and candidate[section] != configs[section]:
@@ -142,7 +177,7 @@ def commands(action, target):
                    "gateway": [("manage_gateway.py", "status")]},
         "verify": {"pool": [("manage_pool.py", "verify"), ("verify_lifecycle.py", "routing")],
                    "gateway": [("manage_gateway.py", "verify")]},
-        "prepare": {"pool": [("manage_pool.py", "prepare-router")], "gateway": [("manage_gateway.py", "prepare")]},
+        "prepare": {"pool": [("manage_pool.py", "prepare-model"), ("manage_pool.py", "prepare-router")], "gateway": [("manage_gateway.py", "prepare")]},
     }
     choices = mapping[action]
     if target != "all" and target not in choices:
@@ -186,7 +221,8 @@ def edit_interactive(section):
     fields = list(FIELDS[section])
     pending = {}
     target = "gateway" if section == "gateway" else "pool"
-    print(f"\n{LABELS[section]} | 配置文件: {FILES[section]}")
+    source = FILES["pool"] + " runtime" if section == "engine" else FILES[section]
+    print(f"\n{LABELS[section]} | 配置文件: {source}")
     print("修改暂存在内存中；可先调整多个相关参数，再统一保存。")
     print(f"生效操作: apply {target}；可能更新对应 Pod。换节点前需确认权重和运行依赖已准备。")
     while True:
@@ -248,7 +284,7 @@ def interactive():
             print("1. 查看/修改一级路由和 Gateway\n2. 查看/修改专家池和二级 Router\n"
                   "3. 查看/修改模型推理参数\n4. 查看全部原始配置（含固定参数、模型和节点）\n"
                   "5. 离线校验配置\n6. 查询集群实际状态\n7. 应用已有配置并验收\n"
-                  "8. 执行推理验收\n9. 查看日志\n10. 准备已有资产\n11. 接入/退出算力节点\n0. 退出")
+                  "8. 执行推理验收\n9. 查看日志\n10. 准备已有资产\n11. 接入/退出算力节点\n12. 选择专家池\n0. 退出")
             answer = input("请选择: ").strip()
             if answer == "0":
                 return
@@ -262,6 +298,14 @@ def interactive():
                     main(["check"])
                 elif answer == "11":
                     node_menu()
+                elif answer == "12":
+                    choices = list(available_pools())
+                    print("  ".join(f"{i}. {name}" for i, name in enumerate(choices, 1)))
+                    chosen = input("专家池序号（回车返回）: ").strip()
+                    if chosen:
+                        if not chosen.isdigit() or not 1 <= int(chosen) <= len(choices):
+                            raise ValueError("请选择有效专家池序号")
+                        select_pool(choices[int(chosen) - 1])
                 elif answer in {"6", "7", "8", "9", "10"}:
                     action = {"6": "status", "7": "apply", "8": "verify", "9": "logs", "10": "prepare"}[answer]
                     target = choose_target(action)
@@ -292,6 +336,7 @@ def node_menu():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pool", help="Expert pool to manage, e.g. awq or gptq")
     sub = parser.add_subparsers(dest="action")
     sub.add_parser("menu", help="Interactive configuration and deployment menu (default)")
     show = sub.add_parser("show", help="Show editable parameters and their source files")
@@ -313,7 +358,11 @@ def main(argv=None):
     logs.add_argument("target", choices=["pool", "router", "gateway"])
     logs.add_argument("--tail", type=int, default=100)
     args = parser.parse_args(argv)
+    if args.pool:
+        select_pool(args.pool)
     if args.action == "node":
+        if read_configs()["pool"]["expert"] != "awq":
+            raise ValueError("Physical node membership is global; select awq and migrate other pools before retirement")
         from manage_nodes import execute
         execute(args.operation, args.host, args.execute)
         return
@@ -328,7 +377,7 @@ def main(argv=None):
         for section, fields in FIELDS.items():
             if args.section not in (section, "all"):
                 continue
-            print(section + " -> " + FILES[section])
+            print(section + " -> " + (FILES["pool"] + " runtime overrides" if section == "engine" else FILES[section]))
             for key, description in fields.items():
                 print(f"  {key} = {json.dumps(lookup(configs[section], key), ensure_ascii=False)}  # {description}")
         return
@@ -338,7 +387,10 @@ def main(argv=None):
             raise ValueError("tail must be between 1 and 10000")
         pool = configs["pool"]
         app = {"pool": "expert", "router": "router", "gateway": "gateway"}[args.target]
-        print(kubectl(cluster, ["logs", "-n", pool["namespace"], "-l", "app.kubernetes.io/name=" + app,
+        selector = "app.kubernetes.io/name=" + app
+        if args.target != "gateway":
+            selector += ",heteroserve.io/pool=" + pool["pool"]
+        print(kubectl(cluster, ["logs", "-n", pool["namespace"], "-l", selector,
                                "--all-containers=true", "--prefix=true", "--tail=" + str(args.tail)]).stdout)
         return
     if args.action in {"check", "apply", "prepare"}:
@@ -349,6 +401,8 @@ def main(argv=None):
     with operation_lock(ROOT) if args.action in {"apply", "prepare"} and not args.plan else nullcontext():
         for script, action in commands(args.action, args.target):
             command = [sys.executable, str(ROOT / "scripts" / script), action]
+            if script in {"manage_pool.py", "verify_lifecycle.py"}:
+                command += ["--config", str(ROOT / FILES["pool"])]
             print(subprocess.list2cmdline(command), flush=True)
             if not args.plan:
                 subprocess.run(command, cwd=ROOT, check=True)

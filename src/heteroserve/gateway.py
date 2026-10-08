@@ -65,15 +65,19 @@ def create_app(config, transport=None, router_runtime=None):
     async def ready():
         if runtime is None or state["draining"]:
             raise HTTPException(503, "learned gateway is unavailable")
-        for pool in config["pools"].values():
+        healthy = []
+        for name, pool in config["pools"].items():
             if not pool.get("enabled", True):
                 continue
             try:
                 response = await app.state.client.get(pool["base_url"].removesuffix("/v1") + "/ready", timeout=3)
                 if response.status_code == 200:
-                    return {"ready": True, "auto_expert_coverage_complete": all(p.get("enabled", True) for p in config["pools"].values())}
+                    healthy.append(name)
             except httpx.HTTPError:
                 pass
+        if healthy:
+            return {"ready": True, "ready_experts": healthy,
+                    "auto_expert_coverage_complete": len(healthy) == len(config["pools"])}
         raise HTTPException(503, "no ready downstream expert pool")
 
     @app.get("/v1/models")

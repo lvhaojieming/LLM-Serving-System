@@ -1,5 +1,6 @@
 """Render and manage the Ascend expert pool through the private Kubernetes API."""
 import argparse
+import copy
 import hashlib
 import ipaddress
 import json
@@ -14,13 +15,46 @@ from manage_lab import ROOT, OWNER, kubectl, load_config, names, remote
 POOL_CONFIG = ROOT / "deploy/pools/ascend-awq.json"
 
 
+def load_pool(path):
+    path = Path(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if "defaults" not in raw:
+        return raw
+    base = (path.parent / raw["defaults"]).resolve()
+    if base.parent != path.parent.resolve() or base.name != "defaults.json":
+        raise ValueError("Pool defaults must be the shared defaults.json")
+    return {**json.loads(base.read_text(encoding="utf-8")), **raw}
+
+
+def resolve_runtime(pool, root=ROOT):
+    runtime = (root / pool.get("runtime_config", "deploy/lab/npu.json")).resolve()
+    if not runtime.is_relative_to(root.resolve()):
+        raise ValueError("Runtime configuration must remain in the formal project")
+    npu = json.loads(runtime.read_text(encoding="utf-8"))
+    overrides = copy.deepcopy(pool.get("runtime", {}))
+    if set(overrides) - {"model_source", "served_model", "model_parameters"}:
+        raise ValueError("Pool runtime overrides are limited to model and engine parameters")
+    params = overrides.pop("model_parameters", {})
+    npu.update(overrides)
+    npu["model_parameters"].update(params)
+    asset = Path(pool.get("model_asset", "model"))
+    if asset.is_absolute() or ".." in asset.parts:
+        raise ValueError("Model asset must stay inside the node asset directory")
+    return npu
+
+
+def artifact_path(pool, filename):
+    # Preserve the original AWQ report location; additional pools have separate records.
+    base = ROOT / "artifacts/kubernetes"
+    if pool["expert"] != "awq":
+        base = base / "pools" / pool["expert"]
+    return base / filename
+
+
 def configuration():
     cluster = load_config(ROOT / "deploy/lab/cluster.json")
-    pool = json.loads(POOL_CONFIG.read_text())
-    runtime = (ROOT / pool.get("runtime_config", "deploy/lab/npu.json")).resolve()
-    if not runtime.is_relative_to(ROOT.resolve()):
-        raise ValueError("Runtime configuration must remain in the formal project")
-    npu = json.loads(runtime.read_text())
+    pool = load_pool(POOL_CONFIG)
+    npu = resolve_runtime(pool)
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", pool["pool"]) or pool["namespace"] != "heteroserve":
         raise ValueError("Unexpected pool identity")
     if not re.fullmatch(r"[a-f0-9]{64}", pool["weights_manifest_sha256"]):
@@ -95,7 +129,7 @@ def pool_objects(cluster, pool, npu):
            "containers": [container], "volumes": [
                {"name": "runtime", "configMap": {"name": pool["pool"] + "-runtime"}},
                {"name": "driver", "hostPath": {"path": "/usr/local/Ascend/driver", "type": "Directory"}},
-               {"name": "weights", "hostPath": {"path": "/var/lib/rancher/k3s/heteroserve-assets/model", "type": "Directory"}},
+                 {"name": "weights", "hostPath": {"path": "/var/lib/rancher/k3s/heteroserve-assets/" + pool.get("model_asset", "model"), "type": "Directory"}},
                {"name": "adapter", "hostPath": {"path": "/var/lib/rancher/k3s/heteroserve-assets/adapter", "type": "Directory"}},
                {"name": "scratch", "emptyDir": {"sizeLimit": pool["scratch_limit"]}},
                {"name": "tmp", "emptyDir": {"sizeLimit": "1Gi"}}]}
@@ -115,10 +149,26 @@ def render():
     import yaml
     cluster, pool, npu = configuration()
     objects = pool_objects(cluster, pool, npu) + router_objects(cluster, pool, npu)
-    path = ROOT / "deploy/k8s/pools/ascend-awq.yaml"
+    path = ROOT / "deploy/k8s/pools" / (POOL_CONFIG.stem + ".yaml")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump_all(objects, sort_keys=False, allow_unicode=True), encoding="utf-8")
     print("Rendered " + str(path))
+
+
+def prepare_model():
+    """Reuse existing publication and transfer logic for the selected expert."""
+    from manage_nodes import prepare_assets, inspect_container
+    cluster, pool, npu = configuration()
+    source_runtime = copy.deepcopy(npu)
+    source_runtime["host"] = pool.get("asset_source_host", npu["host"])
+    reports = {}
+    for node in cluster["nodes"]:
+        if names(cluster, node)[0] in pool["model_nodes"]:
+            inspect_container(cluster, node)
+            reports[node["host"]] = prepare_assets(cluster, node, source_runtime, pool, POOL_CONFIG)
+    path = artifact_path(pool, "asset-publication.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(reports, indent=2), encoding="utf-8")
 
 
 def router_objects(cluster, pool, npu):
@@ -270,7 +320,7 @@ def verify():
             raise RuntimeError("Expected replica count is not Ready; inspect startup and scheduling events")
         time.sleep(3)
     result = verify_pods(cluster, pool, npu, pods)
-    path = ROOT / "artifacts/kubernetes/pool-verification.json"
+    path = artifact_path(pool, "pool-verification.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2), flush=True)
@@ -317,11 +367,11 @@ print(json.dumps({'passed':True,'identity':identity,'ordinary_answer':answer,'st
 def main():
     global POOL_CONFIG
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["render", "apply", "status", "verify", "router", "prepare-router"])
+    parser.add_argument("action", choices=["render", "apply", "status", "verify", "router", "prepare-router", "prepare-model"])
     parser.add_argument("--config", default=str(POOL_CONFIG), help="Reusable expert-pool configuration")
     args = parser.parse_args()
     POOL_CONFIG = Path(args.config)
-    {"render": render, "apply": apply, "status": status, "verify": verify, "router": router, "prepare-router": prepare_router}[args.action]()
+    {"render": render, "apply": apply, "status": status, "verify": verify, "router": router, "prepare-router": prepare_router, "prepare-model": prepare_model}[args.action]()
 
 
 if __name__ == "__main__":

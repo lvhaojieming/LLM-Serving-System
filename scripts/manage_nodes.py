@@ -14,7 +14,7 @@ import time
 from manage_lab import (ROOT, OWNER, active_nodes, apply_network_tuning,
                         ensure_node, kubectl, load_config, names, node_args, preflight, remote, operation_lock, validate_config)
 from manage_npu import exclusive_reservations
-from manage_pool import pool_objects, verify_pods
+from manage_pool import pool_objects, verify_pods, load_pool, resolve_runtime
 
 CLUSTER = "deploy/lab/cluster.json"
 POOL = "deploy/pools/ascend-awq.json"
@@ -22,6 +22,8 @@ NPU = "deploy/lab/npu.json"
 
 
 def read(path):
+    if path == POOL:
+        return load_pool(ROOT / path)
     return json.loads((ROOT / path).read_text(encoding="utf-8"))
 
 
@@ -167,7 +169,8 @@ def removal_capacity(cluster, pool, npu, name, nodes, pods, physical):
 
 def plan(action, host):
     cluster = load_config(ROOT / CLUSTER)
-    pool, npu, gateway = read(POOL), read(NPU), read("deploy/gateway.json")
+    pool, gateway = read(POOL), read("deploy/gateway.json")
+    npu = resolve_runtime(pool)
     node = find_node(cluster, host, action == "add")
     if node not in cluster["nodes"]:
         proposed = copy.deepcopy(cluster)
@@ -253,7 +256,7 @@ print(json.dumps(result))
     return json.loads(remote(host, ["python3", "-c", code, directory], timeout=600).stdout)
 
 
-def prepare_assets(cluster, node, npu, pool):
+def prepare_assets(cluster, node, npu, pool, pool_config=None):
     source, target = npu["host"], node["host"]
     results = {}
     for key in ("model_source", "adapter_source"):
@@ -276,7 +279,10 @@ def prepare_assets(cluster, node, npu, pool):
     # Normal Pod startup and real inference acceptance remain the compatibility check.
     results["image_preflight"] = "skipped_preprovisioned_environment"
     results["imported_images"] = []
-    run("manage_npu.py", "publish", "--host", target)
+    args = ["publish", "--host", target]
+    if pool_config:
+        args += ["--pool-config", str(pool_config)]
+    run("manage_npu.py", *args)
     return results
 
 
@@ -373,7 +379,8 @@ def remove(cluster, node, report, checkpoint):
 
 
 def add(cluster, node, report, checkpoint):
-    pool, npu = read(POOL), read(NPU)
+    pool = read(POOL)
+    npu = resolve_runtime(pool)
     name = names(cluster, node)[0]
     if report["plan"]["already_active"]:
         report["acceptance"] = verify_service()

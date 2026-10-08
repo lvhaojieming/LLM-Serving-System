@@ -48,11 +48,41 @@ def test_auto_invokes_router_once_and_uses_pool_service_with_canonical_template(
 def test_undeployed_predicted_expert_is_explicit_and_never_silently_remapped():
     def backend(request):
         pytest.fail("undeployed pool must not be dispatched")
-    app = create_app(config(), httpx.MockTransport(backend), Runtime("gptq"))
+    cfg = config()
+    cfg["pools"]["gptq"]["enabled"] = False
+    cfg["pools"]["gptq"]["base_url"] = None
+    app = create_app(cfg, httpx.MockTransport(backend), Runtime("gptq"))
     with TestClient(app) as client:
         response = client.post("/v1/chat/completions", json={"model": "auto", "messages": [{"role": "user", "content": "hello"}]})
         assert response.status_code == 503 and "fallback is disabled" in response.text
         assert app.state.gateway["inflight"] == 0
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_auto_selected_gptq_uses_gptq_pool(stream):
+    def backend(request):
+        assert request.url.host == "gptq-ascend910b-vllm-router.heteroserve.svc.cluster.local"
+        assert json.loads(request.content)["model"] == "gptq"
+        if stream:
+            return httpx.Response(200, content=b'data: {"choices":[]}\n\ndata: [DONE]\n\n')
+        return httpx.Response(200, json={"model": "backend", "choices": []})
+    runtime = Runtime("gptq")
+    app = create_app(config(), httpx.MockTransport(backend), runtime)
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", json={"model": "auto", "stream": stream, "messages": [{"role": "user", "content": "hello"}]})
+        assert response.status_code == 200 and response.headers["x-moqe-expert"] == "gptq"
+        assert runtime.calls == 1 and app.state.gateway["inflight"] == 0
+
+
+def test_ready_coverage_requires_both_experts_healthy():
+    def backend(request):
+        return httpx.Response(200 if request.url.host.startswith("awq-") else 503)
+    app = create_app(config(), httpx.MockTransport(backend), Runtime())
+    with TestClient(app) as client:
+        response = client.get("/ready")
+        assert response.status_code == 200
+        assert response.json()["ready_experts"] == ["awq"]
+        assert response.json()["auto_expert_coverage_complete"] is False
 
 
 @pytest.mark.parametrize("payload", [[], {"model": []}, {"model": "auto", "messages": []},

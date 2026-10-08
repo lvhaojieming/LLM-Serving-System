@@ -28,8 +28,8 @@
       "model": "awq"
     },
     "gptq": {
-      "enabled": false,
-      "base_url": null,
+      "enabled": true,
+      "base_url": "http://gptq-ascend910b-vllm-router.heteroserve.svc.cluster.local:8000/v1",
       "model": "gptq"
     }
   },

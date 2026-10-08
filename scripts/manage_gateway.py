@@ -127,7 +127,8 @@ def verify(cluster, pool):
     kubectl(cluster, ["rollout", "status", "deployment/heteroserve-gateway", "-n", pool["namespace"], "--timeout=120s"], timeout=150)
     data = json.loads(kubectl(cluster, ["get", "pods", "-n", pool["namespace"], "-l", "app.kubernetes.io/name=gateway", "-o", "json"]).stdout)
     pod = next(p for p in data["items"] if not p["metadata"].get("deletionTimestamp"))
-    code = """import json,urllib.request,urllib.error
+    code = """import json,sys,urllib.request,urllib.error
+enabled=set(json.loads(sys.argv[1]))
 base='http://127.0.0.1:8000'
 ready=json.load(urllib.request.urlopen(base+'/ready',timeout=10))
 records=[];successful=[]
@@ -146,18 +147,26 @@ def send(prompt,stream,model='auto'):
    if prompt==prompts[0]:assert answer.strip()=='42',answer
    return {'status':r.status,'expert':expert,'worker_uid':r.headers['x-heteroserve-pod-uid'],'router_ms':r.headers.get('x-moqe-router-ms'),'stream':stream,'answer':answer,'stream_done':('data: [DONE]' in text) if stream else None}
  except urllib.error.HTTPError as e:
-  error=e.read().decode();assert e.code==503 and 'undeployed expert' in error,error
+  error=e.read().decode();assert len(enabled)<2 and e.code==503 and 'undeployed expert' in error,error
   return {'status':503,'error':error,'stream':stream}
 for prompt in prompts:
  r=send(prompt,False);records.append(r)
  if r['status']==200:successful.append(prompt)
 if successful:records.append(send(successful[0],True))
 else:records.append(send(prompts[0],False,'awq'));records.append(send(prompts[0],True,'awq'))
+auto_experts={r['expert'] for r in records if r['status']==200}
+if len(enabled)==2:
+ assert ready['auto_expert_coverage_complete'] and auto_experts==enabled,(ready,auto_experts)
+for expert in sorted(enabled):
+ for stream in [False,True]:
+  r=send(prompts[0],stream,expert);assert r['status']==200 and r['expert']==expert
+  records.append(r)
 metrics=urllib.request.urlopen(base+'/metrics',timeout=10).read().decode()
 assert 'heteroserve_gateway_inflight 0' in metrics
 print(json.dumps({'ready':ready,'requests':records,'auto_generation_verified':bool(successful),'final_metrics':metrics}))
 """
-    result = json.loads(kubectl(cluster, ["exec", "-n", pool["namespace"], pod["metadata"]["name"], "--", "python3", "-c", code], timeout=600).stdout)
+    enabled = [name for name, p in config()["pools"].items() if p["enabled"]]
+    result = json.loads(kubectl(cluster, ["exec", "-n", pool["namespace"], pod["metadata"]["name"], "--", "python3", "-c", code, json.dumps(enabled)], timeout=600).stdout)
     logs = kubectl(cluster, ["logs", "-n", pool["namespace"], pod["metadata"]["name"], "--tail=300"]).stdout
     decisions = []
     for line in logs.splitlines():
@@ -169,7 +178,7 @@ print(json.dumps({'ready':ready,'requests':records,'auto_generation_verified':bo
         raise RuntimeError("No real learned-router decisions were recorded")
     result.update(passed=True, pod_uid=pod["metadata"]["uid"], node=pod["spec"]["nodeName"], decisions=decisions,
                   source_commit=config()["migration_source"]["commit"], checkpoint_sha256=config()["router"]["checkpoint_sha256"],
-                  scope="real checkpoint and AWQ chain; GPTQ is explicitly undeployed")
+                  scope="real checkpoint with configured expert pools", enabled_experts=enabled)
     devices = json.loads(kubectl(cluster, ["exec", "-n", pool["namespace"], pod["metadata"]["name"], "--", "python3", "-c",
         "import json;from pathlib import Path;print(json.dumps([p.name for p in Path('/dev').glob('davinci*') if p.name[7:].isdigit()]))"]).stdout)
     if len(devices) != 1:

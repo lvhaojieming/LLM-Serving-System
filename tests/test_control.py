@@ -7,7 +7,7 @@ import control
 
 @pytest.fixture
 def project(tmp_path):
-    for relative in [*control.FILES.values(), "deploy/lab/cluster.json"]:
+    for relative in [*control.FILES.values(), "deploy/lab/cluster.json", "deploy/pools/defaults.json", "deploy/pools/ascend-gptq.json"]:
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(control.ROOT / relative, target)
@@ -123,3 +123,31 @@ def test_menu_end_of_input_exits_without_changes(monkeypatch, project):
     monkeypatch.setattr("builtins.input", eof)
     control.main([])
     assert control.read_configs(project) == before
+
+
+def test_gptq_engine_changes_do_not_modify_awq_or_shared_runtime(monkeypatch, project):
+    monkeypatch.setitem(control.FILES, "pool", "deploy/pools/ascend-gptq.json")
+    awq = (project / "deploy/pools/ascend-awq.json").read_bytes()
+    hardware = (project / "deploy/lab/npu.json").read_bytes()
+    control.edit(project, "engine", ["model_parameters.max_num_seqs=3"], True)
+    assert control.read_configs(project)["engine"]["model_parameters"]["max_num_seqs"] == 3
+    assert (project / "deploy/pools/ascend-awq.json").read_bytes() == awq
+    assert (project / "deploy/lab/npu.json").read_bytes() == hardware
+
+
+def test_selected_pool_commands_use_its_config(monkeypatch):
+    monkeypatch.setitem(control.FILES, "pool", "deploy/pools/ascend-gptq.json")
+    calls = []
+    monkeypatch.setattr(control.subprocess, "run", lambda args, **kw: calls.append(args))
+    control.main(["apply", "pool"])
+    assert len(calls) == 2
+    assert all(args[-2:] == ["--config", str(control.ROOT / control.FILES["pool"])] for args in calls)
+
+
+def test_pool_logs_do_not_include_other_expert(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setitem(control.FILES, "pool", "deploy/pools/ascend-gptq.json")
+    commands = []
+    monkeypatch.setattr(control, "kubectl", lambda c, args: (commands.append(args) or SimpleNamespace(stdout="logs")))
+    control.main(["logs", "router"])
+    assert "app.kubernetes.io/name=router,heteroserve.io/pool=gptq-ascend910b-vllm" in commands[0]

@@ -1,0 +1,20 @@
+{
+  "defaults": "defaults.json",
+  "pool": "gptq-ascend910b-vllm",
+  "expert": "gptq",
+  "asset_source_host": "10.107.206.216",
+  "replicas": 1,
+  "model_nodes": [
+    "heteroserve-lab-216"
+  ],
+  "router_nodes": [
+    "heteroserve-lab-209",
+    "heteroserve-lab-210"
+  ],
+  "weights_manifest_sha256": "2d3cfeb764f1264250d5f1148270dc316a851c00cead215efd5929fef2f4c58b",
+  "model_asset": "models/gptq",
+  "runtime": {
+    "model_source": "/root/zhangjinhao/model/Qwen3-14B-GPTQ-Ascend-INT4",
+    "served_model": "moqe-qwen3-gptq"
+  }
+}

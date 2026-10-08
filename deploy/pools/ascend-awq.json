@@ -1,10 +1,7 @@
 {
-  "namespace": "heteroserve",
+  "defaults": "defaults.json",
   "pool": "awq-ascend910b-vllm",
   "expert": "awq",
-  "backend": "vllm-ascend",
-  "hardware": "ascend910b4",
-  "device_type": "Ascend910B4",
   "replicas": 4,
   "model_nodes": [
     "heteroserve-lab-209",
@@ -13,42 +10,8 @@
     "heteroserve-lab-216"
   ],
   "weights_manifest_sha256": "70a289a9eb8ed35d8a62aa466738c2cd5906df68df844c7731c98840230654f9",
-  "startup_seconds": 1200,
-  "drain_seconds": 240,
-  "termination_seconds": 300,
-  "scratch_limit": "20Gi",
-  "requests_per_worker": 8,
-  "router_replicas": 1,
   "router_nodes": [
     "heteroserve-lab-209",
     "heteroserve-lab-210"
-  ],
-  "worker_request_memory": "16Gi",
-  "worker_request_cpu": "4",
-  "discovery_cache_seconds": 15,
-  "router_version": "0.1.15",
-  "router_wheel_sha256": "c30070b2f8559fc33da4b114e58d28881775585dd6f6e1ac173ea494c8fbe20e",
-  "router_dependencies": [
-    {
-      "name": "vllm-router",
-      "version": "0.1.15",
-      "filename": "vllm_router-0.1.15-cp38-abi3-manylinux_2_28_aarch64.whl",
-      "url": "https://files.pythonhosted.org/packages/96/dc/62a45ba798a435706631614197427548f40cdc5c403b1214f029e693668b/vllm_router-0.1.15-cp38-abi3-manylinux_2_28_aarch64.whl",
-      "sha256": "c30070b2f8559fc33da4b114e58d28881775585dd6f6e1ac173ea494c8fbe20e"
-    },
-    {
-      "name": "setproctitle",
-      "version": "1.3.8",
-      "filename": "setproctitle-1.3.8-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
-      "url": "https://files.pythonhosted.org/packages/75/d4/565f624a49e2e49b4907f3b5131cdda20027d45312ce2b538a0e3985b549/setproctitle-1.3.8-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
-      "sha256": "199c2c674af749003596d3a5ccf35112d28a7cfe95a363eae5fd042c33e0253e"
-    },
-    {
-      "name": "orjson",
-      "version": "3.12.0",
-      "filename": "orjson-3.12.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
-      "url": "https://files.pythonhosted.org/packages/14/6d/e3a8c34d687895aecd8b267a01c46106eb98d8424a83bfa7bacb723854f6/orjson-3.12.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
-      "sha256": "18a87929f31d94a77f7dc93cf527e91f39ce7fe7813d588a4de2507efd32a387"
-    }
   ]
 }

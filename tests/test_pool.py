@@ -56,3 +56,23 @@ def test_model_acceptance_does_not_probe_old_ready_revision(monkeypatch):
     monkeypatch.setattr(pool, "kubectl", incomplete_rollout)
     with pytest.raises(RuntimeError, match="rollout incomplete"):
         pool.verify()
+
+
+def test_gptq_has_distinct_weights_and_identity_with_shared_template(monkeypatch):
+    monkeypatch.setattr(pool, "POOL_CONFIG", ROOT / "deploy/pools/ascend-gptq.json")
+    cluster, settings, npu = pool.configuration()
+    deploy = next(v for v in pool.pool_objects(cluster, settings, npu) if v["kind"] == "Deployment")
+    spec = deploy["spec"]["template"]["spec"]
+    weights = next(v for v in spec["volumes"] if v["name"] == "weights")
+    assert weights["hostPath"]["path"].endswith("/models/gptq")
+    assert npu["served_model"] == "moqe-qwen3-gptq"
+    assert settings["expert"] == "gptq" and settings["replicas"] == 1
+    assert spec["containers"][0]["resources"]["limits"] == {npu["resource"]: "1"}
+    assert pool.artifact_path(settings, "pool-verification.json") != ROOT / "artifacts/kubernetes/pool-verification.json"
+
+
+def test_awq_manifest_unchanged_by_common_config_refactor():
+    cluster, settings, npu = pool.configuration()
+    old = {k: v for k, v in settings.items() if k != "defaults"}
+    assert pool.pool_objects(cluster, settings, npu) == pool.pool_objects(cluster, old, npu)
+    assert pool.router_objects(cluster, settings, npu) == pool.router_objects(cluster, old, npu)

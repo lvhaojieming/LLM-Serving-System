@@ -14,7 +14,7 @@ Kubernetes 管理节点、设备资源及 Deployment；官方 vLLM Router 负责
 privileged 容器不能作为对宿主机管理员的安全隔离边界；设备归属必须单独确认。
 
 用户已指定 `.208` 至 `.217`，共十台候选节点；2026-10-08 已完成只读盘点。
-当前 `.217` 为控制节点，`.209`、`.210`、`.211`、`.216` 为推理节点，每台运行一个 AWQ 副本。
+当前 `.217` 为控制节点，`.209`、`.210`、`.211`、`.216` 为推理节点，每台运行一个 AWQ 副本；`.216` 另有一个单卡 GPTQ 副本。
 五只节点容器长期复用并锁定 ID；外层 CPU、内存、swap、进程上限和项目 CPU/内存 limits 已按用户要求取消。
 原 4 CPU、8 GiB 只保留为创建预算记录。应用保留合理的调度 requests 和一实例一张 NPU 的 requests/limits。
 模型缓存临时卷有 20 GiB 上限；监控数据保留 7 天、TSDB 数据规模上限 5 GB。
@@ -153,7 +153,7 @@ DaemonSet 使用实验节点已有的固定 K3s 镜像和 ethtool，节点重启
 `70a289a9eb8ed35d8a62aa466738c2cd5906df68df844c7731c98840230654f9`；两台目标节点的六个权重分片均逐一校验。
 模型和适配器在目标节点预先准备，再以只读挂载提供给 Pod。Kubernetes 不负责自动复制权重。
 
-当前两个模型副本和一个二级路由副本使用内部 Service。每个模型 Pod 申请 `huawei.com/Ascend910: 1`，
+当前 AWQ 四个模型副本、GPTQ 一个模型副本，两池各一个二级路由副本，均使用内部 Service。每个模型 Pod 申请 `huawei.com/Ascend910: 1`，
 CPU/内存使用调度 requests（4 CPU、16 GiB），不恢复已经取消的 CPU/内存 limits。
 路由使用官方 ARM64 `vllm-router==0.1.15`，wheel 及两个缺失依赖的版本和 SHA-256 均固定在池配置。
 依赖通过校验后发布到现有节点卷，只补缺失项，不修改原模型环境，不构建新镜像。
@@ -209,7 +209,7 @@ Router 的 ServiceAccount 仅有项目 Namespace 内服务发现读取权限，�
 在线链路为 `Gateway + learned probability Router -> expert pool Service -> official vLLM Router -> model Pod`。
 V7 checkpoint 输出专家概率，二专家阈值从 checkpoint 读取；不将其当作 regret 或改成 argmax。
 启动验证 checkpoint SHA-256 与输出 ID 映射，仅加载并执行推理，不训练。
-当前只有 AWQ 池可服务；预测 GPTQ 时返回 503，禁止把它伪装成 AWQ。
+一级路由首次迁移时只有 AWQ 池可服务，预测 GPTQ 时返回 503，禁止把它伪装成 AWQ；现已启用 GPTQ，见后面的双专家验收记录。
 Gateway 的 `/ready` 返回 `auto_expert_coverage_complete:false` 表示专家覆盖不完整，不能据此认定多专家链路已完成。
 一级 Gateway 另外独占一张 NPU，用于 embedding encoder；这张卡应计入系统资源成本。
 初版关闭可选 embedding graph，图捕获路径尚未在当前镜像重新验收。
@@ -335,6 +335,26 @@ python3 scripts/manage_monitoring.py verify
 
 本轮实机测试覆盖现有节点的退出和重新接入；首次创建全新节点、缺失资产传输分支未在本轮实机执行。
 未进行持续压测或额外的在途 SSE 故障注入；`recover` 命令由单元测试覆盖，实机验证的是失败接入修复后重试。
+
+## GPTQ 与双专家部署验收（2026-10-08）
+
+复用 `.216` 的 `/root/zhangjinhao/model/Qwen3-14B-GPTQ-Ascend-INT4`，未转换、重新量化或构建镜像。
+转换清单 SHA-256 为 `2d3cfeb764f1264250d5f1148270dc316a851c00cead215efd5929fef2f4c58b`，六个分片的大小和 SHA-256 与清单全部一致。
+使用同一 `moqe-runtime`、vLLM 0.8.4 及固定 Ascend 镜像，GPTQ 由单个非特权模型 Pod 独占一张 NPU，完成普通和 SSE 推理。
+权重硬链接发布到节点卷 `heteroserve-assets/models/gptq`，AWQ 的 `heteroserve-assets/model` 保留。
+
+`gptq-ascend910b-vllm` Deployment、Service、PDB 和池内官方 Router 使用同一套 `manage_pool.py` 模板。
+两池各保留一个 Router，避免同池多 Router 的计数协调问题。Gateway 现已启用 GPTQ Service 入口；
+真实 checkpoint 的自动概率路由、显式 AWQ/GPTQ 请求及两者 SSE 均通过。
+Gateway `/ready` 的 `ready_experts` 显示健康池，只有两个池都健康才报告 `auto_expert_coverage_complete=true`；部分池故障时仍可服务健康池，不自动替换所选专家。
+
+总控支持 `--pool awq|gptq` 及菜单 12，部署、日志、验收和推理参数均绑定当前专家池。
+共享默认值在 `deploy/pools/defaults.json`；各池的独立参数保存为自己的覆盖值，推理参数写入该池 `runtime.model_parameters`，不会修改另一池或共享硬件配置。
+模型和 Router 的生成 YAML 同时加入池 Kustomization。详细使用方法见 [总控说明](control.md)。
+
+初版 GPTQ 为单节点、单副本，本轮普通/SSE 和路由验收不是全量质量评估或吞吐/SLO 压测。
+要在其他节点运行 GPTQ，先设置其候选节点并执行该池 `prepare pool` 发布权重；K8s 不会自动复制本地模型目录。
+完整记录保存为 `artifacts/kubernetes/gptq-acceptance.json`，GPTQ 分池结果在 `artifacts/kubernetes/pools/gptq/`。
 
 ## 参考资料
 
