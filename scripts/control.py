@@ -2,6 +2,7 @@
 import argparse
 import copy
 import difflib
+import hashlib
 import json
 import math
 import os
@@ -228,6 +229,31 @@ def atomic_text(path, text):
             os.unlink(temporary)
 
 
+def publication_record(root=None):
+    root = ROOT if root is None else root
+    path = root / "artifacts/kubernetes/control/last-save.json"
+    record = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    allowed = {FILES["gateway"], *available_pools(root).values()}
+    if any(name not in allowed for name in record.get("pending", [])):
+        raise RuntimeError("发布记录包含不支持的配置文件")
+    return record
+
+
+def record_publication(relative, stage, error=None, root=None):
+    root = ROOT if root is None else root
+    with operation_lock(root):
+        record = publication_record(root)
+        record["publication"] = {"file": relative, "stage": stage,
+                                 "at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+        if error:
+            record["publication"]["error"] = str(error)
+        if stage == "verified":
+            record["pending"] = [name for name in record.get("pending", []) if name != relative]
+        path = root / "artifacts/kubernetes/control/last-save.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_text(path, json.dumps(record, ensure_ascii=False, indent=2))
+
+
 class Draft:
     """One in-memory change set across experts, instances and global traffic."""
     def __init__(self, root=None):
@@ -316,6 +342,30 @@ class Draft:
             print("".join(difflib.unified_diff(data["before"].splitlines(True), after.splitlines(True), fromfile=name, tofile=name)), end="")
         return changes
 
+    def summary(self):
+        """Readable confirmation scope; values here are configuration, not live state."""
+        def compare(before, after, prefix=""):
+            for key in sorted(set(before) | set(after)):
+                old, new = before.get(key), after.get(key)
+                field = prefix + key
+                if old == new and (key in before) == (key in after):
+                    continue
+                if isinstance(old, dict) and isinstance(new, dict):
+                    compare(old, new, field + ".")
+                else:
+                    display = lambda v, present: json.dumps(v, ensure_ascii=False) if present else "未设置/继承默认值"
+                    print(f"  {field}: {display(old, key in before)} → {display(new, key in after)}")
+        for name, data in self.changes().items():
+            before, after = json.loads(data["before"]), data["after"]
+            print("\n确认范围：" + name)
+            if "instances" in before and "instances" in after:
+                def capacity(raw):
+                    enabled = [v for v in raw["instances"].values() if v.get("enabled", True)]
+                    return len(enabled), sum(v.get("parallelism", {}).get("tp", 1) * v.get("parallelism", {}).get("pp", 1) for v in enabled)
+                old, new = capacity(before), capacity(after)
+                print(f"  启用实例数: {old[0]} → {new[0]}；配置申请卡数: {old[1]} → {new[1]}（更新额外卡另见发布计划）")
+            compare(before, after)
+
     def save(self):
         changes = self.changes()
         if not changes:
@@ -333,8 +383,14 @@ class Draft:
                     raise RuntimeError("配置已被其他操作修改，重新载入草稿: " + name)
             journal = self.root / "artifacts/kubernetes/control/last-save.json"
             journal.parent.mkdir(parents=True, exist_ok=True)
+            previous = publication_record(self.root)
+            pending = list(dict.fromkeys([*previous.get("pending", []), *changes]))
+            confirmed = dict(previous.get("confirmed", {}))
+            for name, data in changes.items():
+                confirmed[name] = hashlib.sha256((json.dumps(data["after"], ensure_ascii=False, indent=2) + "\n").encode("utf-8")).hexdigest()
             record = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "status": "writing",
-                      "before": {n: v["before"] for n, v in changes.items()}}
+                      "before": {n: v["before"] for n, v in changes.items()},
+                      "pending": pending, "confirmed": confirmed}
             atomic_text(journal, json.dumps(record, indent=2))
             written = []
             try:
@@ -344,6 +400,7 @@ class Draft:
             except BaseException:
                 for name in written:
                     atomic_text(self.root / name, changes[name]["before"])
+                atomic_text(journal, json.dumps(previous, ensure_ascii=False, indent=2))
                 raise
             record["status"] = "saved"
             atomic_text(journal, json.dumps(record, indent=2))

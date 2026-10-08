@@ -1,5 +1,6 @@
 """Six operator workspaces with explicit context and one shared configuration draft."""
 import json
+import hashlib
 
 import control as c
 import manage_instances as instances
@@ -25,11 +26,85 @@ class Menu:
     def __init__(self):
         self.draft = c.Draft()
         self.selected = None
-        self.saved = []
+        self.saved = c.publication_record().get("pending", [])
 
     def context(self, page):
         pool = self.draft.pool()
-        print(f"\n位置：{page} | 专家={pool['expert']} | 实例={self.selected or '未选择'} | 未保存文件={len(self.draft.changes())}")
+        self.saved = c.publication_record().get("pending", [])
+        print(f"\n位置：{page} | 专家={pool['expert']} | 实例={self.selected or '未选择'} | 未确认草稿={len(self.draft.changes())} | 已确认待更新={len(self.saved)}")
+
+    def confirm_changes(self, update=False):
+        if self.draft.changes():
+            self.draft.summary()
+            print("以上仅修改配置。确认保存后进入待更新状态，正在运行的服务此时不变。")
+            if input("输入 y 确认以上修改并保存；其他输入继续编辑: ").strip().lower() != "y":
+                print("未确认，草稿保留，配置和运行服务未改变。")
+                return
+            self.draft.save()
+            self.saved = c.publication_record().get("pending", [])
+            print("确认完成：已保存、待更新。范围：" + ", ".join(self.saved))
+        elif not update:
+            print("没有需要确认的草稿。")
+        if update:
+            self.update_system()
+
+    def update_system(self, scopes=None, selected=None):
+        """Plan every confirmed scope before one explicit execution decision."""
+        if self.draft.changes():
+            raise ValueError("还有未确认草稿；先确认修改，或丢弃草稿后更新")
+        record = c.publication_record()
+        scopes = list(dict.fromkeys(record.get("pending", []) if scopes is None else scopes))
+        if not scopes:
+            print("没有已确认待更新的配置。")
+            return
+        paths = {c.FILES["gateway"], c.FILES["engine"], "deploy/lab/cluster.json",
+                 "deploy/pools/defaults.json", *c.available_pools().values()}
+        snapshot = {name: (c.ROOT / name).read_bytes() for name in paths}
+        for name in scopes:
+            if name in record.get("pending", []) and hashlib.sha256(snapshot[name]).hexdigest() != record.get("confirmed", {}).get(name):
+                raise RuntimeError("已确认配置发生变化，重新编辑并确认后再更新: " + name)
+        previous = c.FILES["pool"]
+        try:
+            print("\n更新范围：" + ", ".join(scopes) + (" / 仅实例=" + selected if selected else ""))
+            for name in scopes:
+                print("\n发布影响：" + name)
+                if name == c.FILES["gateway"]:
+                    c.main(["apply", "gateway", "--plan"])
+                elif name in c.available_pools().values():
+                    c.FILES["pool"] = name
+                    self.publication_plan(selected)
+                else:
+                    raise ValueError("不支持的更新范围: " + name)
+            print("更新会创建/更新/停用对应实例；模型就绪并通过普通/SSE及路由验收后才报告完成。")
+            if input("输入 y 确认更新以上系统范围；其他输入保留待更新状态: ").strip().lower() != "y":
+                print("更新已取消，配置仍为已确认、待更新。")
+                return
+            for name in scopes:
+                if any((c.ROOT / path).read_bytes() != data for path, data in snapshot.items()):
+                    raise RuntimeError("发布计划生成后配置发生变化；未继续更新，请重新查看并确认计划")
+                if name != c.FILES["gateway"]:
+                    c.FILES["pool"] = name
+                target = "gateway" if name == c.FILES["gateway"] else "pool"
+                stage = "applying"
+                try:
+                    c.record_publication(name, stage)
+                    c.main(["instance", "apply", selected] if selected else ["apply", target])
+                    stage = "verifying"
+                    c.record_publication(name, stage)
+                    c.main(["instance", "verify", selected] if selected else ["verify", target])
+                    if any((c.ROOT / path).read_bytes() != data for path, data in snapshot.items()):
+                        raise RuntimeError("更新期间配置发生变化；保留待更新记录，请重新确认运行结果")
+                    c.record_publication(name, "instance_verified" if selected else "verified")
+                    print("更新完成、验收通过：" + name)
+                    if selected:
+                        print("选中实例验收通过；专家池整体待更新状态保留，其他已确认修改仍需更新。")
+                except BaseException as error:
+                    c.record_publication(name, "failed", f"{stage}: {error}")
+                    print(f"更新未完成：{name}，失败阶段={stage}；保留待更新记录，运行状态请查看日志。")
+                    raise
+        finally:
+            c.FILES["pool"] = previous
+            self.saved = c.publication_record().get("pending", [])
 
     def overview(self):
         self.context("系统总览 / 实际运行")
@@ -72,16 +147,12 @@ class Menu:
             keys = list(fields)
             for i, key in enumerate(keys, 1):
                 print(f"{i}. {fields[key]} [{key}] = {json.dumps(self.draft.value(section, key, ident), ensure_ascii=False)}")
-            print("输入参数编号后填写新值，也可输入 字段名=值；0 返回并保留草稿；s 保存全部草稿；a 保存后进入发布。")
+            print("输入参数编号或 字段名=值；0 返回并保留草稿；c 确认修改（保存不更新）；u 确认修改并更新系统。s/a 分别兼容 c/u。")
             value = input("编辑: ").strip()
             if value in {"", "0"}:
                 return
-            if value in {"s", "a"}:
-                self.draft.preview()
-                if input("输入 y 保存全部草稿: ").strip().lower() == "y":
-                    self.saved = self.draft.save()
-                    if value == "a":
-                        self.publish()
+            if value in {"c", "u", "s", "a"}:
+                self.confirm_changes(update=value in {"u", "a"})
                 continue
             if "=" in value:
                 selector, supplied = value.split("=", 1)
@@ -99,7 +170,9 @@ class Menu:
             if supplied is None:
                 supplied = input(f"{fields[key]} 的新值（回车保留）: ").strip()
             if supplied:
+                old = self.draft.value(section, key, ident)
                 self.draft.set(section, key, supplied.strip(), ident)
+                print(f"已加入草稿：{ident or self.draft.pool()['expert']} / {key}: {old} → {self.draft.value(section, key, ident)}；尚未确认或更新。")
 
     def list_desired(self):
         pool = self.draft.pool()
@@ -143,12 +216,16 @@ class Menu:
                 if node:
                     specs[ident] = {"node": node, "enabled": True, "parallelism": {"tp": 1, "pp": 1}, "engine": {}}
                     self.selected = ident
+                    print(f"新增实例 {ident} 已加入草稿，节点={node}，TP=1，PP=1；可先编辑参数，再进入菜单 5 确认并更新。")
             elif action == "设置启用实例数量":
+                before = self.draft.pool()["replicas"]
                 self.draft.resize(int(input("目标数量（减少时保留停用实例配置）: ").strip()))
+                print(f"启用实例数量 {before} → {self.draft.pool()['replicas']} 已加入草稿；进入菜单 5 确认并更新。")
             elif action == "移除实例配置":
                 ident = pick("移除对象（应用时排空并删除对应工作负载，保留模型文件）", list(self.draft.instances()))
                 if ident:
                     del self.draft.instances()[ident]
+                    print(f"移除 {ident} 已加入草稿；确认并更新后才排空和移除工作负载。")
             elif action == "专家默认推理参数":
                 self.field_editor("专家与实例 / 专家默认推理参数", c.FIELDS["engine"], "engine")
 
@@ -198,62 +275,52 @@ class Menu:
     def publish(self):
         while True:
             self.context("变更发布与验收")
-            action = pick("操作", ["查看草稿差异", "保存全部草稿", "查看当前专家发布影响", "应用当前专家", "仅应用选中实例", "验收当前专家", "准备当前专家模型资产", "回退最近保存的配置", "丢弃未保存草稿", "应用 Gateway 入口", "验收 Gateway", "应用本次保存范围"])
+            action = pick("编辑草稿 → 确认修改 → 更新系统 → 验收结果", ["查看草稿差异", "确认修改（保存全部草稿）", "更新所有已确认范围", "确认修改并更新系统", "查看更新状态", "指定更新范围与验收", "回退或丢弃"])
             if not action:
                 return
             if action == "查看草稿差异":
                 self.draft.preview()
-            elif action == "保存全部草稿":
-                self.draft.preview()
-                if input("输入 y 保存: ").strip().lower() == "y":
-                    self.saved = self.draft.save()
-            elif action == "查看当前专家发布影响":
+            elif action == "确认修改（保存全部草稿）":
+                self.confirm_changes()
+            elif action == "确认修改并更新系统":
+                self.confirm_changes(update=True)
+            elif action == "查看更新状态":
+                record = c.publication_record()
+                print(json.dumps({"已确认待更新": record.get("pending", []), "最近更新阶段": record.get("publication", {})}, ensure_ascii=False, indent=2))
+            elif action == "更新所有已确认范围":
+                self.update_system()
+            elif action == "指定更新范围与验收":
+                self.publication_tools()
+            elif action == "回退或丢弃":
+                choice = pick("回退或丢弃", ["回退最近保存的配置", "丢弃未确认草稿"])
+                if choice == "回退最近保存的配置":
+                    if self.draft.changes():
+                        raise ValueError("先确认或丢弃草稿，再回退配置")
+                    c.rollback_configuration()
+                    self.draft = c.Draft()
+                elif choice == "丢弃未确认草稿":
+                    self.draft = c.Draft()
+                    print("未确认草稿已丢弃；已确认配置和待更新范围保留。")
+
+    def publication_tools(self):
+        while True:
+            action = pick("指定更新范围与验收", ["查看当前专家发布影响", "更新当前专家", "仅更新选中实例", "更新 Gateway 入口", "验收当前专家", "验收 Gateway", "准备当前专家模型资产"])
+            if not action:
+                return
+            if action == "查看当前专家发布影响":
                 self.publication_plan()
-            elif action in {"应用当前专家", "仅应用选中实例"}:
-                if action == "仅应用选中实例" and not self.selected:
+            elif action in {"更新当前专家", "仅更新选中实例"}:
+                if action == "仅更新选中实例" and not self.selected:
                     raise ValueError("先选择具体实例")
-                self.publication_plan(self.selected if action == "仅应用选中实例" else None)
-                if input("输入 y 应用以上工作负载并验收: ").strip().lower() == "y":
-                    if action == "仅应用选中实例":
-                        c.main(["instance", "apply", self.selected])
-                        c.main(["instance", "verify", self.selected])
-                    else:
-                        c.main(["apply", "pool"])
-                        c.main(["verify", "pool"])
+                self.update_system([c.FILES["pool"]], self.selected if action == "仅更新选中实例" else None)
+            elif action == "更新 Gateway 入口":
+                self.update_system([c.FILES["gateway"]])
             elif action == "验收当前专家":
                 c.main(["verify", "pool"])
-            elif action == "准备当前专家模型资产":
-                c.run_interactive("prepare", "pool")
-            elif action == "丢弃未保存草稿":
-                self.draft = c.Draft()
-            elif action == "应用 Gateway 入口":
-                if self.draft.changes():
-                    raise ValueError("先保存草稿")
-                c.run_interactive("apply", "gateway")
             elif action == "验收 Gateway":
                 c.main(["verify", "gateway"])
-            elif action == "应用本次保存范围":
-                if self.draft.changes():
-                    raise ValueError("先保存草稿")
-                if not self.saved:
-                    raise ValueError("当前会话没有保存记录，按专家/实例选择发布范围")
-                print("本次保存文件：" + ", ".join(self.saved))
-                if input("输入 y 应用并验收本次保存范围: ").strip().lower() == "y":
-                    previous = c.FILES["pool"]
-                    try:
-                        for relative in self.saved:
-                            if relative in c.available_pools().values():
-                                c.FILES["pool"] = relative
-                                c.main(["apply", "pool"])
-                                c.main(["verify", "pool"])
-                        if c.FILES["gateway"] in self.saved:
-                            c.main(["apply", "gateway"])
-                            c.main(["verify", "gateway"])
-                    finally:
-                        c.FILES["pool"] = previous
             else:
-                c.rollback_configuration()
-                self.draft = c.Draft()
+                c.run_interactive("prepare", "pool")
 
     def observability(self):
         while True:
@@ -274,7 +341,7 @@ class Menu:
         actions = {"系统总览": self.overview, "专家与 vLLM 实例": self.experts,
                    "路由与流量": self.traffic, "算力节点与设备": self.nodes,
                    "变更发布与验收": self.publish, "日志与监控": self.observability}
-        print("HeteroServe 总控 | 配置草稿集中保存，发布单独执行")
+        print("HeteroServe 总控 | 编辑草稿 → 确认修改 → 更新系统 → 验收结果")
         try:
             while True:
                 self.context("主菜单")

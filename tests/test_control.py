@@ -206,3 +206,128 @@ def test_paused_pool_verification_does_not_wait_for_ready_router(monkeypatch, pr
     monkeypatch.setattr(control.subprocess, "run", lambda cmd, **kw: commands.append(cmd))
     control.main(["verify", "pool"])
     assert len(commands) == 1 and commands[0][1].endswith("manage_pool.py")
+
+
+def confirmed_menu(monkeypatch, project, answers):
+    import control_menu
+    menu_inputs(monkeypatch, project, answers)
+    monkeypatch.setattr(control_menu, "ROOT", project)
+    menu = control_menu.Menu()
+    monkeypatch.setattr(menu, "publication_plan", lambda selected=None: None)
+    return menu
+
+
+def test_declining_confirmation_preserves_draft_and_running_system(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, ["n"])
+    before = (project / control.FILES["gateway"]).read_bytes()
+    menu.draft.set("gateway", "max_inflight", "24")
+    monkeypatch.setattr(control, "main", lambda *a: pytest.fail("Unconfirmed update"))
+    menu.confirm_changes(update=True)
+    assert menu.draft.changes()
+    assert (project / control.FILES["gateway"]).read_bytes() == before
+    assert not control.publication_record(project).get("pending")
+
+
+def test_confirm_then_cancel_update_is_recoverable_after_restart(monkeypatch, project):
+    import control_menu
+    menu = confirmed_menu(monkeypatch, project, ["y", "n"])
+    menu.draft.set("gateway", "max_inflight", "24")
+    calls = []
+    monkeypatch.setattr(control, "main", lambda args: calls.append(args))
+    menu.confirm_changes(update=True)
+    assert calls == [["apply", "gateway", "--plan"]]
+    assert not menu.draft.changes()
+    assert control_menu.Menu().saved == [control.FILES["gateway"]]
+
+
+def test_sequential_confirmations_keep_all_pending_scopes(project):
+    draft = control.Draft(project)
+    draft.set("gateway", "max_inflight", "24")
+    draft.save()
+    draft.set("pool", "engine.max_num_seqs", "3", "awq-01")
+    draft.save()
+    draft.save()
+    assert control.publication_record(project)["pending"] == [control.FILES["gateway"], control.FILES["pool"]]
+
+
+def test_confirm_update_verifies_before_clearing_pending(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, ["y", "y"])
+    menu.draft.set("gateway", "max_inflight", "24")
+    calls = []
+    monkeypatch.setattr(control, "main", lambda args: calls.append(args))
+    menu.confirm_changes(update=True)
+    assert calls == [["apply", "gateway", "--plan"], ["apply", "gateway"], ["verify", "gateway"]]
+    record = control.publication_record(project)
+    assert record["pending"] == []
+    assert record["publication"]["stage"] == "verified"
+
+
+def test_update_failure_keeps_failed_and_unattempted_scopes(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, ["y"])
+    menu.draft.set("gateway", "max_inflight", "24")
+    menu.draft.set("pool", "engine.max_num_seqs", "3", "awq-01")
+    menu.draft.save()
+    calls = []
+    def execute(args):
+        calls.append(args)
+        if args == ["verify", "gateway"]:
+            raise RuntimeError("ordinary inference failed")
+    monkeypatch.setattr(control, "main", execute)
+    with pytest.raises(RuntimeError, match="inference failed"):
+        menu.update_system()
+    record = control.publication_record(project)
+    assert record["pending"] == [control.FILES["gateway"], control.FILES["pool"]]
+    assert record["publication"]["stage"] == "failed"
+    assert "verifying" in record["publication"]["error"]
+    assert ["apply", "pool"] not in calls
+
+
+def test_changed_confirmed_file_cannot_be_published(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, [])
+    menu.draft.set("gateway", "max_inflight", "24")
+    menu.draft.save()
+    path = project / control.FILES["gateway"]
+    path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    monkeypatch.setattr(control, "main", lambda *a: pytest.fail("Stale confirmation executed"))
+    with pytest.raises(RuntimeError, match="已确认配置发生变化"):
+        menu.update_system()
+
+
+def test_changed_configuration_after_plan_stops_before_apply(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, [])
+    menu.draft.set("gateway", "max_inflight", "24")
+    menu.draft.save()
+    calls = []
+    monkeypatch.setattr(control, "main", lambda args: calls.append(args))
+    def confirm(prompt=""):
+        path = project / "deploy/pools/defaults.json"
+        path.write_text(path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        return "y"
+    monkeypatch.setattr("builtins.input", confirm)
+    with pytest.raises(RuntimeError, match="计划生成后配置发生变化"):
+        menu.update_system()
+    assert calls == [["apply", "gateway", "--plan"]]
+
+
+def test_selected_instance_success_keeps_other_pool_changes_pending(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, ["y"])
+    menu.draft.set("pool", "engine.max_num_seqs", "3", "awq-01")
+    menu.draft.set("pool", "engine.max_num_seqs", "3", "awq-02")
+    menu.draft.save()
+    calls = []
+    monkeypatch.setattr(control, "main", lambda args: calls.append(args))
+    menu.update_system([control.FILES["pool"]], "awq-01")
+    assert calls == [["instance", "apply", "awq-01"], ["instance", "verify", "awq-01"]]
+    assert control.publication_record(project)["pending"] == [control.FILES["pool"]]
+
+
+def test_confirmation_summary_explains_instance_and_card_changes(project, capsys):
+    draft = control.Draft(project)
+    draft.resize(5)
+    draft.set("pool", "parallelism.tp", "2", "awq-01")
+    draft.summary()
+    output = capsys.readouterr().out
+    assert "启用实例数: 4 → 5" in output
+    assert "配置申请卡数: 4 → 6" in output
+    assert "instances.awq-01.parallelism.tp: 1 → 2" in output
+    assert "instances.awq-05" in output
