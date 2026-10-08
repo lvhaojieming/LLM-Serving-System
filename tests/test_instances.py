@@ -127,3 +127,33 @@ def test_removed_instances_are_in_the_reviewable_plan(settings, monkeypatch):
     monkeypatch.setattr(manager, "get", lambda *a, **kw: {"items": [obsolete]})
     changes = manager.plan(load_config(ROOT / "deploy/lab/cluster.json"), settings)
     assert any(v["instance"] == "awq-old" and v["action"] == "remove" for v in changes)
+
+
+def test_live_engine_arguments_handle_values_and_false_flags():
+    result = manager.engine_values(["python3", "--max-model-len", "4096", "--max-num-seqs=3", "--gpu-memory-utilization", "0.5"])
+    assert result == {"max_model_len": 4096, "max_num_seqs": 3, "gpu_memory_utilization": .5, "enforce_eager": False}
+    assert "max_num_batched_tokens" not in result
+
+
+@pytest.mark.parametrize("wrong_identity", [False, True])
+def test_runtime_inventory_checks_identity_and_uses_process_values(settings, monkeypatch, wrong_identity):
+    from types import SimpleNamespace
+    cluster = load_config(ROOT / "deploy/lab/cluster.json")
+    pod = {"metadata": {"name": "actual-pod", "uid": "actual-uid", "namespace": "heteroserve",
+                        "labels": {"app.kubernetes.io/name": "expert", "heteroserve.io/pool": settings["pool"], manager.INSTANCE_LABEL: "awq-01"}},
+           "spec": {"nodeName": "heteroserve-lab-209", "containers": [{"name": "expert", "startupProbe": {"periodSeconds": 5, "failureThreshold": 240}}]},
+           "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}}
+    identity = {"pod_uid": "actual-uid", "node": "heteroserve-lab-209", "instance_id": "awq-01",
+                "physical_devices": [6], "parallelism": {"tp": 1, "pp": 1}}
+    snapshot = {**identity, "pod_uid": "wrong" if wrong_identity else "actual-uid", "source": "process_snapshot",
+                "engine": {"max_num_seqs": 3}, "traffic": {"max_inflight": 7}, "lifecycle": {"drain_seconds": 240}}
+    replies = iter([identity, snapshot])
+    monkeypatch.setattr(manager, "get", lambda *a, **kw: {"items": [pod]})
+    monkeypatch.setattr(manager, "kubectl", lambda *a, **kw: SimpleNamespace(stdout=json.dumps(next(replies))))
+    row = manager.inventory(cluster, settings, runtime=True)[0]
+    if wrong_identity:
+        assert "runtime_values" not in row and "identity" in row["runtime_error"]
+    else:
+        assert row["runtime_values"]["engine.max_num_seqs"] == 3
+        assert row["runtime_values"]["traffic.max_inflight"] == 7
+        assert row["physical_devices"] == [6]

@@ -397,8 +397,27 @@ def verify(cluster, pool, selected=None):
     return result
 
 
-def inventory(cluster, pool=None):
+def engine_values(command):
+    """Read explicit flags from the live vLLM API process, never from a ConfigMap."""
+    result = {}
+    for key in ENGINE_FIELDS:
+        flag = "--" + key.replace("_", "-")
+        matching = [v for v in command if v == flag or v.startswith(flag + "=")]
+        if key == "enforce_eager":
+            result[key] = bool(matching)
+        elif matching:
+            token = matching[-1]
+            raw = token.split("=", 1)[1] if "=" in token else command[command.index(token) + 1]
+            result[key] = float(raw) if key == "gpu_memory_utilization" else int(raw)
+    return result
+
+
+def inventory(cluster, pool=None, runtime=False, selected=None):
     selector = OWNER + "=" + cluster["name"]
+    if pool:
+        selector += ",heteroserve.io/pool=" + pool["pool"]
+    if selected:
+        selector += "," + INSTANCE_LABEL + "=" + selected
     pods = get(cluster, "pods", selector=selector)["items"]
     rows = []
     for pod in pods:
@@ -421,8 +440,44 @@ def inventory(cluster, pool=None):
                 if role == "expert" and INSTANCE_LABEL in labels and info.get("instance_id") != labels[INSTANCE_LABEL]:
                     raise RuntimeError("Instance identity does not match the workload label")
                 row.update(physical_devices=info["physical_devices"], parallelism=info.get("parallelism", {"tp": 1, "pp": 1}))
+                if runtime and role == "expert":
+                    code = """import json,urllib.request,urllib.error
+from pathlib import Path
+try:
+ result=json.load(urllib.request.urlopen('http://127.0.0.1:8000/configuration',timeout=5))
+ result['source']='process_snapshot'
+except urllib.error.HTTPError as exc:
+ if exc.code!=404:raise
+ commands=[]
+ for p in Path('/proc').glob('[0-9]*/cmdline'):
+  try:
+   argv=p.read_bytes().decode().strip('\\0').split('\\0')
+   if 'vllm.entrypoints.openai.api_server' in argv:commands.append(argv)
+  except (OSError,UnicodeError):pass
+ if len(commands)!=1:raise RuntimeError('Cannot identify exactly one live vLLM API process')
+ identity=json.load(urllib.request.urlopen('http://127.0.0.1:8000/identity',timeout=5))
+ result={**identity,'source':'live_process_arguments','engine_command':commands[0]}
+print(json.dumps(result))
+"""
+                    snapshot = json.loads(kubectl(cluster, ["exec", "-n", pod["metadata"].get("namespace", "heteroserve"),
+                                                          pod["metadata"]["name"], "--", "python3", "-c", code], timeout=25).stdout)
+                    if snapshot.get("pod_uid") != row["uid"] or snapshot.get("node") != row["node"] or snapshot.get("instance_id") != row["instance"]:
+                        raise RuntimeError("Runtime configuration identity does not match the observed Pod")
+                    values = {"node": row["node"], "enabled": not bool(pod["metadata"].get("deletionTimestamp")),
+                              **{"parallelism." + k: v for k, v in snapshot["parallelism"].items()}}
+                    params = snapshot.get("engine", {}) if snapshot["source"] == "process_snapshot" else engine_values(snapshot["engine_command"])
+                    values.update({"engine." + k: v for k, v in params.items() if k in ENGINE_FIELDS})
+                    for group in ("traffic", "lifecycle"):
+                        values.update({group + "." + k: v for k, v in snapshot.get(group, {}).items()})
+                    container = next(v for v in pod["spec"]["containers"] if v["name"] == "expert")
+                    probe = container.get("startupProbe", {})
+                    if probe:
+                        values["lifecycle.startup_seconds"] = probe.get("periodSeconds", 10) * probe.get("failureThreshold", 3)
+                    values["lifecycle.termination_seconds"] = pod["spec"].get("terminationGracePeriodSeconds", 30)
+                    row.update(runtime_values=values, runtime_source=snapshot["source"],
+                               draining=snapshot.get("draining", bool(pod["metadata"].get("deletionTimestamp"))))
             except Exception as error:
-                row["identity_error"] = str(error)[:300]
+                row["runtime_error" if runtime else "identity_error"] = str(error)[:300]
         rows.append(row)
     return rows
 

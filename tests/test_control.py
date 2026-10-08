@@ -331,3 +331,54 @@ def test_confirmation_summary_explains_instance_and_card_changes(project, capsys
     assert "配置申请卡数: 4 → 6" in output
     assert "instances.awq-01.parallelism.tp: 1 → 2" in output
     assert "instances.awq-05" in output
+
+
+def test_parameter_panel_separates_running_saved_and_draft(monkeypatch, project, capsys):
+    menu = confirmed_menu(monkeypatch, project, [])
+    menu.draft.set("pool", "engine.max_num_seqs", "4", "awq-01")
+    rows = [{"instance": "awq-01", "node": "heteroserve-lab-209", "uid": "actual-pod",
+             "physical_devices": [6], "ready": True, "observed_at": "now",
+             "runtime_values": {"engine.max_num_seqs": 3}}]
+    menu.parameter_panel({"engine.max_num_seqs": "运行序列数"}, "pool", "awq-01", rows)
+    output = capsys.readouterr().out
+    assert "运行值 | 已保存值 | 待修改值" in output
+    assert "| 3 | 2 | 4 | 实例配置 / 待确认" in output
+    assert "实际实例 awq-01" in output and "卡=[6]" in output
+
+
+def test_unknown_runtime_is_never_replaced_with_saved_value(monkeypatch, project, capsys):
+    menu = confirmed_menu(monkeypatch, project, [])
+    menu.parameter_panel({"engine.max_num_seqs": "运行序列数"}, "pool", "awq-01", [], "API unavailable")
+    output = capsys.readouterr().out
+    assert "无运行实例/未采集 | 2 | 2" in output
+    assert "未核实" in output and "API unavailable" in output
+
+
+def test_batch_edit_rolls_back_the_entire_line_on_invalid_assignment(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, [])
+    fields = {k: v for group in control.INSTANCE_GROUPS.values() for k, v in group.items()}
+    menu.edit_fields("tp=2 pp=1 max_num_seqs=4", fields, "pool", "awq-01")
+    assert menu.draft.value("pool", "parallelism.tp", "awq-01") == 2
+    assert menu.draft.value("pool", "engine.max_num_seqs", "awq-01") == 4
+    with pytest.raises(ValueError):
+        menu.edit_fields("max_num_seqs=5 bogus=7", fields, "pool", "awq-01")
+    assert menu.draft.value("pool", "engine.max_num_seqs", "awq-01") == 4
+
+
+def test_editor_recovers_in_place_and_supports_batch_edits(monkeypatch, project, capsys):
+    menu = confirmed_menu(monkeypatch, project, ["bad=3", "max_num_seqs=4 max_inflight=6", "0"])
+    monkeypatch.setattr(menu, "live_instance", lambda ident: ([], "offline"))
+    fields = {k: v for group in control.INSTANCE_GROUPS.values() for k, v in group.items()}
+    menu.field_editor("instance", fields, "pool", "awq-01")
+    assert menu.draft.value("pool", "engine.max_num_seqs", "awq-01") == 4
+    assert menu.draft.value("pool", "traffic.max_inflight", "awq-01") == 6
+    assert "仍在当前编辑页" in capsys.readouterr().out
+
+
+def test_instance_override_can_return_to_inherited_default(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, [])
+    fields = {k: v for group in control.INSTANCE_GROUPS.values() for k, v in group.items()}
+    menu.edit_fields("max_num_seqs=4", fields, "pool", "awq-01")
+    menu.edit_fields("max_num_seqs=default", fields, "pool", "awq-01")
+    assert menu.draft.value("pool", "engine.max_num_seqs", "awq-01") == 2
+    assert "engine" not in menu.draft.instances()["awq-01"]

@@ -95,6 +95,7 @@ def worker_config(pool, npu):
             "device_count": parallel["tp"] * parallel["pp"], "model": npu["served_model"], "device_type": pool["device_type"],
             "weights_manifest_sha256": pool["weights_manifest_sha256"], "image": npu["model_image"],
             "port": 8000, "engine_url": "http://127.0.0.1:8001", "engine_command": command,
+            "engine_parameters": copy.deepcopy(npu["model_parameters"]),
             "engine_env": {"MOQE_ASCEND_INT4_ADAPTER": "1", "MOQE_ASCEND_INT4_PARALLEL": "1" if parallel["tp"] > 1 else "0"},
             "health_interval_seconds": 3, "health_timeout_seconds": 10, "readiness_failures": 3,
             "liveness_failures": 10, "admission_timeout_seconds": 120,

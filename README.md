@@ -1,6 +1,6 @@
 # LLM Serving System
 
-日常统一管理入口：`python3 scripts/control.py`，按六组组织总览、实例、流量、节点、发布和日志。支持稳定实例 ID、集中草稿及单实例更新。
+日常统一管理入口：`python3 scripts/control.py`，按六组组织总览、实例、流量、节点、发布和日志。实例参数集中在一页，分别显示运行值、已保存值和待修改值，支持批量编辑、确认更新、稳定实例 ID 及单实例更新。
 参数清单、修改、部署和验收用法见 [总控操作说明](docs/control.md)。
 
 面向昇腾的 Kubernetes 推理工程。实例生命周期由 Kubernetes 管理，负载均衡与动态发现复用官方 vLLM Router。

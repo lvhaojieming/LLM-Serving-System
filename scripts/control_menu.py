@@ -1,6 +1,8 @@
 """Six operator workspaces with explicit context and one shared configuration draft."""
 import json
 import hashlib
+import copy
+import shlex
 
 import control as c
 import manage_instances as instances
@@ -109,13 +111,105 @@ class Menu:
     def overview(self):
         self.context("系统总览 / 实际运行")
         cluster = load_config(ROOT / "deploy/lab/cluster.json")
-        rows = instances.inventory(cluster)
-        print("实例ID | 专家池 | 节点 | TP/PP | 实际物理卡 | Ready | 重启 | Pod UID")
+        rows = instances.inventory(cluster, runtime=True)
+        print("实例ID | 专家池 | 实际节点 | 实际 TP/PP | 物理卡 | 运行序列数 | 上下文 | Ready")
         for row in rows:
             p = row.get("parallelism", {})
+            runtime = row.get("runtime_values", {})
             print(f"{row['instance']} | {row['pool']} | {row['node']} | {p.get('tp','?')}/{p.get('pp','?')} | "
-                  f"{row['physical_devices'] if row['physical_devices'] is not None else '未采集'} | {row['ready']} | {row['restarts']} | {row['uid']}")
-        print("卡号来自实际 Pod；配置草稿和容器内 npu:0 编号不作为物理分配结果。")
+                  f"{row['physical_devices'] if row['physical_devices'] is not None else '未采集'} | {runtime.get('engine.max_num_seqs','未采集')} | {runtime.get('engine.max_model_len','未采集')} | {row['ready']}")
+            if row.get("runtime_error"):
+                print("  采集失败：" + row["runtime_error"])
+        print("运行参数来自进程快照/实际启动参数，卡号来自实际 Pod；详细对照及修改进入菜单 2 的实例页面。")
+
+    def live_instance(self, ident):
+        try:
+            cluster = load_config(ROOT / "deploy/lab/cluster.json")
+            return instances.inventory(cluster, self.draft.pool(), runtime=True, selected=ident), None
+        except c.ERRORS as error:
+            return [], str(error)
+
+    def parameter_panel(self, fields, section, ident, rows, error=None):
+        saved = c.Draft()
+        print("编号 | 参数 | 运行值 | 已保存值 | 待修改值 | 来源 / 状态")
+        for i, (key, label) in enumerate(fields.items(), 1):
+            wanted = self.draft.value(section, key, ident)
+            try:
+                stored = saved.value(section, key, ident)
+            except KeyError:
+                stored = None
+            values = [row.get("runtime_values", {}).get(key) for row in rows]
+            def show(v):
+                if v is None:
+                    return "未采集"
+                if type(v) is bool:
+                    return "开启" if v else "关闭"
+                return str(v).replace("heteroserve-lab-", ".")
+            running = show(values[0]) if len(values) == 1 else "; ".join(row["uid"][:6] + "=" + show(v) for row, v in zip(rows, values)) if values else "无运行实例/未采集"
+            state = "待确认" if wanted != stored else "未核实" if not values or None in values else "一致" if all(v == stored for v in values) else "待更新/更新中"
+            source = "全局配置"
+            if ident:
+                spec = self.draft.instances()[ident]
+                group, _, name = key.partition(".")
+                source = "实例配置" if not name or name in spec.get(group, {}) else "专家默认"
+                if group == "engine" and name not in spec.get("engine", {}) and name not in self.draft.pool().get("runtime", {}).get("model_parameters", {}):
+                    source = "共享默认"
+            if key == "lifecycle.startup_seconds" and state == "待更新/更新中" and type(stored) is int and all(v == ((stored + 4) // 5) * 5 for v in values):
+                state = "一致（5s取整）"
+            if not ident:
+                running = "逐实例查看" if section != "gateway" else "未采集"
+                source = "专家默认（实例可覆盖）" if section != "gateway" else "Gateway 配置"
+            print(f"{i}. {label} [{key.rsplit('.',1)[-1]}] | {running} | {show(stored) if stored is not None else '新增实例'} | {show(wanted)} | {source} / {state}")
+        for row in rows:
+            print(f"实际实例 {row['instance']}：节点={row['node']}，卡={row['physical_devices']}，Ready={row['ready']}，退出中={row.get('draining',False)}，UID={row['uid']}，采集时间={row['observed_at']}")
+            if row.get("runtime_error"):
+                print("运行参数采集失败：" + row["runtime_error"])
+            elif row.get("runtime_source") == "live_process_arguments":
+                print("旧进程已核实 vLLM 启动参数；请求/排空预算未核实，实例更新后可通过进程快照显示。")
+        if error:
+            print("运行状态暂不可读取：" + error)
+        print("运行值是本次采集的启动配置；已保存值不代表已生效。运行序列数和入口请求预算分别控制引擎和请求准入。")
+
+    def edit_fields(self, value, fields, section, ident):
+        keys = list(fields)
+        entries = shlex.split(value) if "=" in value else [value]
+        before = copy.deepcopy(self.draft.files)
+        try:
+            for entry in entries:
+                selector, sep, supplied = entry.partition("=")
+                selector = selector.strip().lower()
+                if selector.isdigit() and 1 <= int(selector) <= len(keys):
+                    key = keys[int(selector) - 1]
+                else:
+                    matches = [k for k in keys if k == selector or k.rsplit(".", 1)[-1] == selector]
+                    if len(matches) != 1:
+                        raise ValueError("未知或不唯一的字段：" + selector)
+                    key = matches[0]
+                if not sep:
+                    if key == "node":
+                        cluster = load_config(ROOT / "deploy/lab/cluster.json")
+                        supplied = pick("选择目标节点（回车保留）", [names(cluster, n)[0] for n in active_nodes(cluster) if n["host"] in c.read_configs()["engine"]["device_hosts"]])
+                    else:
+                        supplied = input(f"{fields[key]} 的新值（回车保留）: ").strip()
+                if supplied:
+                    supplied = supplied.strip()
+                    if supplied == "default" and ident:
+                        self.draft.inherit(key, ident)
+                        continue
+                    if key == "node":
+                        cluster = load_config(ROOT / "deploy/lab/cluster.json")
+                        candidates = {names(cluster, n)[0]: n["host"] for n in active_nodes(cluster) if n["host"] in c.read_configs()["engine"]["device_hosts"]}
+                        selected = [n for n, host in candidates.items() if supplied in {n, host, host.rsplit('.',1)[-1], '.' + host.rsplit('.',1)[-1]}]
+                        if len(selected) != 1:
+                            raise ValueError("请选择可用节点或输入它的 IP/末段")
+                        supplied = selected[0]
+                    if type(self.draft.value(section, key, ident)) is bool:
+                        supplied = {"on": "true", "off": "false", "启用": "true", "停用": "false"}.get(supplied.lower(), supplied)
+                    self.draft.set(section, key, supplied, ident)
+        except BaseException:
+            self.draft.files = before
+            raise
+        print("修改已加入草稿，请核对本页待修改列；尚未更新运行服务。")
 
     def cards(self):
         self.context("算力节点与设备 / 实际卡占用")
@@ -138,41 +232,29 @@ class Menu:
                 print(f"{node['host']} | {device} | {','.join(owners) or '-'} | {state}")
 
     def field_editor(self, title, fields, section, ident=None):
+        rows, error = self.live_instance(ident) if ident else ([], None)
         while True:
             self.context(title)
             if ident:
                 spec = self.draft.instances()[ident]
                 p = spec.get("parallelism", {"tp": 1, "pp": 1})
                 print(f"请求卡数：{p['tp'] * p['pp']}（TP×PP），卡号由 K8s 分配。")
-            keys = list(fields)
-            for i, key in enumerate(keys, 1):
-                print(f"{i}. {fields[key]} [{key}] = {json.dumps(self.draft.value(section, key, ident), ensure_ascii=False)}")
-            print("输入参数编号或 字段名=值；0 返回并保留草稿；c 确认修改（保存不更新）；u 确认修改并更新系统。s/a 分别兼容 c/u。")
+            self.parameter_panel(fields, section, ident, rows, error)
+            print("输入编号或多项赋值 tp=2 pp=1 max_num_seqs=4；字段=default 恢复实例默认。r 刷新；c 保存；u 保存并更新；0 返回。")
             value = input("编辑: ").strip()
             if value in {"", "0"}:
                 return
-            if value in {"c", "u", "s", "a"}:
-                self.confirm_changes(update=value in {"u", "a"})
-                continue
-            if "=" in value:
-                selector, supplied = value.split("=", 1)
-            else:
-                selector = value
-                supplied = None
-            selector = selector.strip().lower()
-            if selector.isdigit() and 1 <= int(selector) <= len(keys):
-                key = keys[int(selector) - 1]
-            else:
-                matches = [k for k in keys if k == selector or k.rsplit(".", 1)[-1] == selector]
-                if len(matches) != 1:
-                    raise ValueError("未知或不唯一的字段；请选择本页参数编号")
-                key = matches[0]
-            if supplied is None:
-                supplied = input(f"{fields[key]} 的新值（回车保留）: ").strip()
-            if supplied:
-                old = self.draft.value(section, key, ident)
-                self.draft.set(section, key, supplied.strip(), ident)
-                print(f"已加入草稿：{ident or self.draft.pool()['expert']} / {key}: {old} → {self.draft.value(section, key, ident)}；尚未确认或更新。")
+            try:
+                if value == "r":
+                    rows, error = self.live_instance(ident) if ident else ([], None)
+                elif value in {"c", "u", "s", "a"}:
+                    self.confirm_changes(update=value in {"u", "a"})
+                    if value in {"u", "a"} and ident:
+                        rows, error = self.live_instance(ident)
+                else:
+                    self.edit_fields(value, fields, section, ident)
+            except c.ERRORS as exc:
+                print("本次操作未完成：" + str(exc) + "；仍在当前编辑页，之前草稿保留。")
 
     def list_desired(self):
         pool = self.draft.pool()
@@ -201,11 +283,8 @@ class Menu:
                 ident = pick("选择稳定实例 ID", list(specs))
                 if ident:
                     self.selected = ident
-                    while True:
-                        group = pick("实例设置", ["部署与并行", "推理引擎", "健康与退出"])
-                        if not group:
-                            break
-                        self.field_editor("专家与实例 / " + ident + " / " + group, c.INSTANCE_GROUPS[group], "pool", ident)
+                    fields = {key: label for group in c.INSTANCE_GROUPS.values() for key, label in group.items()}
+                    self.field_editor("专家与实例 / " + ident + " / 全部参数", fields, "pool", ident)
             elif action == "增加实例":
                 specs = self.draft.instances()
                 ident = input("新实例 ID（如 awq-05）: ").strip()

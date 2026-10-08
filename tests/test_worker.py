@@ -19,6 +19,22 @@ def config():
             "readiness_failures": 2, "liveness_failures": 4, "drain_seconds": 1, "engine_stop_seconds": 1}
 
 
+def test_configuration_reports_process_startup_snapshot_not_changed_source():
+    async def scenario():
+        original = config()
+        original.update(engine_parameters={"max_num_seqs": 2}, max_inflight=8)
+        app = worker.create_app(original, start_engine=False)
+        original["engine_parameters"]["max_num_seqs"] = 99
+        original["max_inflight"] = 99
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://worker") as client:
+            response = (await client.get("/configuration")).json()
+        assert response["engine"]["max_num_seqs"] == 2
+        assert response["traffic"]["max_inflight"] == 8
+        assert response["pod_uid"] == app.state.worker["identity"]["pod_uid"]
+        assert "engine_env" not in response and "engine_command" not in response
+    asyncio.run(scenario())
+
+
 async def until(predicate):
     for _ in range(200):
         if predicate():

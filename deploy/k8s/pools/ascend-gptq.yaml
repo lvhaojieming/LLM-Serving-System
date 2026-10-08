@@ -61,10 +61,10 @@ metadata:
     heteroserve.io/instance: gptq-01
 data:
   worker.py: "\"\"\"Supervise vLLM, admit real model output, and drain direct Pod\
-    \ traffic safely.\"\"\"\nimport argparse\nimport asyncio\nfrom contextlib import\
-    \ asynccontextmanager\nimport json\nimport logging\nimport os\nfrom pathlib import\
-    \ Path\nimport re\nimport signal\nimport time\nimport uuid\n\nimport httpx\nfrom\
-    \ fastapi import FastAPI, HTTPException, Request\nfrom fastapi.responses import\
+    \ traffic safely.\"\"\"\nimport argparse\nimport asyncio\nimport copy\nfrom contextlib\
+    \ import asynccontextmanager\nimport json\nimport logging\nimport os\nfrom pathlib\
+    \ import Path\nimport re\nimport signal\nimport time\nimport uuid\n\nimport httpx\n\
+    from fastapi import FastAPI, HTTPException, Request\nfrom fastapi.responses import\
     \ Response, StreamingResponse\nimport uvicorn\n\nlog = logging.getLogger(\"heteroserve.worker\"\
     )\nHOP_HEADERS = {\"connection\", \"keep-alive\", \"proxy-authenticate\", \"proxy-authorization\"\
     ,\n               \"te\", \"trailer\", \"transfer-encoding\", \"upgrade\", \"\
@@ -78,41 +78,42 @@ data:
     ], \"instance_id\": config.get(\"instance_id\", \"legacy\"),\n            \"parallelism\"\
     : config.get(\"parallelism\", {\"tp\": 1, \"pp\": 1}),\n            \"expected_devices\"\
     : config.get(\"device_count\", 1)}\n\n\ndef create_app(config, transport=None,\
-    \ start_engine=True):\n    state = {\"admitted\": False, \"draining\": False,\
-    \ \"health_failures\": 0, \"leases\": {},\n             \"engine\": None, \"last_error\"\
-    : None, \"identity\": identity(config), \"completed\": 0, \"cancelled\": 0}\n\n\
-    \    async def admit(client):\n        response = await client.get(\"/v1/models\"\
-    , timeout=10)\n        response.raise_for_status()\n        if config[\"model\"\
-    ] not in {m[\"id\"] for m in response.json()[\"data\"]}:\n            raise RuntimeError(\"\
-    Engine reports an unexpected model identity\")\n        body = {\"model\": config[\"\
-    model\"], \"messages\": [{\"role\": \"user\", \"content\": \"What is 17 + 25?\
-    \ Reply with the number only.\"}],\n                \"temperature\": 0, \"max_tokens\"\
-    : 32, \"chat_template_kwargs\": {\"enable_thinking\": False}}\n        response\
-    \ = await client.post(\"/v1/chat/completions\", json=body, timeout=config[\"admission_timeout_seconds\"\
-    ])\n        response.raise_for_status()\n        answer = response.json()[\"choices\"\
-    ][0][\"message\"][\"content\"].strip()\n        if answer != \"42\":\n       \
-    \     raise RuntimeError(\"Real model admission did not produce the expected answer\"\
-    )\n\n    async def monitor(client):\n        while True:\n            engine =\
-    \ state[\"engine\"]\n            if engine is not None and engine.returncode is\
-    \ not None:\n                state.update(admitted=False, last_error=\"engine\
-    \ exited\", health_failures=config[\"liveness_failures\"])\n                log.error(json.dumps({\"\
-    event\": \"engine_exited\", \"returncode\": engine.returncode, **state[\"identity\"\
-    ]}))\n                os.kill(os.getpid(), signal.SIGTERM)\n                return\n\
-    \            try:\n                response = await client.get(\"/health\", timeout=config[\"\
-    health_timeout_seconds\"])\n                response.raise_for_status()\n    \
-    \            if not state[\"admitted\"] and not state[\"draining\"]:\n       \
-    \             await admit(client)\n                    state[\"admitted\"] = True\n\
-    \                    log.info(json.dumps({\"event\": \"model_admitted\", **state[\"\
-    identity\"]}))\n                state.update(health_failures=0, last_error=None)\n\
-    \            except Exception as exc:\n                state[\"health_failures\"\
-    ] += 1\n                state[\"last_error\"] = type(exc).__name__ + \": \" +\
-    \ str(exc)[:300]\n                if state[\"health_failures\"] >= config[\"readiness_failures\"\
-    ]:\n                    state[\"admitted\"] = False\n            await asyncio.sleep(config[\"\
-    health_interval_seconds\"])\n\n    @asynccontextmanager\n    async def lifespan(app):\n\
-    \        if start_engine:\n            if len(state[\"identity\"][\"physical_devices\"\
-    ]) != config.get(\"device_count\", 1):\n                raise RuntimeError(\"\
-    Actual NPU allocation does not match the configured parallel world size\")\n \
-    \           state[\"engine\"] = await asyncio.create_subprocess_exec(*config[\"\
+    \ start_engine=True):\n    # ConfigMap files can change while this process retains\
+    \ its startup settings.\n    config = copy.deepcopy(config)\n    state = {\"admitted\"\
+    : False, \"draining\": False, \"health_failures\": 0, \"leases\": {},\n      \
+    \       \"engine\": None, \"last_error\": None, \"identity\": identity(config),\
+    \ \"completed\": 0, \"cancelled\": 0}\n\n    async def admit(client):\n      \
+    \  response = await client.get(\"/v1/models\", timeout=10)\n        response.raise_for_status()\n\
+    \        if config[\"model\"] not in {m[\"id\"] for m in response.json()[\"data\"\
+    ]}:\n            raise RuntimeError(\"Engine reports an unexpected model identity\"\
+    )\n        body = {\"model\": config[\"model\"], \"messages\": [{\"role\": \"\
+    user\", \"content\": \"What is 17 + 25? Reply with the number only.\"}],\n   \
+    \             \"temperature\": 0, \"max_tokens\": 32, \"chat_template_kwargs\"\
+    : {\"enable_thinking\": False}}\n        response = await client.post(\"/v1/chat/completions\"\
+    , json=body, timeout=config[\"admission_timeout_seconds\"])\n        response.raise_for_status()\n\
+    \        answer = response.json()[\"choices\"][0][\"message\"][\"content\"].strip()\n\
+    \        if answer != \"42\":\n            raise RuntimeError(\"Real model admission\
+    \ did not produce the expected answer\")\n\n    async def monitor(client):\n \
+    \       while True:\n            engine = state[\"engine\"]\n            if engine\
+    \ is not None and engine.returncode is not None:\n                state.update(admitted=False,\
+    \ last_error=\"engine exited\", health_failures=config[\"liveness_failures\"])\n\
+    \                log.error(json.dumps({\"event\": \"engine_exited\", \"returncode\"\
+    : engine.returncode, **state[\"identity\"]}))\n                os.kill(os.getpid(),\
+    \ signal.SIGTERM)\n                return\n            try:\n                response\
+    \ = await client.get(\"/health\", timeout=config[\"health_timeout_seconds\"])\n\
+    \                response.raise_for_status()\n                if not state[\"\
+    admitted\"] and not state[\"draining\"]:\n                    await admit(client)\n\
+    \                    state[\"admitted\"] = True\n                    log.info(json.dumps({\"\
+    event\": \"model_admitted\", **state[\"identity\"]}))\n                state.update(health_failures=0,\
+    \ last_error=None)\n            except Exception as exc:\n                state[\"\
+    health_failures\"] += 1\n                state[\"last_error\"] = type(exc).__name__\
+    \ + \": \" + str(exc)[:300]\n                if state[\"health_failures\"] >=\
+    \ config[\"readiness_failures\"]:\n                    state[\"admitted\"] = False\n\
+    \            await asyncio.sleep(config[\"health_interval_seconds\"])\n\n    @asynccontextmanager\n\
+    \    async def lifespan(app):\n        if start_engine:\n            if len(state[\"\
+    identity\"][\"physical_devices\"]) != config.get(\"device_count\", 1):\n     \
+    \           raise RuntimeError(\"Actual NPU allocation does not match the configured\
+    \ parallel world size\")\n            state[\"engine\"] = await asyncio.create_subprocess_exec(*config[\"\
     engine_command\"], start_new_session=True,\n                env={**os.environ,\
     \ **config.get(\"engine_env\", {})})\n        async with httpx.AsyncClient(base_url=config[\"\
     engine_url\"], transport=transport,\n                                    timeout=httpx.Timeout(connect=10,\
@@ -131,49 +132,55 @@ data:
     \                      os.killpg(engine.pid, signal.SIGKILL)\n               \
     \         await engine.wait()\n\n    app = FastAPI(lifespan=lifespan)\n    app.state.worker\
     \ = state\n\n    @app.get(\"/identity\")\n    async def get_identity():\n    \
-    \    return state[\"identity\"]\n\n    @app.get(\"/ready\")\n    @app.get(\"/health\"\
-    )\n    async def ready():\n        if state[\"draining\"] or not state[\"admitted\"\
-    ]:\n            raise HTTPException(503, \"worker unavailable\")\n        return\
-    \ {\"ready\": True, **state[\"identity\"]}\n\n    @app.get(\"/live\")\n    async\
-    \ def live():\n        if not state[\"draining\"] and state[\"health_failures\"\
-    ] >= config[\"liveness_failures\"]:\n            raise HTTPException(503, \"engine\
-    \ requires recovery\")\n        return {\"live\": True, \"inflight\": len(state[\"\
-    leases\"])}\n\n    @app.post(\"/drain\")\n    async def drain(request: Request):\n\
-    \        if request.client is None or request.client.host not in {\"127.0.0.1\"\
-    , \"::1\"}:\n            raise HTTPException(403, \"drain is local-only\")\n \
-    \       state[\"draining\"] = True\n        deadline = time.monotonic() + config[\"\
-    drain_seconds\"]\n        while state[\"leases\"] and time.monotonic() < deadline:\n\
-    \            await asyncio.sleep(0.05)\n        cancelled = len(state[\"leases\"\
-    ])\n        for lease in list(state[\"leases\"].values()):\n            lease[\"\
-    cancelled\"] = True\n            if lease.get(\"response\"):\n               \
-    \ await lease[\"response\"].aclose()\n            task = lease.get(\"task\")\n\
-    \            if task is not None and task is not asyncio.current_task():\n   \
-    \             task.cancel()\n        state[\"cancelled\"] += cancelled\n     \
-    \   log.info(json.dumps({\"event\": \"drained\", \"cancelled\": cancelled, **state[\"\
-    identity\"]}))\n        return {\"draining\": True, \"cancelled\": cancelled,\
-    \ \"inflight\": len(state[\"leases\"])}\n\n    @app.get(\"/metrics\")\n    async\
-    \ def metrics():\n        text = \"\\n\".join([\n            \"# TYPE heteroserve_worker_inflight\
-    \ gauge\",\n            f\"heteroserve_worker_inflight {len(state['leases'])}\"\
-    ,\n            \"# TYPE heteroserve_worker_ready gauge\",\n            f\"heteroserve_worker_ready\
-    \ {int(state['admitted'] and not state['draining'])}\",\n            \"# TYPE\
-    \ heteroserve_worker_completed_total counter\",\n            f\"heteroserve_worker_completed_total\
-    \ {state['completed']}\",\n            \"# TYPE heteroserve_worker_cancelled_total\
-    \ counter\",\n            f\"heteroserve_worker_cancelled_total {state['cancelled']}\"\
-    , \"\"])\n        try:\n            response = await app.state.client.get(\"/metrics\"\
-    , timeout=3)\n            if response.status_code == 200:\n                text\
-    \ += response.text\n        except httpx.HTTPError:\n            pass\n      \
-    \  return Response(text, media_type=\"text/plain\")\n\n    @app.api_route(\"/v1/{path:path}\"\
-    , methods=[\"GET\", \"POST\"])\n    async def proxy(path: str, request: Request):\n\
-    \        if not state[\"admitted\"] or state[\"draining\"]:\n            raise\
-    \ HTTPException(503, \"worker is not accepting new requests\")\n        if request.method\
-    \ == \"POST\" and len(state[\"leases\"]) >= config.get(\"max_inflight\", 8):\n\
-    \            raise HTTPException(429, \"worker request budget reached\", headers={\"\
-    Retry-After\": \"1\"})\n        lease_id = uuid.uuid4().hex\n        lease = {\"\
-    task\": asyncio.current_task(), \"response\": None, \"cancelled\": False}\n  \
-    \      state[\"leases\"][lease_id] = lease\n        upstream = None\n        try:\n\
-    \            body = await request.body()\n            headers = {k: v for k, v\
-    \ in request.headers.items() if k.lower() not in HOP_HEADERS | {\"host\"}}\n \
-    \           upstream_request = app.state.client.build_request(request.method,\
+    \    return state[\"identity\"]\n\n    @app.get(\"/configuration\")\n    async\
+    \ def configuration():\n        return {**state[\"identity\"], \"engine\": config.get(\"\
+    engine_parameters\", {}),\n                \"traffic\": {\"max_inflight\": config.get(\"\
+    max_inflight\", 8),\n                            \"request_timeout_seconds\":\
+    \ config[\"request_timeout_seconds\"]},\n                \"lifecycle\": {\"drain_seconds\"\
+    : config[\"drain_seconds\"]},\n                \"ready\": state[\"admitted\"]\
+    \ and not state[\"draining\"], \"draining\": state[\"draining\"]}\n\n    @app.get(\"\
+    /ready\")\n    @app.get(\"/health\")\n    async def ready():\n        if state[\"\
+    draining\"] or not state[\"admitted\"]:\n            raise HTTPException(503,\
+    \ \"worker unavailable\")\n        return {\"ready\": True, **state[\"identity\"\
+    ]}\n\n    @app.get(\"/live\")\n    async def live():\n        if not state[\"\
+    draining\"] and state[\"health_failures\"] >= config[\"liveness_failures\"]:\n\
+    \            raise HTTPException(503, \"engine requires recovery\")\n        return\
+    \ {\"live\": True, \"inflight\": len(state[\"leases\"])}\n\n    @app.post(\"/drain\"\
+    )\n    async def drain(request: Request):\n        if request.client is None or\
+    \ request.client.host not in {\"127.0.0.1\", \"::1\"}:\n            raise HTTPException(403,\
+    \ \"drain is local-only\")\n        state[\"draining\"] = True\n        deadline\
+    \ = time.monotonic() + config[\"drain_seconds\"]\n        while state[\"leases\"\
+    ] and time.monotonic() < deadline:\n            await asyncio.sleep(0.05)\n  \
+    \      cancelled = len(state[\"leases\"])\n        for lease in list(state[\"\
+    leases\"].values()):\n            lease[\"cancelled\"] = True\n            if\
+    \ lease.get(\"response\"):\n                await lease[\"response\"].aclose()\n\
+    \            task = lease.get(\"task\")\n            if task is not None and task\
+    \ is not asyncio.current_task():\n                task.cancel()\n        state[\"\
+    cancelled\"] += cancelled\n        log.info(json.dumps({\"event\": \"drained\"\
+    , \"cancelled\": cancelled, **state[\"identity\"]}))\n        return {\"draining\"\
+    : True, \"cancelled\": cancelled, \"inflight\": len(state[\"leases\"])}\n\n  \
+    \  @app.get(\"/metrics\")\n    async def metrics():\n        text = \"\\n\".join([\n\
+    \            \"# TYPE heteroserve_worker_inflight gauge\",\n            f\"heteroserve_worker_inflight\
+    \ {len(state['leases'])}\",\n            \"# TYPE heteroserve_worker_ready gauge\"\
+    ,\n            f\"heteroserve_worker_ready {int(state['admitted'] and not state['draining'])}\"\
+    ,\n            \"# TYPE heteroserve_worker_completed_total counter\",\n      \
+    \      f\"heteroserve_worker_completed_total {state['completed']}\",\n       \
+    \     \"# TYPE heteroserve_worker_cancelled_total counter\",\n            f\"\
+    heteroserve_worker_cancelled_total {state['cancelled']}\", \"\"])\n        try:\n\
+    \            response = await app.state.client.get(\"/metrics\", timeout=3)\n\
+    \            if response.status_code == 200:\n                text += response.text\n\
+    \        except httpx.HTTPError:\n            pass\n        return Response(text,\
+    \ media_type=\"text/plain\")\n\n    @app.api_route(\"/v1/{path:path}\", methods=[\"\
+    GET\", \"POST\"])\n    async def proxy(path: str, request: Request):\n       \
+    \ if not state[\"admitted\"] or state[\"draining\"]:\n            raise HTTPException(503,\
+    \ \"worker is not accepting new requests\")\n        if request.method == \"POST\"\
+    \ and len(state[\"leases\"]) >= config.get(\"max_inflight\", 8):\n           \
+    \ raise HTTPException(429, \"worker request budget reached\", headers={\"Retry-After\"\
+    : \"1\"})\n        lease_id = uuid.uuid4().hex\n        lease = {\"task\": asyncio.current_task(),\
+    \ \"response\": None, \"cancelled\": False}\n        state[\"leases\"][lease_id]\
+    \ = lease\n        upstream = None\n        try:\n            body = await request.body()\n\
+    \            headers = {k: v for k, v in request.headers.items() if k.lower()\
+    \ not in HOP_HEADERS | {\"host\"}}\n            upstream_request = app.state.client.build_request(request.method,\
     \ \"/v1/\" + path,\n                                                         \
     \     params=request.query_params, headers=headers, content=body)\n          \
     \  upstream = await app.state.client.send(upstream_request, stream=True)\n   \
@@ -219,7 +226,11 @@ data:
     ,\n    \"--gpu-memory-utilization\",\n    \"0.5\",\n    \"--max-num-batched-tokens\"\
     ,\n    \"2048\",\n    \"--enforce-eager\",\n    \"--disable-frontend-multiprocessing\"\
     ,\n    \"--disable-log-requests\",\n    \"--quantization\",\n    \"moqe_ascend_int4\"\
-    \n  ],\n  \"engine_env\": {\n    \"MOQE_ASCEND_INT4_ADAPTER\": \"1\",\n    \"\
+    \n  ],\n  \"engine_parameters\": {\n    \"dtype\": \"float16\",\n    \"max_model_len\"\
+    : 4096,\n    \"max_num_seqs\": 2,\n    \"gpu_memory_utilization\": 0.5,\n    \"\
+    max_num_batched_tokens\": 2048,\n    \"enforce_eager\": true,\n    \"disable_frontend_multiprocessing\"\
+    : true,\n    \"disable_log_requests\": true,\n    \"quantization\": \"moqe_ascend_int4\"\
+    \n  },\n  \"engine_env\": {\n    \"MOQE_ASCEND_INT4_ADAPTER\": \"1\",\n    \"\
     MOQE_ASCEND_INT4_PARALLEL\": \"0\"\n  },\n  \"health_interval_seconds\": 3,\n\
     \  \"health_timeout_seconds\": 10,\n  \"readiness_failures\": 3,\n  \"liveness_failures\"\
     : 10,\n  \"admission_timeout_seconds\": 120,\n  \"request_timeout_seconds\": 180,\n\
@@ -260,7 +271,7 @@ spec:
     metadata:
       labels: *id001
       annotations:
-        heteroserve.io/runtime-sha256: c5f1adbe608882b3c8f4e1488b5160bb4ccb3e6166dd46505f6f3ca917a8a19b
+        heteroserve.io/runtime-sha256: dd73392d60ba91b8db8261d7a3bbf0c19f456712efb1035da4c10d6ba473179e
         prometheus.io/scrape: 'true'
         prometheus.io/port: '8000'
         prometheus.io/path: /metrics

@@ -1,6 +1,7 @@
 """Supervise vLLM, admit real model output, and drain direct Pod traffic safely."""
 import argparse
 import asyncio
+import copy
 from contextlib import asynccontextmanager
 import json
 import logging
@@ -33,6 +34,8 @@ def identity(config):
 
 
 def create_app(config, transport=None, start_engine=True):
+    # ConfigMap files can change while this process retains its startup settings.
+    config = copy.deepcopy(config)
     state = {"admitted": False, "draining": False, "health_failures": 0, "leases": {},
              "engine": None, "last_error": None, "identity": identity(config), "completed": 0, "cancelled": 0}
 
@@ -108,6 +111,14 @@ def create_app(config, transport=None, start_engine=True):
     @app.get("/identity")
     async def get_identity():
         return state["identity"]
+
+    @app.get("/configuration")
+    async def configuration():
+        return {**state["identity"], "engine": config.get("engine_parameters", {}),
+                "traffic": {"max_inflight": config.get("max_inflight", 8),
+                            "request_timeout_seconds": config["request_timeout_seconds"]},
+                "lifecycle": {"drain_seconds": config["drain_seconds"]},
+                "ready": state["admitted"] and not state["draining"], "draining": state["draining"]}
 
     @app.get("/ready")
     @app.get("/health")

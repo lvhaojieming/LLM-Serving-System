@@ -330,6 +330,15 @@ class Draft:
         raw.pop("replicas", None)
         raw.pop("model_nodes", None)
 
+    def inherit(self, key, ident):
+        group, _, name = key.partition(".")
+        if group not in {"engine", "traffic", "lifecycle"} or key not in {k for fields in INSTANCE_GROUPS.values() for k in fields}:
+            raise ValueError("只有引擎、请求和退出参数可以恢复默认值")
+        spec = self.instances()[ident]
+        spec.get(group, {}).pop(name, None)
+        if group in spec and not spec[group]:
+            del spec[group]
+
     def changes(self):
         return {name: v for name, v in self.files.items() if json.loads(v["before"]) != v["after"]}
 

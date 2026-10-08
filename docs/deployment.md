@@ -376,6 +376,21 @@ AWQ 的 `awq-02` 进一步完成真实独立 TP2 发布、max_num_seqs=3 和实�
 并行与菜单记录集中在 `artifacts/kubernetes/`，最终摘要为 `control-instance-acceptance.json`，使用方法见 [总控说明](control.md)。
 本轮限定单节点多卡，没有跨物理节点 TP/PP 或持续吞吐/SLO 压测；普通/SSE 验收也不代表全量模型质量评估。
 
+## 总控运行参数与编辑验收（2026-10-09）
+
+具体 vLLM 的部署、TP/PP、引擎、退出和请求预算集中在同一页，区分运行值、已保存值与待修改值。
+运行引擎及请求参数采集自进程只读 `/configuration` 启动快照，探针/退出总预算从实际 Pod 读取；旧版本通过实际 vLLM 进程启动参数兼容采集，未核实项保持未知。
+采集结果校验 Pod UID、节点与稳定实例 ID；滚动更新时分别显示旧/新 Pod，不能用新 ConfigMap 的值代表旧进程。
+
+实机编辑页先输入无效字段，再在同页批量修改 `awq-01` 的 `max_num_seqs=3 max_inflight=8`，通过确认和更新后运行序列数从 2 变为 3。
+随后恢复原配置并更新，运行值回到 2，其余三个 AWQ 实例在这次参数恢复中 UID 不变。
+四个 AWQ 实例与 GPTQ 均启用进程快照，模型普通/SSE 和池内路由验收通过。五个固定外层节点容器 ID 保持不变。
+本地复用已有开发环境，142 项测试通过，覆盖运行值不回填配置值、启动快照不受配置源修改影响、采集身份检查、批量编辑出错时整行撤销及原地修正。
+
+记录为 `artifacts/kubernetes/control-runtime-panel.json` 和 `control-runtime-panel.log`，操作方法见 [总控说明](control.md)。
+本轮试改参数恢复，最近保存前的原回退配置保留；未新建环境或镜像，没有额外实验容器。
+Gateway 全局和专家默认参数页仍明确标记未采集/逐实例查看，不能将默认值当成所有实例的运行值；本轮未实现这两类参数的独立进程快照。
+
 ## 参考资料
 
 - [K3s Docker server/agent](https://docs.k3s.io/advanced#running-k3s-in-docker)
