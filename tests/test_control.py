@@ -70,7 +70,10 @@ def test_apply_stops_on_first_failure(monkeypatch):
 
 
 def menu_inputs(monkeypatch, project, answers):
+    import control_menu
     monkeypatch.setattr(control, "ROOT", project)
+    monkeypatch.setattr(control_menu.Menu, "refresh_resources", lambda self: None)
+    monkeypatch.setattr(control_menu.Menu, "command", lambda self, args, log_path: control.main(args))
     values = iter(answers)
     monkeypatch.setattr("builtins.input", lambda prompt="": next(values))
 
@@ -116,8 +119,10 @@ def test_menu_stale_preview_cannot_overwrite_changed_config(project):
 
 
 def test_menu_end_of_input_exits_without_changes(monkeypatch, project):
+    import control_menu
     before = control.read_configs(project)
     monkeypatch.setattr(control, "ROOT", project)
+    monkeypatch.setattr(control_menu.Menu, "refresh_resources", lambda self: None)
     def eof(prompt=""):
         raise EOFError
     monkeypatch.setattr("builtins.input", eof)
@@ -436,3 +441,115 @@ def test_exit_cancelled_update_preserves_confirmed_pending_work(monkeypatch, pro
     assert menu.exit_menu() is False
     assert not menu.draft.changes()
     assert control.publication_record(project)["pending"] == [control.FILES["pool"]]
+
+
+def test_persistent_draft_survives_restart_without_changing_saved_config(project):
+    path = project / control.FILES["pool"]
+    before = path.read_bytes()
+    draft = control.Draft(project)
+    draft.restore()
+    draft.resize(5)
+    draft.checkpoint({"pool": control.FILES["pool"], "selected": "awq-05"})
+    recovered = control.Draft(project)
+    assert recovered.restore()
+    assert "awq-05" in recovered.instances()
+    assert recovered.restored_context["selected"] == "awq-05"
+    assert path.read_bytes() == before
+    recovered.save()
+    assert not recovered.checkpoint_path.exists()
+
+
+def test_checkpoint_never_overwrites_another_session(project):
+    first, second = control.Draft(project), control.Draft(project)
+    first.restore(); second.restore()
+    first.resize(5); first.checkpoint()
+    second.resize(6)
+    with pytest.raises(RuntimeError, match="另一个控制会话"):
+        second.checkpoint()
+    recovered = control.Draft(project); recovered.restore()
+    assert recovered.pool()["replicas"] == 5
+    import json
+    backup = project / "artifacts/kubernetes/control/conflicts" / (second.session_id + ".json")
+    assert len(json.loads(backup.read_text(encoding="utf-8"))["files"][control.FILES["pool"]]["after"]["instances"]) == 6
+
+
+def test_recovered_draft_rejects_changed_source_and_preserves_both(project):
+    draft = control.Draft(project); draft.restore()
+    draft.resize(5); draft.checkpoint()
+    path = project / control.FILES["pool"]
+    changed = path.read_text(encoding="utf-8") + "\n"
+    path.write_text(changed, encoding="utf-8")
+    recovered = control.Draft(project); recovered.restore()
+    with pytest.raises(RuntimeError, match="配置已被其他操作"):
+        recovered.save()
+    assert path.read_text(encoding="utf-8") == changed
+    assert recovered.checkpoint_path.exists()
+
+
+def test_eof_preserves_working_copy_for_next_launch(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, [])
+    menu.draft.resize(5)
+    monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(EOFError()))
+    menu.run()
+    recovered = control.Draft(project); recovered.restore()
+    assert "awq-05" in recovered.instances()
+
+
+def test_home_resource_id_opens_correct_expert_without_pool_submenu(monkeypatch, project):
+    monkeypatch.setitem(control.FILES, "pool", "deploy/pools/ascend-awq.json")
+    menu = confirmed_menu(monkeypatch, project, ["gptq-01", "0"])
+    opened = []
+    monkeypatch.setattr(menu, "field_editor", lambda title, fields, section, ident: opened.append(ident))
+    menu.run()
+    assert opened == ["gptq-01"] and control.FILES["pool"].endswith("ascend-gptq.json")
+
+
+def test_resource_filter_and_api_failure_are_explicit(monkeypatch, project, capsys):
+    menu = confirmed_menu(monkeypatch, project, [])
+    menu.resource_filter = "gptq"
+    menu.resources()
+    output = capsys.readouterr().out
+    assert "gptq/gptq-01" in output and "awq/awq-01" not in output
+    assert "未采集" in output and "采集不可用" in output
+
+
+def test_new_instance_wizard_sets_parallelism_and_pp_budget_in_one_flow(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, ["1", "", "1", "2", "2"])
+    monkeypatch.setattr(menu, "field_editor", lambda *a: None)
+    menu.create_instance()
+    spec = menu.draft.instances()["awq-05"]
+    assert spec["parallelism"] == {"tp": 2, "pp": 2}
+    assert spec["engine"]["max_num_batched_tokens"] == 4096
+    recovered = control.Draft(project); recovered.restore()
+    assert recovered.instances()["awq-05"] == spec
+
+
+def test_publish_records_failed_stage_and_keeps_pending_scope(monkeypatch, project):
+    menu = confirmed_menu(monkeypatch, project, ["y"])
+    menu.draft.resize(5); menu.draft.save()
+    monkeypatch.setattr(control, "main", lambda *a: (_ for _ in ()).throw(RuntimeError("backend failed")))
+    with pytest.raises(RuntimeError, match="backend failed"):
+        menu.update_system()
+    import json
+    jobs = list((project / "artifacts/kubernetes/control/jobs").glob("*.json"))
+    record = json.loads(jobs[0].read_text(encoding="utf-8"))
+    assert record["status"] == "failed" and record["stage"] == "applying"
+    assert control.publication_record(project)["pending"] == [control.FILES["pool"]]
+
+
+@pytest.mark.parametrize("operation,returncode", [("status", 0), ("fail", 3)])
+def test_controller_command_captures_details_in_log(monkeypatch, project, operation, returncode, capsys):
+    import control_menu
+    original = control_menu.Menu.command
+    menu = confirmed_menu(monkeypatch, project, [])
+    script = project / "scripts/control.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("import sys\nprint('DETAIL_ONLY_IN_LOG')\nsys.exit(3 if 'fail' in sys.argv else 0)\n", encoding="utf-8")
+    log = project / "artifacts/kubernetes/control/jobs/command.log"
+    if returncode:
+        with pytest.raises(control.subprocess.CalledProcessError):
+            original(menu, [operation], log)
+    else:
+        original(menu, [operation], log)
+        assert "DETAIL_ONLY_IN_LOG" not in capsys.readouterr().out
+    assert "DETAIL_ONLY_IN_LOG" in log.read_text(encoding="utf-8")

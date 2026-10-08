@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import datetime
+import uuid
 from contextlib import nullcontext
 
 from manage_lab import ROOT, kubectl, load_config, names, active_nodes, operation_lock
@@ -204,7 +205,7 @@ def commands(action, target):
     return [entry for name, entries in choices.items() if target in (name, "all") for entry in entries]
 
 
-ERRORS = (ValueError, KeyError, RuntimeError, OSError, subprocess.CalledProcessError)
+ERRORS = (ValueError, KeyError, RuntimeError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired)
 
 INSTANCE_GROUPS = {
     "部署与并行": {"node": "运行节点", "enabled": "启用实例", "parallelism.tp": "TP 张量并行", "parallelism.pp": "PP 流水线并行"},
@@ -259,6 +260,71 @@ class Draft:
     def __init__(self, root=None):
         self.root = ROOT if root is None else root
         self.files = {}
+        self.checkpoint_enabled = False
+        self.checkpoint_digest = None
+        self.restored_context = {}
+        self.session_id = uuid.uuid4().hex
+
+    @property
+    def checkpoint_path(self):
+        return self.root / "artifacts/kubernetes/control/draft.json"
+
+    def restore(self):
+        """Recover one workspace without silently rebasing concurrently edited files."""
+        self.checkpoint_enabled = True
+        if not self.checkpoint_path.exists():
+            return False
+        payload = self.checkpoint_path.read_bytes()
+        record = json.loads(payload)
+        allowed = {FILES["gateway"], *available_pools(self.root).values()}
+        recovered = record.get("files", {})
+        if not isinstance(recovered, dict) or any(name not in allowed for name in recovered):
+            raise RuntimeError("草稿恢复文件包含不支持的目标，已保留文件")
+        for data in recovered.values():
+            if not isinstance(data, dict) or not isinstance(data.get("before"), str) or not isinstance(data.get("after"), dict) or not isinstance(json.loads(data["before"]), dict):
+                raise RuntimeError("草稿恢复数据无效，已保留文件")
+        context = record.get("context", {})
+        if not isinstance(context, dict) or any(context.get(k) is not None and not isinstance(context[k], str) for k in ("pool", "selected")):
+            raise RuntimeError("草稿恢复上下文无效，已保留文件")
+        self.files = recovered
+        self.restored_context = context
+        self.checkpoint_digest = hashlib.sha256(payload).hexdigest()
+        return bool(recovered)
+
+    def check_checkpoint(self):
+        actual = hashlib.sha256(self.checkpoint_path.read_bytes()).hexdigest() if self.checkpoint_path.exists() else None
+        if self.checkpoint_enabled and actual != self.checkpoint_digest:
+            changes = self.changes()
+            backup = self.root / "artifacts/kubernetes/control/conflicts" / (self.session_id + ".json")
+            if changes:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                atomic_text(backup, json.dumps({"files": changes, "context": self.restored_context}, ensure_ascii=False, indent=2))
+            raise RuntimeError("另一个控制会话修改了草稿；未覆盖他人编辑，本会话修改保留于 " + str(backup))
+
+    def checkpoint(self, context=None):
+        self.checkpoint_enabled = True
+        with operation_lock(self.root):
+            self.check_checkpoint()
+            changes = self.changes()
+            if not changes:
+                if self.checkpoint_path.exists():
+                    self.checkpoint_path.unlink()
+                self.checkpoint_digest = None
+                return
+            self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            record = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                      "files": changes, "context": context or self.restored_context}
+            payload = json.dumps(record, ensure_ascii=False, indent=2)
+            atomic_text(self.checkpoint_path, payload)
+            self.checkpoint_digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def discard(self):
+        with operation_lock(self.root):
+            self.check_checkpoint()
+            if self.checkpoint_enabled and self.checkpoint_path.exists():
+                self.checkpoint_path.unlink()
+            self.files.clear()
+            self.checkpoint_digest = None
 
     def file(self, relative):
         if relative not in self.files:
@@ -387,6 +453,7 @@ class Draft:
             pool = self.pool(relative)
             validate({"gateway": gateway, "pool": pool, "engine": resolve_runtime(pool, self.root)}, cluster)
         with operation_lock(self.root):
+            self.check_checkpoint()
             for name, data in changes.items():
                 if (self.root / name).read_text(encoding="utf-8") != data["before"]:
                     raise RuntimeError("配置已被其他操作修改，重新载入草稿: " + name)
@@ -413,6 +480,9 @@ class Draft:
                 raise
             record["status"] = "saved"
             atomic_text(journal, json.dumps(record, indent=2))
+            if self.checkpoint_enabled and self.checkpoint_path.exists():
+                self.checkpoint_path.unlink()
+                self.checkpoint_digest = None
         self.files.clear()
         print("已保存配置；尚未部署。请在变更发布中查看计划并应用。")
         return list(changes)

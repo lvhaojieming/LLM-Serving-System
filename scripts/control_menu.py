@@ -3,10 +3,12 @@ import json
 import hashlib
 import copy
 import shlex
+import uuid
+import time
 
 import control as c
 import manage_instances as instances
-from manage_lab import ROOT, kubectl, load_config, names, active_nodes
+from manage_lab import ROOT, OWNER, kubectl, load_config, names, active_nodes
 
 
 def pick(title, options, exit_label="返回", shortcuts=None):
@@ -33,6 +35,156 @@ class Menu:
         self.draft = c.Draft()
         self.selected = None
         self.saved = c.publication_record().get("pending", [])
+        self.resource_rows = []
+        self.resource_error = "尚未刷新"
+        self.resource_at = None
+        self.resource_filter = ""
+        self.job = None
+        if self.draft.restore():
+            context = self.draft.restored_context
+            if context.get("pool") in c.available_pools().values():
+                c.FILES["pool"] = context["pool"]
+            if context.get("selected") in self.draft.instances():
+                self.selected = context["selected"]
+            print("已恢复上次未确认草稿；请查看差异后继续编辑或确认。")
+
+    def checkpoint(self):
+        self.draft.checkpoint({"pool": c.FILES["pool"], "selected": self.selected})
+
+    def discard_draft(self):
+        self.draft.discard()
+        self.draft = c.Draft()
+        self.draft.restore()
+
+    def refresh_resources(self):
+        print("正在读取项目工作负载状态……")
+        try:
+            cluster = load_config(c.ROOT / "deploy/lab/cluster.json")
+            result = kubectl(cluster, ["get", "pods", "-n", "heteroserve", "-l", OWNER + "=" + cluster["name"], "-o", "json"], timeout=15)
+            self.resource_rows = json.loads(result.stdout)["items"]
+            self.resource_error = None
+        except c.ERRORS as error:
+            self.resource_rows = []
+            self.resource_error = str(error)
+        self.resource_at = c.datetime.datetime.now(c.datetime.timezone(c.datetime.timedelta(hours=8))).isoformat(timespec="seconds")
+
+    def resource_index(self):
+        index = {}
+        short = {}
+        for expert, relative in c.available_pools().items():
+            pool = self.draft.pool(relative)
+            for ident, spec in instances.normalized_instances(pool).items():
+                index[expert + "/" + ident] = {"expert": expert, "relative": relative, "pool": pool["pool"], "ident": ident, "spec": spec}
+                short.setdefault(ident, []).append(index[expert + "/" + ident])
+        index.update({ident: values[0] for ident, values in short.items() if len(values) == 1})
+        return index
+
+    def resources(self):
+        print("\n实例工作台 | 采集时间=" + str(self.resource_at) + " | 筛选=" + (self.resource_filter or "全部"))
+        print("实例 / 专家 | 工作负载状态 | 实际节点 | 配置 TP/PP | 申请卡数 | 变更")
+        pending = set(c.publication_record().get("pending", []))
+        for key, row in self.resource_index().items():
+            if "/" not in key:
+                continue
+            spec = row["spec"]
+            if self.resource_filter and self.resource_filter.lower() not in (key + " " + spec["node"]).lower():
+                continue
+            pods = [p for p in self.resource_rows if p["metadata"].get("labels", {}).get("heteroserve.io/pool") == row["pool"] and
+                    p["metadata"].get("labels", {}).get(instances.INSTANCE_LABEL) == row["ident"]]
+            live = [p for p in pods if not p["metadata"].get("deletionTimestamp")]
+            ready = sum(instances.ready(p) for p in live)
+            status = "未采集" if self.resource_error else "更新中" if len(pods) > 1 or any(p["metadata"].get("deletionTimestamp") for p in pods) else "就绪" if ready else "加载/调度中" if live else "未部署" if spec.get("enabled", True) else "已停用"
+            actual = ",".join(sorted({p["spec"].get("nodeName", "待调度") for p in pods})).replace("heteroserve-lab-", ".") or "--"
+            parallel = spec.get("parallelism", {"tp": 1, "pp": 1})
+            changed = "草稿" if row["relative"] in self.draft.changes() else "待发布（池）" if row["relative"] in pending else "--"
+            print(f"{key} | {status} | {actual} | {parallel['tp']}/{parallel['pp']} | {parallel['tp']*parallel['pp'] if spec.get('enabled',True) else 0} | {changed}")
+        if self.resource_error:
+            print("采集不可用：" + self.resource_error + "；配置仍可编辑，运行状态未核实。")
+        conflicts = [name for name, data in self.draft.changes().items() if (c.ROOT / name).read_text(encoding="utf-8") != data["before"]]
+        if conflicts:
+            print("草稿与当前配置冲突，禁止覆盖：" + ", ".join(conflicts))
+        print("输入实例 ID（例如 awq-01 / gptq-01）直接编辑；/awq 筛选，/ 清除；r 刷新；+ 新增；c 保存；u 发布；jobs 任务。")
+        print("申请卡数和 TP/PP 是期望配置；进入实例页查看实际参数、物理卡及 Pod UID。")
+
+    def select_instance(self, row):
+        c.select_pool(row["expert"])
+        self.selected = row["ident"]
+        fields = {key: label for group in c.INSTANCE_GROUPS.values() for key, label in group.items()}
+        self.field_editor("实例工作台 / " + self.selected, fields, "pool", self.selected)
+
+    def create_instance(self):
+        expert = pick("新增实例 / 专家池", list(c.available_pools()))
+        if not expert:
+            return
+        c.select_pool(expert)
+        specs = self.draft.instances()
+        seq = 1
+        while expert + "-" + str(seq).zfill(2) in specs:
+            seq += 1
+        suggested = expert + "-" + str(seq).zfill(2)
+        ident = input(f"实例 ID（回车使用 {suggested}）: ").strip() or suggested
+        if ident in specs:
+            raise ValueError("实例 ID 已存在")
+        cluster = load_config(c.ROOT / "deploy/lab/cluster.json")
+        runtime = c.resolve_runtime(self.draft.pool(), c.ROOT)
+        choices = {n["host"]: names(cluster, n)[0] for n in active_nodes(cluster) if n["host"] in runtime["device_hosts"]}
+        chosen = pick("选择目标节点", list(choices))
+        if not chosen:
+            return
+        tp = int(input("TP（回车=1）: ").strip() or "1")
+        pp = int(input("PP（回车=1）: ").strip() or "1")
+        if tp < 1 or pp < 1 or tp * pp > 8:
+            raise ValueError("单节点 TP×PP 必须在 1～8 之间")
+        engine = {}
+        params = runtime["model_parameters"]
+        if pp > 1 and params["max_num_batched_tokens"] < params["max_model_len"]:
+            engine["max_num_batched_tokens"] = params["max_model_len"]
+            print("PP 启动约束：批处理 token 预算初始化为 " + str(params["max_model_len"]))
+        specs[ident] = {"node": choices[chosen], "enabled": True, "parallelism": {"tp": tp, "pp": pp}, "engine": engine}
+        self.selected = ident
+        self.checkpoint()
+        print("实例已加入持久草稿；正在打开参数页，可确认保存或发布。")
+        self.select_instance({"expert": expert, "ident": ident})
+
+    def job_status(self):
+        directory = c.ROOT / "artifacts/kubernetes/control/jobs"
+        if not directory.exists():
+            print("暂无发布任务。")
+            return
+        for path in sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
+            job = json.loads(path.read_text(encoding="utf-8"))
+            print(f"{job['id']} | {job['status']} | {job.get('stage','--')} | {job.get('scope','--')} | {job['log']}")
+
+    def command(self, args, log_path):
+        expert = next(k for k, v in c.available_pools().items() if v == c.FILES["pool"])
+        argv = [c.sys.executable, str(c.ROOT / "scripts/control.py"), "--pool", expert, *args]
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        with log_path.open("ab") as output:
+            output.write(("\nCOMMAND " + json.dumps(argv, ensure_ascii=False) + "\n").encode("utf-8")); output.flush()
+            process = c.subprocess.Popen(argv, stdin=c.subprocess.DEVNULL, stdout=output, stderr=c.subprocess.STDOUT)
+            try:
+                while process.poll() is None:
+                    print(f"{args[0]} 进行中，已等待 {int(time.monotonic()-started)} 秒；详细输出：{log_path}", flush=True)
+                    try:
+                        process.wait(timeout=5)
+                    except c.subprocess.TimeoutExpired:
+                        pass
+            except BaseException:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except c.subprocess.TimeoutExpired:
+                    process.kill(); process.wait()
+                raise
+        if process.returncode:
+            print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-12:]))
+            raise c.subprocess.CalledProcessError(process.returncode, argv)
+
+    def write_job(self):
+        path = c.ROOT / "artifacts/kubernetes/control/jobs" / (self.job["id"] + ".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        c.atomic_text(path, json.dumps(self.job, ensure_ascii=False, indent=2))
 
     def context(self, page):
         pool = self.draft.pool()
@@ -85,6 +237,15 @@ class Menu:
             if input("输入 y 确认更新以上系统范围；其他输入保留待更新状态: ").strip().lower() != "y":
                 print("更新已取消，配置仍为已确认、待更新。")
                 return
+            ident = uuid.uuid4().hex
+            log_path = c.ROOT / "artifacts/kubernetes/control/jobs" / (ident + ".log")
+            self.job = {"id": ident, "status": "running", "scopes": scopes, "selected": selected,
+                        "log": str(log_path.relative_to(c.ROOT)), "completed": [],
+                        "configuration_hashes": {name: hashlib.sha256(data).hexdigest() for name, data in snapshot.items()},
+                        "controller_hashes": {name: hashlib.sha256((c.ROOT / "scripts" / name).read_bytes()).hexdigest()
+                                              for name in ("control.py", "control_menu.py") if (c.ROOT / "scripts" / name).exists()},
+                        "started_at": c.datetime.datetime.now(c.datetime.timezone.utc).isoformat()}
+            self.write_job()
             for name in scopes:
                 if any((c.ROOT / path).read_bytes() != data for path, data in snapshot.items()):
                     raise RuntimeError("发布计划生成后配置发生变化；未继续更新，请重新查看并确认计划")
@@ -93,24 +254,36 @@ class Menu:
                 target = "gateway" if name == c.FILES["gateway"] else "pool"
                 stage = "applying"
                 try:
+                    self.job.update(scope=name, stage=stage); self.write_job()
                     c.record_publication(name, stage)
-                    c.main(["instance", "apply", selected] if selected else ["apply", target])
+                    self.command(["instance", "apply", selected] if selected else ["apply", target], log_path)
                     stage = "verifying"
+                    self.job.update(stage=stage); self.write_job()
                     c.record_publication(name, stage)
-                    c.main(["instance", "verify", selected] if selected else ["verify", target])
+                    self.command(["instance", "verify", selected] if selected else ["verify", target], log_path)
                     if any((c.ROOT / path).read_bytes() != data for path, data in snapshot.items()):
                         raise RuntimeError("更新期间配置发生变化；保留待更新记录，请重新确认运行结果")
                     c.record_publication(name, "instance_verified" if selected else "verified")
+                    self.job["completed"].append({"scope": name, "selected": selected})
+                    self.write_job()
                     print("更新完成、验收通过：" + name)
                     if selected:
                         print("选中实例验收通过；专家池整体待更新状态保留，其他已确认修改仍需更新。")
                 except BaseException as error:
+                    self.job.update(status="failed", error=str(error), stage=stage); self.write_job()
                     c.record_publication(name, "failed", f"{stage}: {error}")
                     print(f"更新未完成：{name}，失败阶段={stage}；保留待更新记录，运行状态请查看日志。")
                     raise
+            self.job.update(status="verified", stage="complete"); self.write_job()
+        except BaseException as error:
+            if self.job and self.job["status"] == "running":
+                self.job.update(status="failed", error=str(error)); self.write_job()
+            raise
         finally:
             c.FILES["pool"] = previous
             self.saved = c.publication_record().get("pending", [])
+            if self.job and self.job["status"] in {"verified", "failed"}:
+                self.refresh_resources()
 
     def overview(self):
         self.context("系统总览 / 实际运行")
@@ -163,7 +336,7 @@ class Menu:
             if not ident:
                 running = "逐实例查看" if section != "gateway" else "未采集"
                 source = "专家默认（实例可覆盖）" if section != "gateway" else "Gateway 配置"
-            print(f"{i}. {label} [{key.rsplit('.',1)[-1]}] | {running} | {show(stored) if stored is not None else '新增实例'} | {show(wanted)} | {source} / {state}")
+            print(f"{i}. {label} | {running} | {show(stored) if stored is not None else '新增实例'} | {show(wanted)} | {source} / {state}")
         for row in rows:
             print(f"实际实例 {row['instance']}：节点={row['node']}，卡={row['physical_devices']}，Ready={row['ready']}，退出中={row.get('draining',False)}，UID={row['uid']}，采集时间={row['observed_at']}")
             if row.get("runtime_error"):
@@ -214,6 +387,7 @@ class Menu:
             self.draft.files = before
             raise
         print("修改已加入草稿，请核对本页待修改列；尚未更新运行服务。")
+        self.checkpoint()
 
     def cards(self):
         self.context("算力节点与设备 / 实际卡占用")
@@ -244,12 +418,15 @@ class Menu:
                 p = spec.get("parallelism", {"tp": 1, "pp": 1})
                 print(f"请求卡数：{p['tp'] * p['pp']}（TP×PP），卡号由 K8s 分配。")
             self.parameter_panel(fields, section, ident, rows, error)
-            print("输入编号或多项赋值 tp=2 pp=1 max_num_seqs=4；字段=default 恢复实例默认。r 刷新；c 保存；u 保存并更新；0 返回。")
+            print("输入编号或多项赋值 tp=2 pp=1 max_num_seqs=4；字段=default 恢复默认。? 查看字段名；r 刷新；c 保存；u 发布；0 返回。")
             value = input("编辑: ").strip()
             if value in {"", "0"}:
                 return
             try:
-                if value == "r":
+                if value == "?":
+                    for i, (key, label) in enumerate(fields.items(), 1):
+                        print(f"{i}. {label}: {key}")
+                elif value == "r":
                     rows, error = self.live_instance(ident) if ident else ([], None)
                 elif value in {"c", "u", "s", "a"}:
                     self.confirm_changes(update=value in {"u", "a"})
@@ -290,16 +467,7 @@ class Menu:
                     fields = {key: label for group in c.INSTANCE_GROUPS.values() for key, label in group.items()}
                     self.field_editor("专家与实例 / " + ident + " / 全部参数", fields, "pool", ident)
             elif action == "增加实例":
-                specs = self.draft.instances()
-                ident = input("新实例 ID（如 awq-05）: ").strip()
-                if ident in specs:
-                    raise ValueError("实例 ID 已存在")
-                cluster = load_config(ROOT / "deploy/lab/cluster.json")
-                node = pick("目标节点", [names(cluster, n)[0] for n in active_nodes(cluster) if n["host"] in c.read_configs()["engine"]["device_hosts"]])
-                if node:
-                    specs[ident] = {"node": node, "enabled": True, "parallelism": {"tp": 1, "pp": 1}, "engine": {}}
-                    self.selected = ident
-                    print(f"新增实例 {ident} 已加入草稿，节点={node}，TP=1，PP=1；可先编辑参数，再进入菜单 5 确认并更新。")
+                self.create_instance()
             elif action == "设置启用实例数量":
                 before = self.draft.pool()["replicas"]
                 self.draft.resize(int(input("目标数量（减少时保留停用实例配置）: ").strip()))
@@ -311,6 +479,7 @@ class Menu:
                     print(f"移除 {ident} 已加入草稿；确认并更新后才排空和移除工作负载。")
             elif action == "专家默认推理参数":
                 self.field_editor("专家与实例 / 专家默认推理参数", c.FIELDS["engine"], "engine")
+            self.checkpoint()
 
     def traffic(self):
         while True:
@@ -351,7 +520,11 @@ class Menu:
         cluster = load_config(ROOT / "deploy/lab/cluster.json")
         pool = c.read_configs()["pool"]
         if "instances" in pool:
-            print(json.dumps(instances.plan(cluster, pool, selected), ensure_ascii=False, indent=2))
+            print("实例 | 操作 | 节点 | TP/PP | 申请卡数")
+            for row in instances.plan(cluster, pool, selected):
+                p = row.get("parallelism", {})
+                action = {"create": "新增", "update": "更新/停用", "unchanged": "保持", "remove": "移除"}[row["action"]]
+                print(f"{row['instance']} | {action} | {row.get('node') or '--'} | {p.get('tp','-')}/{p.get('pp','-')} | {row['cards'] if row['enabled'] else 0}")
         else:
             c.main(["apply", "pool", "--plan"])
 
@@ -381,8 +554,9 @@ class Menu:
                         raise ValueError("先确认或丢弃草稿，再回退配置")
                     c.rollback_configuration()
                     self.draft = c.Draft()
+                    self.draft.restore()
                 elif choice == "丢弃未确认草稿":
-                    self.draft = c.Draft()
+                    self.discard_draft()
                     print("未确认草稿已丢弃；已确认配置和待更新范围保留。")
 
     def publication_tools(self):
@@ -428,23 +602,58 @@ class Menu:
                    "确认并更新系统": lambda: self.confirm_changes(update=True)}
         print("HeteroServe 总控 | 编辑草稿 → 确认修改 → 更新系统 → 验收结果")
         try:
+            self.refresh_resources()
             while True:
                 self.context("主菜单")
                 try:
+                    self.resources()
                     if self.draft.changes():
                         print("有尚未确认的修改：按 7/c 确认保存，或按 8/u 确认并更新系统。")
-                    action = pick("功能分组", list(actions), "退出",
-                                  {"c": "确认保存草稿（暂不更新）", "u": "确认并更新系统"})
+                    shortcuts = {"c": "确认保存草稿（暂不更新）", "u": "确认并更新系统", "r": "刷新资源", "+": "新增实例", "jobs": "发布任务", **{key: key for key in self.resource_index()}}
+                    action = self.home_choice(list(actions), shortcuts)
                     if not action:
                         if self.exit_menu():
                             return
                         continue
-                    actions[action]()
+                    if action in self.resource_index():
+                        self.select_instance(self.resource_index()[action])
+                    elif action == "刷新资源":
+                        self.refresh_resources()
+                    elif action == "新增实例":
+                        self.create_instance()
+                    elif action == "发布任务":
+                        self.job_status()
+                    elif action.startswith("/"):
+                        self.resource_filter = action[1:]
+                    else:
+                        actions[action]()
+                    self.checkpoint()
                 except c.ERRORS as error:
                     print("操作未完成: " + str(error))
                     print("草稿仍保留；应用失败时查看日志和阶段记录。")
         except (EOFError, KeyboardInterrupt):
-            print("\n已退出，未保存草稿已丢弃。")
+            self.checkpoint()
+            print("\n已退出；未确认草稿已保留，下次启动自动恢复。")
+
+    def home_choice(self, actions, shortcuts):
+        for i, label in enumerate(actions, 1):
+            print(f"{i}. {label}")
+        print("0/q 退出 | 实例 ID 直接编辑 | + 新增 | c 保存 | u 发布 | r 刷新 | jobs 任务")
+        value = input("操作: ").strip()
+        if value in {"", "0", "q"}:
+            return None
+        if value.startswith("/"):
+            return value
+        if value.lower() in shortcuts:
+            return shortcuts[value.lower()]
+        if value.isdigit() and 1 <= int(value) <= len(actions):
+            return actions[int(value)-1]
+        if value in actions:
+            return value
+        if value == "?":
+            print("输入资源 ID 进入参数页；支持编号编辑、多项 key=value、default 恢复默认。c 确认保存，u 查看计划并发布；0 返回/安全退出。")
+            return "刷新资源"
+        raise ValueError("输入实例 ID、操作编号或 ? 查看帮助")
 
     def exit_menu(self):
         if not self.draft.changes():
@@ -461,7 +670,7 @@ class Menu:
             self.confirm_changes(update=True)
             return not self.draft.changes() and not c.publication_record().get("pending", [])
         if choice == "丢弃未确认草稿并退出":
-            self.draft = c.Draft()
+            self.discard_draft()
             print("已明确丢弃未确认草稿；已保存配置和运行服务保留。")
             return True
         print("已取消退出，草稿保留，继续编辑。")
@@ -469,4 +678,7 @@ class Menu:
 
 
 def run():
-    Menu().run()
+    try:
+        Menu().run()
+    except c.ERRORS as error:
+        print("控制台未完成操作：" + str(error) + "；草稿/配置文件保留，请检查后重试。")
