@@ -1,10 +1,12 @@
 # LLM Serving System
 
-日常统一管理入口：`python3 scripts/control.py`，默认进入中文交互菜单，显示现有配置并按序号修改。
+日常统一管理入口：`python3 scripts/control.py`，按六组组织总览、实例、流量、节点、发布和日志。支持稳定实例 ID、集中草稿及单实例更新。
 参数清单、修改、部署和验收用法见 [总控操作说明](docs/control.md)。
 
 面向昇腾的 Kubernetes 推理工程。实例生命周期由 Kubernetes 管理，负载均衡与动态发现复用官方 vLLM Router。
 当前 AWQ 池有四个模型副本，分别运行在 `.209`、`.210`、`.211`、`.216`；GPTQ 池有一个模型副本，运行在 `.216` 的另一张 NPU。
+五个模型现分别为 `awq-01`～`awq-04`、`gptq-01`，共用部署模板，拥有独立 Deployment 和实例参数。
+AWQ/GPTQ 的单节点 TP2、PP2 及 TP2/PP2 组合已实测普通/SSE 推理；当前生产配置保持 TP1/PP1 基线，跨节点并行后置。
 每个专家池使用一个官方二级 Router 维护本池入口计数；同池跨 Router 副本协调后置。
 一级概率 Router 已从 `MLsys_inference` 迁入 `heteroserve.routing`，Gateway 通过池 Service 接入二级路由。
 入口配置为 `deploy/gateway.json`，AWQ 与 GPTQ 两个池均已启用；禁用专家时明确返回 503，不自动改选。
@@ -15,7 +17,9 @@
 
 | 入口 | 用途 |
 |---|---|
-| `scripts/control.py` | 中文总控菜单：配置、部署、验收、日志及算力节点接入/退出（菜单 11） |
+| `scripts/control.py` | 配置草稿、集中保存、CLI、回退及稳定实例操作 |
+| `scripts/control_menu.py` | 六组中文操作界面和明确的专家/实例上下文 |
+| `scripts/manage_instances.py` | 独立工作负载、单实例发布、资源检查及实际卡号查询 |
 | `scripts/manage_nodes.py` | 复用现有管理器的节点容量检查、排空、保留容器退出与重新接入 |
 | `docs/control.md` | 总控参数、节点操作、保护条件及失败恢复说明 |
 | `deploy/lab/cluster.json` | 五机实验集群（四个推理节点及 `.217` 控制节点）的固定容器 ID、镜像、端口及网段 |

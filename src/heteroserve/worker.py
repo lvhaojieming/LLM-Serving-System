@@ -27,7 +27,9 @@ def identity(config):
     return {"pod_uid": os.environ.get("POD_UID", "local"), "node": os.environ.get("NODE_NAME", "local"),
             "physical_devices": devices, "device_type": config["device_type"], "pool": config["pool"],
             "model": config["model"], "weights_manifest_sha256": config["weights_manifest_sha256"],
-            "image": config["image"]}
+            "image": config["image"], "instance_id": config.get("instance_id", "legacy"),
+            "parallelism": config.get("parallelism", {"tp": 1, "pp": 1}),
+            "expected_devices": config.get("device_count", 1)}
 
 
 def create_app(config, transport=None, start_engine=True):
@@ -73,8 +75,8 @@ def create_app(config, transport=None, start_engine=True):
     @asynccontextmanager
     async def lifespan(app):
         if start_engine:
-            if len(state["identity"]["physical_devices"]) != 1:
-                raise RuntimeError("A model worker must receive exactly one NPU device node")
+            if len(state["identity"]["physical_devices"]) != config.get("device_count", 1):
+                raise RuntimeError("Actual NPU allocation does not match the configured parallel world size")
             state["engine"] = await asyncio.create_subprocess_exec(*config["engine_command"], start_new_session=True,
                 env={**os.environ, **config.get("engine_env", {})})
         async with httpx.AsyncClient(base_url=config["engine_url"], transport=transport,

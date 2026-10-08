@@ -3,10 +3,6 @@
   "pool": "gptq-ascend910b-vllm",
   "expert": "gptq",
   "asset_source_host": "10.107.206.216",
-  "replicas": 1,
-  "model_nodes": [
-    "heteroserve-lab-216"
-  ],
   "router_nodes": [
     "heteroserve-lab-209",
     "heteroserve-lab-210"
@@ -16,5 +12,16 @@
   "runtime": {
     "model_source": "/root/zhangjinhao/model/Qwen3-14B-GPTQ-Ascend-INT4",
     "served_model": "moqe-qwen3-gptq"
+  },
+  "instances": {
+    "gptq-01": {
+      "node": "heteroserve-lab-216",
+      "enabled": true,
+      "parallelism": {
+        "tp": 1,
+        "pp": 1
+      },
+      "engine": {}
+    }
   }
 }

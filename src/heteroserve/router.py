@@ -47,7 +47,13 @@ def discover(pods, slices, pool):
                 ipaddress.ip_address(address)
                 if address != pod.get("status", {}).get("podIP"):
                     continue
-                result[uid] = {"uid": uid, "name": pod["metadata"]["name"], "ip": address, "node": pod["spec"]["nodeName"]}
+                annotations = pod["metadata"].get("annotations", {})
+                capacity = int(annotations.get("heteroserve.io/max-inflight", "0"))
+                if capacity < 0:
+                    raise ValueError("Negative worker capacity")
+                result[uid] = {"uid": uid, "name": pod["metadata"]["name"], "ip": address, "node": pod["spec"]["nodeName"],
+                               "instance_id": pod["metadata"].get("labels", {}).get("heteroserve.io/instance", "legacy"),
+                               "capacity": capacity}
     return result
 
 
@@ -192,7 +198,8 @@ def create_app(config, api_transport=None, core_transport=None, start_core=True)
     async def proxy(path: str, request: Request):
         if not available():
             raise HTTPException(503, "discovery is absent or expired")
-        if state["active"] >= len(view.endpoints) * config["requests_per_worker"]:
+        capacity = sum(v.get("capacity") or config["requests_per_worker"] for v in view.endpoints.values())
+        if state["active"] >= capacity:
             state["rejected"] += 1
             raise HTTPException(429, "pool request capacity reached", headers={"Retry-After": "1"})
         state["active"] += 1

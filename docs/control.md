@@ -1,177 +1,152 @@
-# 总控操作说明
+# HeteroServe 总控操作说明
 
-`scripts/control.py` 是运维命令入口，复用原来的 JSON 和管理脚本。
-不增加常驻服务、不占 NPU，也不进入推理请求路径。
-本地可查看、修改、校验配置；连接集群的操作在 `.209` 正式项目目录执行：
-`/root/zhangjinhao/LLM-Serving-System`。总控本身只依赖标准库，已在管理节点的 Python 3.9.9 验证；模型容器继续使用原有 Python 环境。
-
-## 日常流程
-
-直接运行即可进入中文交互菜单，无需记忆参数名：
+在 `.209` 的正式项目目录执行：
 
 ```bash
+cd /root/zhangjinhao/LLM-Serving-System
 python3 scripts/control.py
 ```
 
-菜单每次读取现有正式配置，显示当前专家池、副本数、Gateway 节点和各层并发预算。
-选择 `1/2/3` 查看对应参数，按序号输入新值，可连续修改多个参数。
-`s` 预览并保存，`a` 预览保存后执行部署计划和真实验收，`0` 返回并丢弃未保存的编辑。
-保存前会校验整个候选配置；外部修改导致编辑内容过期时，需返回菜单重新读取。
-参数列表显示“原值 -> 待保存值”。这些是本地配置值，不代表集群已生效。
+总控复用现有模型环境、镜像、管理脚本和固定外层 Docker 容器。卡号由 Kubernetes 自动分配，界面展示实际结果，不提供物理卡号锁定。
 
-主菜单 `4` 可查看完整 JSON（包括模型、镜像、概率路由资产及节点配置）；
-只允许修改已支持的常用参数。`6` 查询集群状态，`7` 应用已有配置并验收，
-`8` 单独验收，`9` 查看日志，`10` 准备已有资产，`12` 选择专家池。
-保存配置与执行部署分别确认，退出菜单不会撤销已保存配置或已执行操作。
-部署失败停止后续验收，配置不会自动回滚，可查看日志修正后重试。
-菜单部署复用同样的 CLI，原命令行模式继续可用于脚本：
+## 六组功能
 
-```bash
-python3 scripts/control.py show
-python3 scripts/control.py set pool replicas=3
-python3 scripts/control.py set pool replicas=3 --write
-python3 scripts/control.py check
-git diff -- deploy
+| 主菜单 | 功能 |
+|---|---|
+| 1 系统总览 | 实际实例 ID、专家、节点、TP/PP、物理卡、Ready、重启和 Pod UID |
+| 2 专家与 vLLM 实例 | 选择专家、选择具体实例、部署/并行/引擎/退出配置、数量调整 |
+| 3 路由与流量 | Gateway 入口、池级发现与排队、实例请求预算与超时 |
+| 4 算力节点与设备 | 节点状态、逐卡占用、接入/退出/恢复节点 |
+| 5 变更发布与验收 | 草稿差异、集中保存、发布影响、指定实例/专家发布、资产准备、回退 |
+| 6 日志与监控 | 实例、模型池、Router、Gateway 日志及已有监控验收 |
+
+每页显示当前位置、专家和实例 ID，编号只作用于当前页。编辑页可以输入参数编号再输入新值，也可以直接输入 `tp=2`、`max_num_seqs=3` 等本页字段名。
+`0` 返回上一级并保留本次草稿；退出整个程序丢弃未保存草稿。保存配置与部署分开，显示配置值不代表运行值。
+
+## 编辑、保存与发布
+
+1. 菜单 2 选择专家，再选择具体实例 ID。
+2. 在“部署与并行”“推理引擎”“健康与退出”中修改参数；请求准入及超时统一放在菜单 3。
+3. 可跨实例、跨专家连续修改，草稿保留在内存。
+4. 菜单 5 查看差异并集中保存；`s` 也可保存全部草稿，`a` 保存后进入发布页。
+5. 查看发布影响，选择发布当前专家、仅发布选中实例、Gateway，或本次保存范围，再执行普通/SSE 验收。
+
+保存时校验候选配置、检查并发修改，并保留最近保存前的配置。多文件保存失败会恢复本次已写入文件。
+本次保存涉及多个专家时，可统一发布这些专家；指定单实例发布不会隐式应用其他已保存变更。
+
+## 稳定实例与配置层级
+
+每个逻辑 vLLM 实例有稳定 ID，例如 `awq-01`、`awq-02`、`gptq-01`；Pod 重建后 UID 和物理卡号可能改变，稳定 ID 不变。
+各实例使用独立 Deployment 和 ConfigMap，复用一套生成模板、镜像、适配器及模型文件。专家池 Service、Router 和 PDB 保持池级。
+
+配置层级为：共享部署/硬件默认值 → 专家默认推理值 → 实例覆盖值。
+`deploy/pools/ascend-awq.json` 和 `ascend-gptq.json` 的 `instances` 是实例数量的唯一来源；启用数量从清单计算，不维护另一份手写 replicas。
+减少数量会停用多余实例并保留配置；移除实例配置并应用后，清理对应工作负载及 ConfigMap，保留权重、节点卷和外层容器。
+
+```json
+"instances": {
+  "awq-01": {
+    "node": "heteroserve-lab-209",
+    "enabled": true,
+    "parallelism": {"tp": 1, "pp": 1},
+    "engine": {},
+    "traffic": {"max_inflight": 8},
+    "lifecycle": {"startup_seconds": 1200, "drain_seconds": 240, "termination_seconds": 300}
+  }
+}
 ```
 
-`set` 默认预览，加 `--write` 才保存。一次可以修改同一配置中的多个字段，全部校验通过才原子写入。
-修改不会自动部署。若在本地编辑，提交并同步到 `.209` 的同一个正式项目，再执行：
+实例设置按组整理：
+
+| 设置组 | 参数 |
+|---|---|
+| 部署与并行 | 节点、启用状态、TP、PP；请求卡数自动计算 |
+| 推理引擎 | 上下文长度、运行序列数、批处理 token 预算、每卡内存比例、eager 模式 |
+| 健康与退出 | 启动、排空、终止预算 |
+| 路由与流量 | 每实例 max_inflight、请求超时；池的默认预算、发现缓存、核心并发与排队超时 |
+
+同池启用实例的 `max_model_len` 必须一致，保证路由可互换；不同实例可以设置不同 TP/PP、max_num_seqs、内存比例和请求预算。
+上下文上限需要统一调整专家默认值或相关实例覆盖值；草稿可一次修改多个实例，保存时统一检查。
+
+## 单节点多卡 TP/PP
+
+本轮仅支持同一个节点内的多卡，使用已有 multiprocessing 后端；跨物理节点并行后置。
+实例申请 `TP × PP` 张独占 NPU，与服务实例数量分别显示。例如一个 TP2/PP2 实例申请四张卡。
+不能在 engine defaults 中再配置 tensor_parallel_size/pipeline_parallel_size，以免与实例并行配置重复。
+
+现有转换后 AWQ/GPTQ 权重无需重新量化。多卡进程使用项目内的 INT4 加载扩展，共用原有适配器，不改写外部共享适配目录。
+当前 PP 使用已有 V0 引擎，`max_num_batched_tokens` 必须不小于 `max_model_len`；例如上下文 4096 时将批处理预算设为 4096。
+未经当前权重、镜像、加载扩展和引擎配置组合验收的并行配置，会先用不匹配生产发现的临时模型 Pod 做普通/SSE 验收，通过后才发布正式实例。
+临时 Pod/ConfigMap 按 UID 和归属清理；失败记录保留，原有实例保持可用。
+
+发布前核对节点 Ready、硬件标签、调度状态、空闲卡、CPU/内存请求以及已发布的模型清单。
+实例滚动更新默认先启动一个新副本，Ready 后排空旧副本，因此需要预热/更新用的额外卡；卡不足时停止发布，先暂停或迁移实例释放资源。
+首次迁移旧共享 Deployment 时逐个启动和验收独立实例，再减少旧副本，最后清理确认废弃的旧 Deployment/ConfigMap。
+
+## 命令行
 
 ```bash
-python3 scripts/control.py apply pool --plan
-python3 scripts/control.py apply pool
-python3 scripts/control.py verify pool
-python3 scripts/control.py status all
-python3 scripts/control.py logs router --tail 100
-```
+# 查看稳定实例配置与实际卡分配
+python3 scripts/control.py --pool awq instance list
+python3 scripts/control.py --pool awq instance list --live
 
-`apply pool` 同时发布模型和二级 Router，保证请求预算配置都更新；更新不是跨组件原子事务，失败会停止，需查日志并修正后重试。
-`verify pool` 执行真实普通/SSE 模型验收及 Router 路由检查，会产生测试请求。
-`apply` 本身不代表模型验收通过。离线 `check` 不证明节点在线、权重存在或设备空闲。
+# 同时调整一个实例的并行、引擎和请求预算；--write 才保存
+python3 scripts/control.py --pool awq instance set awq-02 tp=2 pp=1 engine.max_num_seqs=3 traffic.max_inflight=4 --write
+python3 scripts/control.py --pool awq instance plan awq-02
+python3 scripts/control.py --pool awq instance apply awq-02
+python3 scripts/control.py --pool awq instance verify awq-02
 
-## 常用参数
+# PP 需要联动调整 V0 的 token 预算
+python3 scripts/control.py --pool gptq instance set gptq-01 pp=2 engine.max_num_batched_tokens=4096 --write
 
-```bash
-# 一级入口并发和默认输出长度
-python3 scripts/control.py set gateway max_inflight=24 default_max_tokens=256 --write
+# 数量、启停及移除
+python3 scripts/control.py --pool awq instance resize 5 --write
+python3 scripts/control.py --pool awq instance add awq-06 --node heteroserve-lab-211 --tp 2 --pp 1 --write
+python3 scripts/control.py --pool awq instance pause awq-06 --write
+python3 scripts/control.py --pool awq instance resume awq-06 --write
+python3 scripts/control.py --pool awq instance remove awq-06 --write
+# 清单增减后应用整个专家池；单实例修改可只应用该 ID
+python3 scripts/control.py --pool awq apply pool
+python3 scripts/control.py --pool awq verify pool
+
+# 回退最近保存的配置；不会自行回退进程，随后应用和验收
+python3 scripts/control.py rollback --write
+python3 scripts/control.py --pool awq instance apply awq-02
+python3 scripts/control.py --pool awq instance verify awq-02
+
+# 日志与流量
+python3 scripts/control.py --pool awq instance logs awq-02
+python3 scripts/control.py set gateway max_inflight=24 --write
 python3 scripts/control.py apply gateway
 python3 scripts/control.py verify gateway
-
-# 每实例准入预算与引擎并发是两层不同参数
-python3 scripts/control.py set pool requests_per_worker=8 --write
-python3 scripts/control.py set engine model_parameters.max_num_seqs=2 model_parameters.max_model_len=4096 --write
-python3 scripts/control.py apply pool
-python3 scripts/control.py verify pool
-
-# 当前四个推理节点（只能选择已加入且准备好模型资产的节点）
-python3 scripts/control.py set pool replicas=4 model_nodes=heteroserve-lab-209,heteroserve-lab-210,heteroserve-lab-211,heteroserve-lab-216 --write
-
-# Gateway 换节点：先将现有资产发布到目标节点，再更新部署
-python3 scripts/control.py set gateway deployment.node=heteroserve-lab-210 --write
-python3 scripts/control.py prepare gateway
-python3 scripts/control.py apply gateway
-python3 scripts/control.py verify gateway
-
-# 排空与退出时间要一起调整，给引擎退出保留至少 35 秒
-python3 scripts/control.py set pool drain_seconds=300 termination_seconds=360 --write
 ```
 
-完整可编辑字段和当前值由 `show gateway|pool|engine` 查看。
-`gateway` 对应全局 `deploy/gateway.json`；`pool` 对应当前选中的 `ascend-awq.json` 或 `ascend-gptq.json`。
-`engine` 显示由共享昇腾配置与当前专家池 `runtime` 合成的有效参数，修改保存到该池的 `runtime.model_parameters`，不改其他专家或共享硬件配置。
-两个池共用 `deploy/pools/defaults.json` 的模板默认值；独立参数写入各自池配置覆盖默认值。没有第二份总控配置。
-参数变更可能导致 Pod 更新并暂时降低容量，单 Gateway/Router 更新可能中断入口。
-现有外层 Docker 容器与镜像继续复用。
+原 `show/set/check/apply/status/prepare/verify/logs` CLI 保留。`set pool replicas=N` 对独立实例池等价于调整清单启用数量；节点属于具体实例，应使用 `instance set ID node=...`。
+`set engine ...` 修改当前专家默认值，实例覆盖值优先；所有权重身份、镜像、卡型仍由正式配置管理，镜像环境不做预检或自动传输。
 
-`status all` 查询节点、模型池和 Gateway；`logs pool|router|gateway` 获取有行数上限的日志。
-`prepare pool` 核验并复用当前专家的模型/适配器，缺少目录才从该池的源节点传输，再发布 Router 依赖；不会检查或传输镜像，不需要每次启动执行。
-`apply all --plan` 查看更新模型、Router、Gateway 的命令顺序。
-服务暂停期间不要执行 `apply`，因为它会恢复配置声明的副本数。
+## 实际卡号与资源
 
-当前每个专家池保留一个二级 Router、一实例一张 NPU、固定容器身份和取消 CPU/内存硬限制的约定。
-总控不自动停止旧模型容器、不修改镜像/模型身份，也不自动回滚。
-GPTQ 已完成现有昇腾资产的真实模型验收；更换权重仍须重新验收。
-配置回退使用 Git 恢复经过验证的配置，再显式 apply 和 verify，不能仅回退 Deployment 而保留新 ConfigMap。
+系统总览显示实际 Pod 的 `/identity`，核对 Pod UID、节点和稳定实例 ID；Gateway 也显示占用的实际卡。
+卡视图按节点反查物理卡 → 实例/服务，并结合驱动独占记录判断空闲。无法核实的占用显示为未知，不把利用率 0 当作空闲。
+显示采集时间，Pod 重建后重新采集；容器内 `npu:0` 不当作宿主机物理卡 0。
 
-此入口不自动提交或推送 Git，不自动准备所有资产，也不自动执行故障注入实验。
-验收记录继续写入现有 `artifacts/kubernetes/`，不复制结果目录。
+## 节点、发现与监控
 
-## 分别管理 AWQ 和 GPTQ
-
-当前 AWQ 四个单卡副本，分别位于 `.209/.210/.211/.216`；GPTQ 一个单卡副本位于 `.216`，独占另一张卡。
-两个池各有一个官方 vLLM Router，分别维护本池准入与计数。一级 Router 按原 checkpoint 的概率和阈值选择专家池。
-默认进入 AWQ；菜单 **12 → GPTQ** 后，菜单 **2** 修改 GPTQ 副本、候选节点、请求预算，菜单 **3** 修改 GPTQ 推理参数。
-Gateway 的并发、部署节点及专家启用状态是全局配置，不随专家池切换复制。
+物理节点入群/退出仍是全局操作，外层容器、卷、模型和原暂停服务保留。
+启用实例绑定的节点先迁移/停用相关实例并应用，再退出节点；不自动修改其他专家或停止未知工作负载。
 
 ```bash
-python3 scripts/control.py --pool gptq show
-python3 scripts/control.py --pool gptq set pool replicas=2 --write
-python3 scripts/control.py --pool gptq set engine model_parameters.max_num_seqs=3 --write
-python3 scripts/control.py --pool gptq apply pool
-python3 scripts/control.py --pool gptq verify pool
-python3 scripts/control.py --pool gptq logs router --tail 100
-# 切换部署节点时，先改候选节点并准备该专家的权重，再应用
-python3 scripts/control.py --pool gptq prepare pool
-python3 scripts/control.py set gateway pools.gptq.enabled=true --write
-python3 scripts/control.py apply gateway
-python3 scripts/control.py verify gateway
-```
-
-`apply/status/verify ... all` 表示当前专家池及全局组件，不隐式操作所有专家池。
-GPTQ 验收与发布结果放在 `artifacts/kubernetes/pools/gptq/`，AWQ 原结果路径保留。
-生成的两个 YAML 共用 `manage_pool.py`，由各池配置渲染，不直接手改 YAML。
-物理节点入群/退出仍是全局流程；选择 AWQ 执行菜单 11，先迁移节点上的其他专家，否则会因未纳管工作负载而阻止退出。
-GPTQ 初版只有 `.216` 的本地权重及单副本，节点故障不能保证自动在其他机器恢复，需先发布权重并增加兼容候选节点/副本。
-
-## 接入和退出算力节点
-
-在 `.209` 运行总控，选择 **11**，再选择接入、退出或恢复中断的退出操作，输入完整 IP。
-菜单先读取真实状态并显示计划，确认后执行。命令行等价入口：
-
-```bash
-# 只预检和显示计划，不修改集群
 python3 scripts/control.py node remove 10.107.206.216
-# 保持目标模型副本数，迁移完成后退出；保留容器、卷、镜像和权重
 python3 scripts/control.py node remove 10.107.206.216 --execute
-# 明确重新接入刚才退出的节点，复用相同容器 ID
 python3 scripts/control.py node add 10.107.206.216 --execute
-# 退出中途失败后，先检查计划，再明确恢复
-python3 scripts/control.py node recover 10.107.206.216
 python3 scripts/control.py node recover 10.107.206.216 --execute
 ```
 
-`add/remove` 不隐式修改模型副本数量。新候选节点数量不能超过副本数；需要时先通过菜单 2 调整副本数。
-节点接入后仍由调度器放置副本，软拓扑分布不等于严格一机一副本。验收要求新节点上实际运行一个正式模型实例并被 Router 请求覆盖，否则操作不能报告成功。
+新接入节点提供可用设备，实例由清单显式配置，不再为了入群隐式增加模型数量。
+新节点或实例迁移目标缺少权重时，使用当前专家 `prepare pool` 发布资产；K8s 不会复制宿主机目录中的权重。
+每池一个官方 vLLM Router；实例独立请求预算通过 Pod 注解进入发现，池准入上限按 Ready 实例预算之和计算。
+就绪、退出和 Pod UID 过滤仍保留；不重写官方负载均衡算法，不启用跨 Router 计数协调或 HPA。
+监控复用已有 Prometheus/Grafana，通过菜单 6 查询和验收，不再部署第二套。
 
-接入仅适配现有 Ascend 910B4、8 张独占卡的实验节点。检查授权地址、外层容器身份和驱动独占记录；
-已有占卡服务不会被自动停止。新节点首次接入确实需要一个长期复用的 K3s 节点容器；重新接入复用原容器。
-接入流程直接使用目标节点已准备好的镜像环境，不预检镜像名称或缓存，也不自动拉取、导入、传输镜像。
-首次创建节点容器使用本地既有镜像，禁止自动拉取；镜像缺失或运行环境不兼容时，由实际容器/Pod 启动及推理验收报告错误。
-镜像启动引用仍由现有部署配置提供。已有模型和适配器先核对 SHA-256，缺少的目录才复制；文件不一致时停止，不覆盖。
-权重发布、设备插件、双 Pod 设备隔离复用已有脚本。临时单卡模型 Pod 使用 `expert-candidate` 标签，
-不匹配正式 Service 或 Router，完成模型、普通/SSE 推理以及 Router 到目标 Pod 的网络检查后清理。
-最后更新正式节点候选配置、应用 Deployment，验证整个专家池和 Gateway。
-
-退出先检查剩余节点的就绪、标签、污点、NPU、CPU、内存及 Pod 数量预算，
-同时读取物理设备独占记录，不能仅凭 allocatable 判断有空闲卡。
-承载 Gateway、Router 候选配置或其他未纳管工作负载的节点被拒绝，必须先完成对应服务迁移。
-仅支持退出工作节点，控制平面不能通过此入口退出。
-随后 cordon、drain，遵守 PDB、preStop 和退出预算，不使用 `--force` 或 `--disable-eviction`。
-`--delete-emptydir-data` 仅在已核验该节点只含项目专家 Pod 和允许的 DaemonSet 后使用，清除的是这些 Pod 的临时缓存。
-服务迁移通过普通/SSE 及全副本路由验收后，记录退休状态，停止固定节点容器、删除 Kubernetes Node 记录。
-不运行卸载脚本，不删除 Docker 容器、卷、宿主机模型和数据目录。
-
-`cluster.json` 的 `nodes` 和 `locked_container_ids` 同时保留活跃与已退出节点的身份档案；
-`retired_node_hosts` 标记已退出的工作节点，常规 `up` 和集群验证忽略它们。
-已授权的 `.208` 存入 `authorized_additional_hosts`，不改变旧容器的创建指纹。
-部署候选节点和可用设备仍使用现有 pool、npu 配置，没有第二套业务配置。
-编辑 pool 的节点亲和性会触发模型滚动更新，可能需要多轮加载模型。
-
-节点流程和总控配置写入使用同一个进程锁；不要绕过总控并行运行底层部署命令或直接改配置。
-失败保留 `artifacts/kubernetes/nodes/<末段IP>/<操作>.json` 的阶段、错误和验收记录。
-排空失败不会继续停止节点，保持 cordon 供检查；`recover` 只处理有对应中断退出记录的同一容器。
-已经成功退出的节点用 `add` 明确重新接入；普通 `up` 不会擅自恢复暂停状态。
-接入失败的节点可能已注册但仍处于禁止生产模型调度状态，应检查最后阶段、修复原因后重试 `add`；不得把注册成功当作推理验收成功。
-
-行为依据：[Kubernetes drain](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/)、
-[K3s 节点身份与重新注册](https://docs.k3s.io/architecture#node-password-secrets)。
+总控配置写入与发布共用进程锁，不要绕过总控并行修改文件或运行底层部署命令。
+运行和验收记录集中在 `artifacts/kubernetes/`，并行能力缓存放在 `state/capabilities/`；总控不自动推送 Git。

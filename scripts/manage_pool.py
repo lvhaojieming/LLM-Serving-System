@@ -18,12 +18,16 @@ POOL_CONFIG = ROOT / "deploy/pools/ascend-awq.json"
 def load_pool(path):
     path = Path(path)
     raw = json.loads(path.read_text(encoding="utf-8"))
-    if "defaults" not in raw:
-        return raw
-    base = (path.parent / raw["defaults"]).resolve()
-    if base.parent != path.parent.resolve() or base.name != "defaults.json":
-        raise ValueError("Pool defaults must be the shared defaults.json")
-    return {**json.loads(base.read_text(encoding="utf-8")), **raw}
+    result = raw
+    if "defaults" in raw:
+        base = (path.parent / raw["defaults"]).resolve()
+        if base.parent != path.parent.resolve() or base.name != "defaults.json":
+            raise ValueError("Pool defaults must be the shared defaults.json")
+        result = {**json.loads(base.read_text(encoding="utf-8")), **raw}
+    if "instances" in result:
+        result["replicas"] = sum(v.get("enabled", True) for v in result["instances"].values())
+        result["model_nodes"] = sorted({v["node"] for v in result["instances"].values() if v.get("enabled", True)})
+    return result
 
 
 def resolve_runtime(pool, root=ROOT):
@@ -35,6 +39,8 @@ def resolve_runtime(pool, root=ROOT):
     if set(overrides) - {"model_source", "served_model", "model_parameters"}:
         raise ValueError("Pool runtime overrides are limited to model and engine parameters")
     params = overrides.pop("model_parameters", {})
+    if set(params) & {"tensor_parallel_size", "pipeline_parallel_size", "distributed_executor_backend"}:
+        raise ValueError("Parallelism belongs to the instance parallelism fields, not engine defaults")
     npu.update(overrides)
     npu["model_parameters"].update(params)
     asset = Path(pool.get("model_asset", "model"))
@@ -63,28 +69,36 @@ def configuration():
         raise ValueError("Model nodes must belong to the fixed lab")
     if pool["termination_seconds"] <= pool["drain_seconds"]:
         raise ValueError("Termination budget must cover draining and engine shutdown")
-    if type(pool["replicas"]) is not int or pool["replicas"] < 1:
+    if type(pool["replicas"]) is not int or pool["replicas"] < (0 if "instances" in pool else 1):
         raise ValueError("The initial pool requires a positive manual replica count")
     return cluster, pool, npu
 
 
 def worker_config(pool, npu):
+    parallel = pool.get("parallelism", {"tp": 1, "pp": 1})
     command = ["python3", "-m", "vllm.entrypoints.openai.api_server", "--model", npu["model_source"].replace("/root/", "/workspace/"),
-               "--served-model-name", npu["served_model"], "--host", "127.0.0.1", "--port", "8001", "--tensor-parallel-size", "1", "--seed", "0"]
+               "--served-model-name", npu["served_model"], "--host", "127.0.0.1", "--port", "8001", "--tensor-parallel-size", str(parallel["tp"]), "--seed", "0"]
+    if parallel["pp"] > 1:
+        command += ["--pipeline-parallel-size", str(parallel["pp"])]
+    if parallel["tp"] * parallel["pp"] > 1:
+        command += ["--distributed-executor-backend", "mp"]
     for key, value in npu["model_parameters"].items():
+        if key in {"tensor_parallel_size", "pipeline_parallel_size", "distributed_executor_backend"}:
+            raise ValueError("Configure parallelism through the instance TP/PP fields")
         flag = "--" + key.replace("_", "-")
         if isinstance(value, bool):
             if value:
                 command.append(flag)
         else:
             command += [flag, str(value)]
-    return {"pool": pool["pool"], "model": npu["served_model"], "device_type": pool["device_type"],
+    return {"pool": pool["pool"], "instance_id": pool.get("instance_id", "legacy"), "parallelism": parallel,
+            "device_count": parallel["tp"] * parallel["pp"], "model": npu["served_model"], "device_type": pool["device_type"],
             "weights_manifest_sha256": pool["weights_manifest_sha256"], "image": npu["model_image"],
             "port": 8000, "engine_url": "http://127.0.0.1:8001", "engine_command": command,
-            "engine_env": {"MOQE_ASCEND_INT4_ADAPTER": "1"},
+            "engine_env": {"MOQE_ASCEND_INT4_ADAPTER": "1", "MOQE_ASCEND_INT4_PARALLEL": "1" if parallel["tp"] > 1 else "0"},
             "health_interval_seconds": 3, "health_timeout_seconds": 10, "readiness_failures": 3,
             "liveness_failures": 10, "admission_timeout_seconds": 120,
-            "request_timeout_seconds": 180, "drain_seconds": pool["drain_seconds"], "engine_stop_seconds": 30,
+            "request_timeout_seconds": pool.get("request_timeout_seconds", 180), "drain_seconds": pool["drain_seconds"], "engine_stop_seconds": 30,
             "max_inflight": pool["requests_per_worker"]}
 
 
@@ -95,12 +109,20 @@ def pool_objects(cluster, pool, npu):
               "heteroserve.io/hardware": pool["hardware"], "heteroserve.io/backend": pool["backend"],
               "heteroserve.io/model-version": pool["weights_manifest_sha256"][:16]}
     data = {"worker.py": (ROOT / "src/heteroserve/worker.py").read_text(), "worker.json": json.dumps(worker_config(pool, npu), indent=2)}
+    if pool.get("parallelism", {}).get("tp", 1) * pool.get("parallelism", {}).get("pp", 1) > 1:
+        data.update({"sitecustomize.py": (ROOT / "src/heteroserve/engine_sitecustomize.py").read_text(),
+                     "native_parallel.py": (ROOT / "src/heteroserve/native_parallel.py").read_text()})
     config_hash = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
     env = {"HOME": "/scratch/home", "XDG_CACHE_HOME": "/scratch/cache", "VLLM_CACHE_ROOT": "/scratch/vllm",
            "VLLM_USE_V1": "1", "VLLM_NO_USAGE_STATS": "1", "VLLM_VERSION": "0.8.4", "OMP_NUM_THREADS": "4",
            "TE_PARALLEL_COMPILER": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
            "MOQE_ASCEND_INT4_ADAPTER": "0",
            "PYTHONPATH": "/workspace/zhangjinhao/moqe-runtime/adapter:/workspace/zhangjinhao/moqe-runtime/python-deps:/workspace/vllm:/workspace/vllm-ascend"}
+    if pool.get("parallelism", {}).get("tp", 1) * pool.get("parallelism", {}).get("pp", 1) > 1:
+        env["PYTHONPATH"] = "/opt/heteroserve:" + env["PYTHONPATH"]
+    if pool.get("parallelism", {}).get("pp", 1) > 1:
+        env["VLLM_USE_V1"] = "0"
+    devices = str(pool.get("parallelism", {"tp": 1, "pp": 1})["tp"] * pool.get("parallelism", {"tp": 1, "pp": 1})["pp"])
     container = {"name": "expert", "image": npu["model_image"], "imagePullPolicy": "Never",
                  "command": ["/bin/bash", "-ec"],
                  "args": ["mkdir -p /scratch/home /scratch/cache /scratch/vllm; source /usr/local/Ascend/ascend-toolkit/set_env.sh; source /usr/local/Ascend/nnal/atb/set_env.sh; exec python3 /opt/heteroserve/worker.py --config /opt/heteroserve/worker.json"],
@@ -108,7 +130,7 @@ def pool_objects(cluster, pool, npu):
                      {"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}},
                      {"name": "NODE_NAME", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}}],
                  "ports": [{"name": "http", "containerPort": 8000}],
-                 "resources": {"requests": {"cpu": pool["worker_request_cpu"], "memory": pool["worker_request_memory"], npu["resource"]: "1"}, "limits": {npu["resource"]: "1"}},
+                 "resources": {"requests": {"cpu": pool["worker_request_cpu"], "memory": pool["worker_request_memory"], npu["resource"]: devices}, "limits": {npu["resource"]: devices}},
                  "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}},
                  "startupProbe": {"httpGet": {"path": "/ready", "port": "http"}, "periodSeconds": 5, "timeoutSeconds": 3,
                                   "failureThreshold": pool["startup_seconds"] // 5},
@@ -148,7 +170,11 @@ def pool_objects(cluster, pool, npu):
 def render():
     import yaml
     cluster, pool, npu = configuration()
-    objects = pool_objects(cluster, pool, npu) + router_objects(cluster, pool, npu)
+    if "instances" in pool:
+        from manage_instances import objects as instance_objects
+        objects = instance_objects(cluster, pool) + router_objects(cluster, pool, npu)
+    else:
+        objects = pool_objects(cluster, pool, npu) + router_objects(cluster, pool, npu)
     path = ROOT / "deploy/k8s/pools" / (POOL_CONFIG.stem + ".yaml")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump_all(objects, sort_keys=False, allow_unicode=True), encoding="utf-8")
@@ -182,7 +208,8 @@ def router_objects(cluster, pool, npu):
                   "--service-discovery", "--selector", "app.kubernetes.io/name=expert", "heteroserve.io/pool=" + pool["pool"],
                   "--service-discovery-namespace", namespace, "--service-discovery-port", "8000", "--policy", "power_of_two",
                   "--health-check-interval-secs", "2", "--health-check-timeout-secs", "5", "--disable-retries",
-                  "--max-concurrent-requests", "64", "--queue-timeout-secs", "2"]}
+                  "--max-concurrent-requests", str(pool.get("router_max_concurrent_requests", 64)),
+                  "--queue-timeout-secs", str(pool.get("queue_timeout_seconds", 2))]}
     data = {"router.py": (ROOT / "src/heteroserve/router.py").read_text(), "router.json": json.dumps(config, indent=2)}
     container = {"name": "router", "image": npu["model_image"], "imagePullPolicy": "Never", "command": ["python3", "/opt/heteroserve/router.py", "--config", "/opt/heteroserve/router.json"],
                  "env": [{"name": "PYTHONPATH", "value": "/router-deps"}, {"name": "HOME", "value": "/tmp"}, {"name": "MOQE_ASCEND_INT4_ADAPTER", "value": "0"}],
@@ -292,6 +319,10 @@ def apply():
     # Driver and node-local weights need exact, read-only hostPath mounts. This
     # namespace exception does not grant workloads privileged containers or host PID/network.
     kubectl(cluster, ["label", "namespace", pool["namespace"], "pod-security.kubernetes.io/enforce=privileged", "--overwrite"])
+    if "instances" in pool:
+        from manage_instances import apply as apply_instances
+        print(json.dumps(apply_instances(cluster, pool), indent=2), flush=True)
+        return
     payload = json.dumps({"apiVersion": "v1", "kind": "List", "items": pool_objects(cluster, pool, npu)})
     kubectl(cluster, ["apply", "--dry-run=server", "-f", "-"], stdin=payload)
     print(kubectl(cluster, ["apply", "-f", "-"], stdin=payload).stdout)
@@ -305,6 +336,10 @@ def status():
 
 def verify():
     cluster, pool, npu = configuration()
+    if "instances" in pool:
+        from manage_instances import verify as verify_instances
+        print(json.dumps(verify_instances(cluster, pool), indent=2), flush=True)
+        return
     # Scaling while changing node affinity can briefly leave the old revision
     # at the desired Ready count. Wait for the declared revision before probing.
     kubectl(cluster, ["rollout", "status", "deployment/" + pool["pool"], "-n", pool["namespace"],
@@ -357,8 +392,12 @@ print(json.dumps({'passed':True,'identity':identity,'ordinary_answer':answer,'st
     for pod in pods:
         raw = kubectl(cluster, ["exec", "-n", pool["namespace"], pod["metadata"]["name"], "--", "python3", "-c", checker, npu["served_model"]]).stdout
         report = json.loads(raw)
-        if report["identity"]["pod_uid"] != pod["metadata"]["uid"] or report["identity"]["node"] != pod["spec"]["nodeName"] or len(report["identity"]["physical_devices"]) != 1:
+        expected = int(pod["spec"]["containers"][0]["resources"]["limits"][npu["resource"]])
+        if report["identity"]["pod_uid"] != pod["metadata"]["uid"] or report["identity"]["node"] != pod["spec"]["nodeName"] or len(report["identity"]["physical_devices"]) != expected:
             raise RuntimeError("Actual device/Pod identity does not match Kubernetes")
+        ident = pod["metadata"].get("labels", {}).get("heteroserve.io/instance")
+        if ident and report["identity"].get("instance_id") != ident:
+            raise RuntimeError("Worker reports a different stable instance identity")
         reports.append(report)
     result = {"passed": True, "pool": pool["pool"], "replicas": reports, "scope": "direct_worker_model_acceptance"}
     return result

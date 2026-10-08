@@ -50,10 +50,12 @@ def test_routing_acceptance_requires_traffic_to_all_replicas(monkeypatch, seen, 
 
 
 def test_model_acceptance_does_not_probe_old_ready_revision(monkeypatch):
+    import manage_instances
     def incomplete_rollout(cluster, command, **kwargs):
         assert command[:2] == ["rollout", "status"]
         raise RuntimeError("rollout incomplete")
     monkeypatch.setattr(pool, "kubectl", incomplete_rollout)
+    monkeypatch.setattr(manage_instances, "kubectl", incomplete_rollout)
     with pytest.raises(RuntimeError, match="rollout incomplete"):
         pool.verify()
 

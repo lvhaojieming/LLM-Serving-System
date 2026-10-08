@@ -5,10 +5,10 @@ import difflib
 import json
 import math
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import datetime
 from contextlib import nullcontext
 
 from manage_lab import ROOT, kubectl, load_config, names, active_nodes, operation_lock
@@ -26,6 +26,9 @@ FIELDS = {
     "pool": {"replicas": "模型副本数，每副本一张卡", "model_nodes": "模型候选节点",
              "router_nodes": "二级 Router 候选节点（迁移前 prepare）",
              "requests_per_worker": "每实例请求预算，同时更新模型和 Router",
+             "router_max_concurrent_requests": "官方 Router 并发上限",
+             "queue_timeout_seconds": "官方 Router 排队超时秒数",
+             "request_timeout_seconds": "实例请求超时默认秒数",
              "startup_seconds": "模型启动预算秒数", "drain_seconds": "排空预算秒数",
              "termination_seconds": "Pod 退出预算秒数",
              "discovery_cache_seconds": "发现缓存有效秒数"},
@@ -82,12 +85,15 @@ def validate(configs, cluster):
                 if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value < 1:
                     raise ValueError(field + " must be between 0 and 1")
             elif type(value) is not int or value < 1:
+                if section == "pool" and field == "replicas" and "instances" in pool and value == 0:
+                    continue
                 raise ValueError(field + " must be a positive integer")
     nodes = {names(cluster, node)[0]: node["host"] for node in active_nodes(cluster)}
     device_nodes = {name for name, host in nodes.items() if host in engine["device_hosts"]}
     for field, allowed in (("model_nodes", device_nodes), ("router_nodes", set(nodes))):
         selected = pool[field]
-        if (not isinstance(selected, list) or not selected or
+        empty_allowed = field == "model_nodes" and "instances" in pool and pool["replicas"] == 0
+        if (not isinstance(selected, list) or (not selected and not empty_allowed) or
                 any(not isinstance(n, str) or n not in allowed for n in selected) or
                 len(set(selected)) != len(selected)):
             raise ValueError(field + " must contain unique eligible node names")
@@ -104,6 +110,9 @@ def validate(configs, cluster):
         raise ValueError("Existing no-hard-limit policy must remain disabled")
     if pool.get("runtime_config", FILES["engine"]) != FILES["engine"]:
         raise ValueError("Controller currently manages the default Ascend runtime only")
+    if "instances" in pool:
+        from manage_instances import validate_instances
+        validate_instances(pool, cluster)
 
 
 def parse_value(old, raw):
@@ -134,6 +143,15 @@ def edit_locked(root, section, assignments, write=False, expected=None):
             raise ValueError("Unknown/edit-protected parameter: " + key)
         old = lookup(candidate[section], key)
         value = parse_value(old, supplied)
+        if section == "pool" and "instances" in configs["pool"] and key in {"replicas", "model_nodes"}:
+            if key == "model_nodes":
+                raise ValueError("Nodes belong to individual instances; use instance set ID node=...")
+            from manage_instances import resize_specs
+            raw["instances"] = resize_specs(configs["pool"], value)
+            candidate["pool"]["instances"] = raw["instances"]
+            candidate["pool"]["replicas"] = value
+            candidate["pool"]["model_nodes"] = sorted({v["node"] for v in raw["instances"].values() if v.get("enabled", True)})
+            continue
         parent = candidate[section]
         parts = key.split(".")
         for part in parts[:-1]:
@@ -185,23 +203,245 @@ def commands(action, target):
     return [entry for name, entries in choices.items() if target in (name, "all") for entry in entries]
 
 
-LABELS = {"gateway": "一级路由 / Gateway", "pool": "专家池 / 二级 Router", "engine": "模型推理引擎"}
 ERRORS = (ValueError, KeyError, RuntimeError, OSError, subprocess.CalledProcessError)
 
+INSTANCE_GROUPS = {
+    "部署与并行": {"node": "运行节点", "enabled": "启用实例", "parallelism.tp": "TP 张量并行", "parallelism.pp": "PP 流水线并行"},
+    "推理引擎": {"engine." + k.split(".", 1)[1]: v for k, v in FIELDS["engine"].items()},
+    "健康与退出": {"lifecycle." + k: FIELDS["pool"][k] for k in ("startup_seconds", "drain_seconds", "termination_seconds")},
+    "实例流量": {"traffic.max_inflight": "实例请求准入预算", "traffic.request_timeout_seconds": "实例请求超时秒数"},
+}
 
-def choose_target(action):
-    targets = ["pool", "gateway", "all"]
-    if action == "logs":
-        targets = ["pool", "router", "gateway"]
-    elif action == "status":
-        targets = ["pool", "gateway", "cluster", "all"]
-    print("  ".join(f"{i}. {name}" for i, name in enumerate(targets, 1)))
-    answer = input("选择对象（回车返回）: ").strip()
-    if not answer:
-        return None
-    if not answer.isdigit() or not 1 <= int(answer) <= len(targets):
-        raise ValueError("请输入列表中的序号")
-    return targets[int(answer) - 1]
+
+def atomic_text(path, text):
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".control-", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
+            output.write(text)
+            output.flush()
+            os.fsync(output.fileno())
+        if path.exists():
+            os.chmod(temporary, path.stat().st_mode)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+class Draft:
+    """One in-memory change set across experts, instances and global traffic."""
+    def __init__(self, root=None):
+        self.root = ROOT if root is None else root
+        self.files = {}
+
+    def file(self, relative):
+        if relative not in self.files:
+            text = (self.root / relative).read_text(encoding="utf-8")
+            self.files[relative] = {"before": text, "after": json.loads(text)}
+        return self.files[relative]["after"]
+
+    def pool(self, relative=None):
+        relative = relative or FILES["pool"]
+        raw = self.file(relative)
+        base = json.loads((self.root / "deploy/pools/defaults.json").read_text()) if "defaults" in raw else {}
+        result = {**base, **copy.deepcopy(raw)}
+        if "instances" in result:
+            result["replicas"] = sum(v.get("enabled", True) for v in result["instances"].values())
+            result["model_nodes"] = sorted({v["node"] for v in result["instances"].values() if v.get("enabled", True)})
+        return result
+
+    def instances(self):
+        from manage_instances import normalized_instances
+        pool = self.pool()
+        raw = self.file(FILES["pool"])
+        if "instances" not in raw:
+            raw["instances"] = normalized_instances(pool)
+            raw.pop("replicas", None)
+            raw.pop("model_nodes", None)
+        return raw["instances"]
+
+    def value(self, section, key, ident=None):
+        if ident:
+            from manage_instances import effective
+            p, n = effective(self.pool(), ident, self.root)
+            spec = self.instances()[ident]
+            if key.startswith("engine."):
+                return n["model_parameters"][key.split(".", 1)[1]]
+            if key.startswith("lifecycle."):
+                return p[key.split(".", 1)[1]]
+            if key.startswith("traffic."):
+                return p["requests_per_worker"] if key == "traffic.max_inflight" else p["request_timeout_seconds"]
+            return lookup(spec, key)
+        if section == "gateway":
+            return lookup(self.file(FILES["gateway"]), key)
+        if section == "engine":
+            return lookup(resolve_runtime(self.pool(), self.root), key)
+        return lookup(self.pool(), key)
+
+    def set(self, section, key, supplied, ident=None):
+        if ident:
+            allowed = {k for group in INSTANCE_GROUPS.values() for k in group}
+            if key not in allowed:
+                raise ValueError("Unsupported instance parameter: " + key)
+            target = self.instances()[ident]
+        else:
+            if key not in FIELDS[section]:
+                raise ValueError("Unsupported parameter: " + key)
+            target = self.file(FILES["pool"] if section == "engine" else FILES[section])
+            if section == "engine":
+                target = target.setdefault("runtime", {})
+        old = self.value(section, key, ident)
+        value = parse_value(old, supplied)
+        parts = key.split(".")
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+        target[parts[-1]] = value
+
+    def resize(self, count):
+        from manage_instances import resize_specs
+        raw = self.file(FILES["pool"])
+        raw["instances"] = resize_specs(self.pool(), count)
+        raw.pop("replicas", None)
+        raw.pop("model_nodes", None)
+
+    def changes(self):
+        return {name: v for name, v in self.files.items() if json.loads(v["before"]) != v["after"]}
+
+    def preview(self):
+        changes = self.changes()
+        if not changes:
+            print("没有未保存的修改。")
+        for name, data in changes.items():
+            after = json.dumps(data["after"], ensure_ascii=False, indent=2) + "\n"
+            print("".join(difflib.unified_diff(data["before"].splitlines(True), after.splitlines(True), fromfile=name, tofile=name)), end="")
+        return changes
+
+    def save(self):
+        changes = self.changes()
+        if not changes:
+            self.files.clear()
+            print("没有需保存的修改；保留最近一次回退记录。")
+            return []
+        cluster = load_config(self.root / "deploy/lab/cluster.json")
+        gateway = copy.deepcopy(self.file(FILES["gateway"]))
+        for relative in available_pools(self.root).values():
+            pool = self.pool(relative)
+            validate({"gateway": gateway, "pool": pool, "engine": resolve_runtime(pool, self.root)}, cluster)
+        with operation_lock(self.root):
+            for name, data in changes.items():
+                if (self.root / name).read_text(encoding="utf-8") != data["before"]:
+                    raise RuntimeError("配置已被其他操作修改，重新载入草稿: " + name)
+            journal = self.root / "artifacts/kubernetes/control/last-save.json"
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            record = {"at": datetime.datetime.now(datetime.timezone.utc).isoformat(), "status": "writing",
+                      "before": {n: v["before"] for n, v in changes.items()}}
+            atomic_text(journal, json.dumps(record, indent=2))
+            written = []
+            try:
+                for name, data in changes.items():
+                    atomic_text(self.root / name, json.dumps(data["after"], ensure_ascii=False, indent=2) + "\n")
+                    written.append(name)
+            except BaseException:
+                for name in written:
+                    atomic_text(self.root / name, changes[name]["before"])
+                raise
+            record["status"] = "saved"
+            atomic_text(journal, json.dumps(record, indent=2))
+        self.files.clear()
+        print("已保存配置；尚未部署。请在变更发布中查看计划并应用。")
+        return list(changes)
+
+
+def edit_instance(root, ident, assignments, write=False):
+    draft = Draft(root)
+    specs = draft.instances()
+    if ident not in specs:
+        raise ValueError("Unknown instance ID: " + ident)
+    for assignment in assignments:
+        key, separator, supplied = assignment.partition("=")
+        if not separator:
+            raise ValueError("Use key=value")
+        aliases = {"tp": "parallelism.tp", "pp": "parallelism.pp", "max_inflight": "traffic.max_inflight"}
+        if key in ENGINE_FIELDS_FOR_INSTANCE:
+            key = "engine." + key
+        key = aliases.get(key, key)
+        draft.set("pool", key, supplied, ident)
+    draft.preview()
+    if write:
+        draft.save()
+    return draft
+
+
+ENGINE_FIELDS_FOR_INSTANCE = {k.split(".", 1)[1] for k in FIELDS["engine"]}
+
+
+def rollback_configuration(execute=False):
+    path = ROOT / "artifacts/kubernetes/control/last-save.json"
+    record = json.loads(path.read_text())
+    allowed = {FILES["gateway"], *available_pools().values()}
+    draft = Draft()
+    for relative, text in record["before"].items():
+        if relative not in allowed:
+            raise RuntimeError("Rollback record contains an unsupported target")
+        previous = json.loads(text)
+        current = draft.file(relative)
+        if relative != FILES["gateway"] and "instances" in current and "instances" not in previous:
+            from manage_instances import normalized_instances
+            defaults = json.loads((ROOT / "deploy/pools/defaults.json").read_text())
+            previous["instances"] = normalized_instances({**defaults, **previous})
+            previous.pop("replicas", None)
+            previous.pop("model_nodes", None)
+        draft.files[relative]["after"] = previous
+    draft.preview()
+    if execute or input("输入 y 回退以上配置（随后仍需应用和验收）: ").strip().lower() == "y":
+        draft.save()
+
+
+def instance_command(args):
+    from manage_instances import normalized_instances, validate_instances, inventory, plan, apply, verify, INSTANCE_LABEL
+    cluster = load_config(ROOT / "deploy/lab/cluster.json")
+    pool = read_configs()["pool"]
+    ident = args.ident
+    if args.operation in {"set", "resize", "remove", "pause", "resume", "logs"} and not ident:
+        raise ValueError("This operation requires an instance ID (resize requires a target count)")
+    if args.operation == "list":
+        print(json.dumps(inventory(cluster, pool) if args.live else normalized_instances(pool), indent=2, ensure_ascii=False))
+        return
+    if args.operation == "set":
+        edit_instance(ROOT, ident, args.assignments, args.write)
+        return
+    if args.operation in {"initialize", "add", "resize", "remove", "pause", "resume"}:
+        draft = Draft()
+        specs = draft.instances()
+        if args.operation == "resize":
+            draft.resize(int(ident))
+        elif args.operation == "add":
+            if not ident or ident in specs or not args.node:
+                raise ValueError("add requires a new ID and --node")
+            specs[ident] = {"node": args.node, "enabled": True, "parallelism": {"tp": args.tp, "pp": args.pp}, "engine": {}}
+        elif args.operation == "remove":
+            del specs[ident]
+        elif args.operation in {"pause", "resume"}:
+            specs[ident]["enabled"] = args.operation == "resume"
+        draft.preview()
+        if args.write:
+            draft.save()
+        return
+    if "instances" not in pool:
+        raise ValueError("Initialize stable instances before individual workload operations")
+    if ident and ident not in pool["instances"]:
+        raise ValueError("Unknown instance ID")
+    if args.operation == "plan":
+        print(json.dumps(plan(cluster, pool, ident), indent=2, ensure_ascii=False))
+    elif args.operation == "logs":
+        if not ident:
+            raise ValueError("Select an instance ID")
+        print(kubectl(cluster, ["logs", "-n", pool["namespace"], "-l", INSTANCE_LABEL + "=" + ident + ",heteroserve.io/pool=" + pool["pool"], "--all-containers=true", "--prefix=true", "--tail=100"]).stdout)
+    elif args.operation == "apply":
+        with operation_lock(ROOT):
+            print(json.dumps(apply(cluster, pool, ident), indent=2))
+    elif args.operation == "verify":
+        print(json.dumps(verify(cluster, pool, ident), indent=2))
 
 
 def run_interactive(action, target):
@@ -216,107 +456,10 @@ def run_interactive(action, target):
         main(["verify", target])
 
 
-def edit_interactive(section):
-    original = read_configs(ROOT)
-    fields = list(FIELDS[section])
-    pending = {}
-    target = "gateway" if section == "gateway" else "pool"
-    source = FILES["pool"] + " runtime" if section == "engine" else FILES[section]
-    print(f"\n{LABELS[section]} | 配置文件: {source}")
-    print("修改暂存在内存中；可先调整多个相关参数，再统一保存。")
-    print(f"生效操作: apply {target}；可能更新对应 Pod。换节点前需确认权重和运行依赖已准备。")
-    while True:
-        for index, key in enumerate(fields, 1):
-            current = lookup(original[section], key)
-            proposed = ""
-            if key in pending:
-                proposed = " -> " + json.dumps(parse_value(current, pending[key]), ensure_ascii=False)
-            print(f"{index:2}. {FIELDS[section][key]} ({key}) = "
-                  f"{json.dumps(current, ensure_ascii=False)}{proposed}")
-        print("s. 预览并保存配置  a. 预览、保存并应用验收  0. 返回（丢弃未保存修改）")
-        answer = input("选择参数或操作: ").strip().lower()
-        if answer == "0":
-            return
-        try:
-            if answer in {"s", "a"}:
-                if not pending:
-                    print("没有待保存的修改；应用已有配置请使用主菜单。")
-                    continue
-                assignments = [key + "=" + raw for key, raw in pending.items()]
-                edit(ROOT, section, assignments, expected=original)
-                if input("输入 y 保存以上修改，其他输入继续编辑: ").strip().lower() != "y":
-                    continue
-                edit(ROOT, section, assignments, write=True, expected=original)
-                original = read_configs(ROOT)
-                pending.clear()
-                if answer == "a":
-                    run_interactive("apply", target)
-                continue
-            if not answer.isdigit() or not 1 <= int(answer) <= len(fields):
-                raise ValueError("请选择参数序号、s、a 或 0")
-            key = fields[int(answer) - 1]
-            old = lookup(original[section], key)
-            if key in {"deployment.node", "model_nodes", "router_nodes"}:
-                cluster = load_config(ROOT / "deploy/lab/cluster.json")
-                eligible = [names(cluster, n)[0] for n in active_nodes(cluster)
-                            if key == "router_nodes" or n["host"] in original["engine"]["device_hosts"]]
-                print("已配置候选节点: " + ", ".join(eligible))
-            print("列表用英文逗号分隔；布尔值填 true/false；回车保留。")
-            raw = input("新值: ").strip()
-            if raw:
-                parse_value(old, raw)
-                pending[key] = raw
-        except ERRORS as error:
-            print("未完成操作: " + str(error))
-            print("修改已保存时仍保留在配置文件中；应用或验收失败不表示回滚。")
-
-
 def interactive():
-    print("HeteroServe 推理系统总控")
-    print("显示的是本地配置；集群实际状态请选 6。集群操作在 .209 正式项目中执行。")
-    try:
-        while True:
-            cfg = read_configs(ROOT)
-            p, g, e = (cfg[k] for k in ("pool", "gateway", "engine"))
-            print(f"\n当前配置: 专家池={p['pool']} | 模型副本={p['replicas']} | 二级 Router={p['router_replicas']}")
-            print(f"Gateway={g['deployment']['node']} | 入口并发={g['max_inflight']} | "
-                  f"实例预算={p['requests_per_worker']} | 引擎并发={e['model_parameters']['max_num_seqs']}")
-            print("1. 查看/修改一级路由和 Gateway\n2. 查看/修改专家池和二级 Router\n"
-                  "3. 查看/修改模型推理参数\n4. 查看全部原始配置（含固定参数、模型和节点）\n"
-                  "5. 离线校验配置\n6. 查询集群实际状态\n7. 应用已有配置并验收\n"
-                  "8. 执行推理验收\n9. 查看日志\n10. 准备已有资产\n11. 接入/退出算力节点\n12. 选择专家池\n0. 退出")
-            answer = input("请选择: ").strip()
-            if answer == "0":
-                return
-            try:
-                if answer in {"1", "2", "3"}:
-                    edit_interactive({"1": "gateway", "2": "pool", "3": "engine"}[answer])
-                elif answer == "4":
-                    print(json.dumps({**cfg, "cluster": load_config(ROOT / "deploy/lab/cluster.json")},
-                                     ensure_ascii=False, indent=2))
-                elif answer == "5":
-                    main(["check"])
-                elif answer == "11":
-                    node_menu()
-                elif answer == "12":
-                    choices = list(available_pools())
-                    print("  ".join(f"{i}. {name}" for i, name in enumerate(choices, 1)))
-                    chosen = input("专家池序号（回车返回）: ").strip()
-                    if chosen:
-                        if not chosen.isdigit() or not 1 <= int(chosen) <= len(choices):
-                            raise ValueError("请选择有效专家池序号")
-                        select_pool(choices[int(chosen) - 1])
-                elif answer in {"6", "7", "8", "9", "10"}:
-                    action = {"6": "status", "7": "apply", "8": "verify", "9": "logs", "10": "prepare"}[answer]
-                    target = choose_target(action)
-                    if target:
-                        run_interactive(action, target)
-                else:
-                    print("请输入菜单序号。")
-            except ERRORS as error:
-                print("操作失败: " + str(error))
-    except (EOFError, KeyboardInterrupt):
-        print("\n已退出；尚未保存的编辑已丢弃，已保存或已执行的操作不会自动撤销。")
+    import control_menu
+    control_menu.c = sys.modules[__name__]
+    control_menu.run()
 
 
 def node_menu():
@@ -346,6 +489,17 @@ def main(argv=None):
     setter.add_argument("assignments", nargs="+", metavar="KEY=VALUE")
     setter.add_argument("--write", action="store_true")
     sub.add_parser("check", help="Offline configuration validation (not live acceptance)")
+    instance = sub.add_parser("instance", help="Manage a stable vLLM instance")
+    instance.add_argument("operation", choices=["list", "initialize", "add", "resize", "remove", "pause", "resume", "set", "plan", "apply", "verify", "logs"])
+    instance.add_argument("ident", nargs="?")
+    instance.add_argument("assignments", nargs="*")
+    instance.add_argument("--write", action="store_true")
+    instance.add_argument("--live", action="store_true")
+    instance.add_argument("--node")
+    instance.add_argument("--tp", type=int, default=1)
+    instance.add_argument("--pp", type=int, default=1)
+    rollback = sub.add_parser("rollback", help="Preview or restore the previous configuration")
+    rollback.add_argument("--write", action="store_true")
     node = sub.add_parser("node", help="Plan or execute reversible worker membership")
     node.add_argument("operation", choices=["add", "remove", "recover"])
     node.add_argument("host", help="Authorized physical host IP")
@@ -360,6 +514,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.pool:
         select_pool(args.pool)
+    if args.action == "instance":
+        instance_command(args)
+        return
+    if args.action == "rollback":
+        rollback_configuration(args.write)
+        return
     if args.action == "node":
         if read_configs()["pool"]["expert"] != "awq":
             raise ValueError("Physical node membership is global; select awq and migrate other pools before retirement")
@@ -400,6 +560,9 @@ def main(argv=None):
         return
     with operation_lock(ROOT) if args.action in {"apply", "prepare"} and not args.plan else nullcontext():
         for script, action in commands(args.action, args.target):
+            if script == "verify_lifecycle.py" and action == "routing" and configs["pool"]["replicas"] == 0:
+                print("当前专家池已暂停，没有模型候选；跳过普通路由请求验收。")
+                continue
             command = [sys.executable, str(ROOT / "scripts" / script), action]
             if script in {"manage_pool.py", "verify_lifecycle.py"}:
                 command += ["--config", str(ROOT / FILES["pool"])]

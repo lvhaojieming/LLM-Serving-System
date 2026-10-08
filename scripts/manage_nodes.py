@@ -193,6 +193,13 @@ def plan(action, host):
             raise ValueError("Node already retired; use add to rejoin explicitly")
         if name == gateway["deployment"]["node"] or name in pool["router_nodes"]:
             raise RuntimeError("Migrate Gateway/Router configuration before retiring this worker")
+        from manage_pool import load_pool
+        for path in (ROOT / "deploy/pools").glob("ascend-*.json"):
+            other = load_pool(path)
+            bound = [ident for ident, spec in other.get("instances", {}).items()
+                     if spec.get("enabled", True) and spec["node"] == name]
+            if bound:
+                raise RuntimeError("Move/pause and apply these bound instances before retiring node: " + ",".join(bound))
         pods = get(cluster, "pods", "-A")["items"]
         result["worker_uids"] = removable_workloads(cluster, pool, name, pods)
         nodes = get(cluster, "nodes")["items"]
@@ -207,7 +214,7 @@ def plan(action, host):
             if not ready(actual) or actual.get("spec", {}).get("unschedulable"):
                 raise RuntimeError("Existing worker is not Ready/schedulable; use node recover for interrupted removal")
         if not result["already_active"]:
-            if len(set(pool["model_nodes"]) | {name}) > pool["replicas"]:
+            if "instances" not in pool and len(set(pool["model_nodes"]) | {name}) > pool["replicas"]:
                 raise RuntimeError("Increase pool replicas first to exercise every selected inference node")
             free = physical_free(host)
             result["physical_free_cards"] = free
@@ -314,9 +321,21 @@ def validate_candidate(cluster, pool, npu, name):
             data = json.loads(kubectl(cluster, ["create", "-f", "-", "-o", "json"], stdin=json.dumps(obj)).stdout)
             created.append((obj["kind"], obj["metadata"]["name"], data["metadata"]["uid"]))
         podname = objects[1]["metadata"]["name"]
-        kubectl(cluster, ["wait", "pod/" + podname, "-n", pool["namespace"], "--for=condition=Ready",
-                          "--timeout=" + str(pool["startup_seconds"]) + "s"], timeout=pool["startup_seconds"] + 60)
-        pod = get(cluster, "pod", podname, "-n", pool["namespace"])
+        deadline = time.monotonic() + pool["startup_seconds"]
+        while True:
+            pod = get(cluster, "pod", podname, "-n", pool["namespace"])
+            if ready(pod):
+                break
+            failed = pod["status"].get("phase") == "Failed" or any(
+                v.get("state", {}).get("terminated") for v in pod["status"].get("containerStatuses", []))
+            if failed or time.monotonic() > deadline:
+                logs = kubectl(cluster, ["logs", podname, "-n", pool["namespace"], "--tail=250"]).stdout
+                from manage_pool import artifact_path
+                path = artifact_path(pool, "candidate.log")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(logs, encoding="utf-8")
+                raise RuntimeError("Candidate model failed; inspect " + str(path))
+            time.sleep(3)
         if pod["spec"]["nodeName"] != name:
             raise RuntimeError("Candidate scheduled on wrong node")
         from verify_lifecycle import discovery, inside_router
@@ -457,13 +476,15 @@ def add(cluster, node, report, checkpoint):
     checkpoint("isolated_model_verified")
     kubectl(cluster, ["label", "node", name, "heteroserve.io/npu-ready=true", "heteroserve.io/hardware=" + pool["hardware"],
                       "heteroserve.io/backend=" + pool["backend"], "--overwrite"])
-    if name not in pool["model_nodes"]:
+    if "instances" not in pool and name not in pool["model_nodes"]:
         pool["model_nodes"].append(name)
     write(POOL, pool)
     run("manage_pool.py", "apply")
     report["acceptance"] = verify_service()
-    if not any(r["identity"]["node"] == name for r in report["acceptance"]["pool"]["replicas"]):
+    if "instances" not in pool and not any(r["identity"]["node"] == name for r in report["acceptance"]["pool"]["replicas"]):
         raise RuntimeError("New node has no production worker; inspect scheduling/spread before claiming admission")
+    if "instances" in pool:
+        report["node_available_for_explicit_instance_placement"] = True
     report["container_id"] = inspect_container(cluster, node)["Id"]
 
 

@@ -2,16 +2,47 @@
   "defaults": "defaults.json",
   "pool": "awq-ascend910b-vllm",
   "expert": "awq",
-  "replicas": 4,
-  "model_nodes": [
-    "heteroserve-lab-209",
-    "heteroserve-lab-210",
-    "heteroserve-lab-211",
-    "heteroserve-lab-216"
-  ],
   "weights_manifest_sha256": "70a289a9eb8ed35d8a62aa466738c2cd5906df68df844c7731c98840230654f9",
   "router_nodes": [
     "heteroserve-lab-209",
     "heteroserve-lab-210"
-  ]
+  ],
+  "instances": {
+    "awq-01": {
+      "node": "heteroserve-lab-209",
+      "enabled": true,
+      "parallelism": {
+        "tp": 1,
+        "pp": 1
+      },
+      "engine": {}
+    },
+    "awq-02": {
+      "node": "heteroserve-lab-210",
+      "enabled": true,
+      "parallelism": {
+        "tp": 1,
+        "pp": 1
+      },
+      "engine": {}
+    },
+    "awq-03": {
+      "node": "heteroserve-lab-211",
+      "enabled": true,
+      "parallelism": {
+        "tp": 1,
+        "pp": 1
+      },
+      "engine": {}
+    },
+    "awq-04": {
+      "node": "heteroserve-lab-216",
+      "enabled": true,
+      "parallelism": {
+        "tp": 1,
+        "pp": 1
+      },
+      "engine": {}
+    }
+  }
 }

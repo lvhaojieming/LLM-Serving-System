@@ -76,7 +76,7 @@ def menu_inputs(monkeypatch, project, answers):
 
 
 def test_default_menu_save_only_never_deploys(monkeypatch, project):
-    menu_inputs(monkeypatch, project, ["2", "1", "3", "s", "y", "0", "0"])
+    menu_inputs(monkeypatch, project, ["2", "5", "3", "0", "5", "2", "y", "0", "0"])
     monkeypatch.setattr(control.subprocess, "run", lambda *a, **kw: pytest.fail("Unexpected deployment"))
     control.main([])
     assert control.read_configs(project)["pool"]["replicas"] == 3
@@ -84,13 +84,13 @@ def test_default_menu_save_only_never_deploys(monkeypatch, project):
 
 def test_menu_abandon_edit_keeps_config(monkeypatch, project):
     before = control.read_configs(project)
-    menu_inputs(monkeypatch, project, ["2", "1", "3", "0", "0"])
+    menu_inputs(monkeypatch, project, ["2", "5", "3", "0", "0"])
     control.main([])
     assert control.read_configs(project) == before
 
 
 def test_menu_invalid_value_can_be_corrected(monkeypatch, project):
-    menu_inputs(monkeypatch, project, ["2", "1", "-2", "s", "1", "3", "s", "y", "0", "0"])
+    menu_inputs(monkeypatch, project, ["2", "5", "-2", "2", "5", "3", "0", "5", "2", "y", "0", "0"])
     control.main([])
     assert control.read_configs(project)["pool"]["replicas"] == 3
 
@@ -151,3 +151,58 @@ def test_pool_logs_do_not_include_other_expert(monkeypatch):
     monkeypatch.setattr(control, "kubectl", lambda c, args: (commands.append(args) or SimpleNamespace(stdout="logs")))
     control.main(["logs", "router"])
     assert "app.kubernetes.io/name=router,heteroserve.io/pool=gptq-ascend910b-vllm" in commands[0]
+
+
+def test_draft_instance_parameters_are_kept_across_pages_without_deployment(monkeypatch, project):
+    before = {p: (project / p).read_bytes() for p in control.FILES.values()}
+    draft = control.Draft(project)
+    ident = next(iter(draft.instances()))
+    draft.set("pool", "engine.max_num_seqs", "3", ident)
+    draft.set("pool", "traffic.max_inflight", "5", ident)
+    assert draft.value("pool", "engine.max_num_seqs", ident) == 3
+    assert draft.value("pool", "traffic.max_inflight", ident) == 5
+    assert before == {p: (project / p).read_bytes() for p in control.FILES.values()}
+    draft.save()
+    pool = control.read_configs(project)["pool"]
+    assert pool["instances"][ident]["engine"]["max_num_seqs"] == 3
+    assert pool["instances"][ident]["traffic"]["max_inflight"] == 5
+
+
+def test_failed_multi_file_save_restores_every_written_file(monkeypatch, project):
+    draft = control.Draft(project)
+    draft.set("gateway", "max_inflight", "24")
+    ident = next(iter(draft.instances()))
+    draft.set("pool", "engine.max_num_seqs", "3", ident)
+    before = {p: (project / p).read_bytes() for p in control.FILES.values()}
+    original = control.atomic_text
+    failures = []
+    def fail_second_config(path, text):
+        if path == project / control.FILES["pool"] and not failures:
+            failures.append(True)
+            raise OSError("disk write failed")
+        return original(path, text)
+    monkeypatch.setattr(control, "atomic_text", fail_second_config)
+    with pytest.raises(OSError, match="disk write"):
+        draft.save()
+    assert before == {p: (project / p).read_bytes() for p in control.FILES.values()}
+
+
+def test_noop_save_keeps_rollback_record(project):
+    draft = control.Draft(project)
+    draft.set("gateway", "max_inflight", "24")
+    draft.save()
+    record = project / "artifacts/kubernetes/control/last-save.json"
+    before = record.read_bytes()
+    assert control.Draft(project).save() == []
+    assert record.read_bytes() == before
+
+
+def test_paused_pool_verification_does_not_wait_for_ready_router(monkeypatch, project):
+    monkeypatch.setattr(control, "ROOT", project)
+    draft = control.Draft(project)
+    draft.resize(0)
+    draft.save()
+    commands = []
+    monkeypatch.setattr(control.subprocess, "run", lambda cmd, **kw: commands.append(cmd))
+    control.main(["verify", "pool"])
+    assert len(commands) == 1 and commands[0][1].endswith("manage_pool.py")

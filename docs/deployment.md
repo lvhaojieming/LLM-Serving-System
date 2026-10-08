@@ -16,7 +16,7 @@ privileged 容器不能作为对宿主机管理员的安全隔离边界；设备
 用户已指定 `.208` 至 `.217`，共十台候选节点；2026-10-08 已完成只读盘点。
 当前 `.217` 为控制节点，`.209`、`.210`、`.211`、`.216` 为推理节点，每台运行一个 AWQ 副本；`.216` 另有一个单卡 GPTQ 副本。
 五只节点容器长期复用并锁定 ID；外层 CPU、内存、swap、进程上限和项目 CPU/内存 limits 已按用户要求取消。
-原 4 CPU、8 GiB 只保留为创建预算记录。应用保留合理的调度 requests 和一实例一张 NPU 的 requests/limits。
+原 4 CPU、8 GiB 只保留为创建预算记录。应用保留合理的调度 requests 和按 TP×PP 张独占 NPU 的 requests/limits；当前实例均为单卡基线。
 模型缓存临时卷有 20 GiB 上限；监控数据保留 7 天、TSDB 数据规模上限 5 GB。
 
 ## 版本与已知边界
@@ -348,13 +348,33 @@ python3 scripts/manage_monitoring.py verify
 真实 checkpoint 的自动概率路由、显式 AWQ/GPTQ 请求及两者 SSE 均通过。
 Gateway `/ready` 的 `ready_experts` 显示健康池，只有两个池都健康才报告 `auto_expert_coverage_complete=true`；部分池故障时仍可服务健康池，不自动替换所选专家。
 
-总控支持 `--pool awq|gptq` 及菜单 12，部署、日志、验收和推理参数均绑定当前专家池。
+该阶段总控增加了 `--pool awq|gptq` 和原菜单 12；现已重写为六组操作，按稳定实例 ID 选择配置，见下一节。
 共享默认值在 `deploy/pools/defaults.json`；各池的独立参数保存为自己的覆盖值，推理参数写入该池 `runtime.model_parameters`，不会修改另一池或共享硬件配置。
 模型和 Router 的生成 YAML 同时加入池 Kustomization。详细使用方法见 [总控说明](control.md)。
 
 初版 GPTQ 为单节点、单副本，本轮普通/SSE 和路由验收不是全量质量评估或吞吐/SLO 压测。
 要在其他节点运行 GPTQ，先设置其候选节点并执行该池 `prepare pool` 发布权重；K8s 不会自动复制本地模型目录。
 完整记录保存为 `artifacts/kubernetes/gptq-acceptance.json`，GPTQ 分池结果在 `artifacts/kubernetes/pools/gptq/`。
+
+## 独立实例与单节点 TP/PP 总控验收（2026-10-08）
+
+总控按六组整理，配置编辑使用跨页面草稿、集中保存及单独发布。实例 ID、资源部署、引擎、流量和生命周期配置明确分组。
+从 AWQ/GPTQ 共享 Deployment 逐个迁移到 `awq-01`～`awq-04` 和 `gptq-01`；新实例先真实准入，再减少旧副本，旧 Deployment/ConfigMap 在迁移完成后按归属清理。
+专家 Service、模型权重、适配器、固定外层容器及一个池内官方 Router 的约定保留。
+
+既有外置 INT4 加载器原来主动限制 TP1。本轮通过仅注入新模型进程的项目扩展，使用 vLLM 原有参数分片加载器处理 signed INT4 权重与浮点 offset，模型不重新量化，外置共享适配目录不改写。
+AWQ 和 GPTQ 均实际验证 TP2/PP1、TP1/PP2、TP2/PP2；每个组合的设备数量、普通/SSE 模型输出与 Router 到候选 Pod 网络检查通过。
+PP 使用现有 V0 引擎，需要 `max_num_batched_tokens >= max_model_len`；默认 2048/4096 组合启动失败的原因已定位，改成 4096/4096 后通过，并加入保存校验。
+
+AWQ 的 `awq-02` 进一步完成真实独立 TP2 发布、max_num_seqs=3 和实例准入预算=3 的配置更新。
+实际卡号显示两张卡，其他 AWQ Pod UID 保持不变；池预算从 32 变为 27，验证发现消费了实例独立预算。
+随后通过配置回退和单实例应用恢复 TP1/PP1、默认引擎及预算。当前五个模型服务、两个池内 Router、Gateway 保持运行。
+分组菜单跨页面修改 GPTQ 引擎与流量预算、集中保存也已实测，保存期间服务 Pod UID 不变，测试参数恢复。
+本地复用已有开发环境，124 项测试通过；实际卡视图、未变更实例的 no-op 发布计划及最终双专家/Gateway/监控复验通过。
+
+临时并行验证 Pod/ConfigMap 按 UID 清理，模型、节点卷、有效结果和原暂停容器保留。
+并行与菜单记录集中在 `artifacts/kubernetes/`，最终摘要为 `control-instance-acceptance.json`，使用方法见 [总控说明](control.md)。
+本轮限定单节点多卡，没有跨物理节点 TP/PP 或持续吞吐/SLO 压测；普通/SSE 验收也不代表全量模型质量评估。
 
 ## 参考资料
 
