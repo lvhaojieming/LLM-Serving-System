@@ -68,7 +68,7 @@ def test_gptq_has_distinct_weights_and_identity_with_shared_template(monkeypatch
     weights = next(v for v in spec["volumes"] if v["name"] == "weights")
     assert weights["hostPath"]["path"].endswith("/models/gptq")
     assert npu["served_model"] == "moqe-qwen3-gptq"
-    assert settings["expert"] == "gptq" and settings["replicas"] == 1
+    assert settings["expert"] == "gptq" and settings["replicas"] >= 1
     assert spec["containers"][0]["resources"]["limits"] == {npu["resource"]: "1"}
     assert pool.artifact_path(settings, "pool-verification.json") != ROOT / "artifacts/kubernetes/pool-verification.json"
 

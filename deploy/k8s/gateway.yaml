@@ -33,35 +33,43 @@ data:
     \ state = {\"inflight\": 0, \"draining\": False, \"router_calls\": 0, \"rejected\"\
     : 0}\n    runtime = router_runtime\n    routing_slot = asyncio.Semaphore(1)\n\n\
     \    @asynccontextmanager\n    async def lifespan(app):\n        nonlocal runtime\n\
-    \        if runtime is None:\n            from .routing.ascend import AscendRouterRuntime\n\
-    \            runtime = await asyncio.to_thread(AscendRouterRuntime, settings)\n\
-    \        async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(config.get(\"\
+    \        if runtime is None:\n            if config.get(\"router_service\"):\n\
+    \                from .routing.client import RemoteRouterClient\n            \
+    \    runtime = RemoteRouterClient(settings, config[\"router_service\"], httpx.AsyncClient(timeout=30,\
+    \ trust_env=False))\n            else:\n                from .routing.ascend import\
+    \ AscendRouterRuntime\n                runtime = await asyncio.to_thread(AscendRouterRuntime,\
+    \ settings)\n        async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(config.get(\"\
     timeout_seconds\", 180)), trust_env=False) as client:\n            app.state.client\
     \ = client\n            app.state.runtime = runtime\n            yield\n     \
-    \       state[\"draining\"] = True\n\n    app = FastAPI(lifespan=lifespan)\n \
-    \   app.state.gateway = state\n\n    @app.get(\"/live\")\n    async def live():\n\
+    \       state[\"draining\"] = True\n            if getattr(runtime, \"remote\"\
+    , False):\n                await runtime.client.aclose()\n\n    app = FastAPI(lifespan=lifespan)\n\
+    \    app.state.gateway = state\n\n    @app.get(\"/live\")\n    async def live():\n\
     \        return {\"live\": True}\n\n    @app.get(\"/ready\")\n    async def ready():\n\
     \        if runtime is None or state[\"draining\"]:\n            raise HTTPException(503,\
-    \ \"learned gateway is unavailable\")\n        for pool in config[\"pools\"].values():\n\
-    \            if not pool.get(\"enabled\", True):\n                continue\n \
-    \           try:\n                response = await app.state.client.get(pool[\"\
-    base_url\"].removesuffix(\"/v1\") + \"/ready\", timeout=3)\n                if\
-    \ response.status_code == 200:\n                    return {\"ready\": True, \"\
-    auto_expert_coverage_complete\": all(p.get(\"enabled\", True) for p in config[\"\
-    pools\"].values())}\n            except httpx.HTTPError:\n                pass\n\
-    \        raise HTTPException(503, \"no ready downstream expert pool\")\n\n   \
-    \ @app.get(\"/v1/models\")\n    async def models():\n        ids = [\"auto\"]\
-    \ + [key for key, pool in config[\"pools\"].items() if pool.get(\"enabled\", True)]\n\
-    \        return {\"object\": \"list\", \"data\": [{\"id\": key, \"object\": \"\
-    model\", \"owned_by\": \"heteroserve\"} for key in ids]}\n\n    @app.get(\"/metrics\"\
-    )\n    async def metrics():\n        from fastapi.responses import Response\n\
-    \        return Response(\"\\n\".join([f\"heteroserve_gateway_inflight {state['inflight']}\"\
-    ,\n            f\"heteroserve_gateway_router_calls_total {state['router_calls']}\"\
-    ,\n            f\"heteroserve_gateway_rejected_total {state['rejected']}\", \"\
-    \"]), media_type=\"text/plain\")\n\n    @app.post(\"/drain\")\n    async def drain(request:\
-    \ Request):\n        if request.client is None or request.client.host not in {\"\
-    127.0.0.1\", \"::1\"}:\n            raise HTTPException(403, \"drain is local-only\"\
-    )\n        state[\"draining\"] = True\n        deadline = time.monotonic() + config.get(\"\
+    \ \"learned gateway is unavailable\")\n        healthy = []\n        for name,\
+    \ pool in config[\"pools\"].items():\n            if not pool.get(\"enabled\"\
+    , True):\n                continue\n            try:\n                response\
+    \ = await app.state.client.get(pool[\"base_url\"].removesuffix(\"/v1\") + \"/ready\"\
+    , timeout=3)\n                if response.status_code == 200:\n              \
+    \      healthy.append(name)\n            except httpx.HTTPError:\n           \
+    \     pass\n        if healthy:\n            l1_ready = await runtime.ready()\
+    \ if getattr(runtime, \"remote\", False) else True\n            return {\"ready\"\
+    : True, \"ready_experts\": healthy,\n                    \"l1_router_ready\":\
+    \ l1_ready,\n                    \"auto_expert_coverage_complete\": l1_ready and\
+    \ len(healthy) == len(config[\"pools\"])}\n        raise HTTPException(503, \"\
+    no ready downstream expert pool\")\n\n    @app.get(\"/v1/models\")\n    async\
+    \ def models():\n        ids = [\"auto\"] + [key for key, pool in config[\"pools\"\
+    ].items() if pool.get(\"enabled\", True)]\n        return {\"object\": \"list\"\
+    , \"data\": [{\"id\": key, \"object\": \"model\", \"owned_by\": \"heteroserve\"\
+    } for key in ids]}\n\n    @app.get(\"/metrics\")\n    async def metrics():\n \
+    \       from fastapi.responses import Response\n        return Response(\"\\n\"\
+    .join([f\"heteroserve_gateway_inflight {state['inflight']}\",\n            f\"\
+    heteroserve_gateway_router_calls_total {state['router_calls']}\",\n          \
+    \  f\"heteroserve_gateway_rejected_total {state['rejected']}\", \"\"]), media_type=\"\
+    text/plain\")\n\n    @app.post(\"/drain\")\n    async def drain(request: Request):\n\
+    \        if request.client is None or request.client.host not in {\"127.0.0.1\"\
+    , \"::1\"}:\n            raise HTTPException(403, \"drain is local-only\")\n \
+    \       state[\"draining\"] = True\n        deadline = time.monotonic() + config.get(\"\
     drain_seconds\", 240)\n        while state[\"inflight\"] and time.monotonic()\
     \ < deadline:\n            await asyncio.sleep(.05)\n        return {\"draining\"\
     : True, \"remaining_requests\": state[\"inflight\"]}\n\n    @app.post(\"/v1/chat/completions\"\
@@ -71,45 +79,49 @@ data:
     ] += 1\n            raise HTTPException(429, \"gateway request budget reached\"\
     , headers={\"Retry-After\": \"1\"})\n        state[\"inflight\"] += 1\n      \
     \  trace = uuid.uuid4().hex\n        upstream = None\n        streaming = False\n\
-    \        decision = None\n        selected = None\n        async def cleanup():\n\
-    \            try:\n                if upstream is not None:\n                \
-    \    await upstream.aclose()\n            finally:\n                state[\"inflight\"\
-    ] -= 1\n                log.info(json.dumps({\"event\": \"gateway_request_finished\"\
-    , \"request_id\": trace, \"selected_expert\": selected,\n                    \"\
-    decision\": asdict(decision) if decision else None}))\n        try:\n        \
-    \    body = bytearray()\n            async for chunk in request.stream():\n  \
-    \              body.extend(chunk)\n                if len(body) > config.get(\"\
-    max_request_bytes\", 2 * 1024 * 1024):\n                    raise HTTPException(413,\
-    \ \"request body exceeds budget\")\n            try:\n                payload\
-    \ = json.loads(body)\n            except ValueError:\n                raise HTTPException(400,\
-    \ \"request must be valid JSON\")\n            if not isinstance(payload, dict):\n\
-    \                raise HTTPException(400, \"request must be a JSON object\")\n\
-    \            requested = payload.get(\"model\")\n            if not isinstance(requested,\
-    \ str) or requested not in {\"auto\", *config[\"pools\"]}:\n                raise\
-    \ HTTPException(400, \"model must name auto or a configured expert\")\n      \
-    \      if not isinstance(payload.get(\"stream\", False), bool):\n            \
-    \    raise HTTPException(400, \"stream must be boolean\")\n            messages\
-    \ = payload.get(\"messages\")\n            if not isinstance(messages, list) or\
-    \ not messages:\n                raise HTTPException(400, \"messages must be a\
-    \ nonempty list\")\n            selected = requested\n            if requested\
-    \ == \"auto\":\n                if any(not isinstance(m, dict) or m.get(\"role\"\
-    ) not in {\"system\", \"user\", \"assistant\"} or not isinstance(m.get(\"content\"\
-    ), str) for m in messages):\n                    raise HTTPException(400, \"automatic\
-    \ routing requires plain text messages\")\n                if any(k in payload\
-    \ for k in (\"tools\", \"tool_choice\", \"chat_template\", \"documents\", \"add_generation_prompt\"\
-    , \"continue_final_message\", \"truncate_prompt_tokens\", \"add_special_tokens\"\
-    , \"chat_template_content_format\")):\n                    raise HTTPException(400,\
-    \ \"automatic routing uses the canonical chat template\")\n                generation\
-    \ = payload.get(\"max_tokens\", config.get(\"default_max_tokens\", 128))\n   \
-    \             if \"max_completion_tokens\" in payload or type(generation) is not\
-    \ int or generation <= 0:\n                    raise HTTPException(400, \"use\
-    \ a positive integer max_tokens\")\n                kwargs = payload.get(\"chat_template_kwargs\"\
-    , {\"enable_thinking\": False})\n                if not isinstance(kwargs, dict)\
-    \ or set(kwargs) - {\"enable_thinking\"} or type(kwargs.get(\"enable_thinking\"\
-    , False)) is not bool:\n                    raise HTTPException(400, \"only boolean\
-    \ enable_thinking is supported\")\n                kwargs = {\"enable_thinking\"\
-    : kwargs.get(\"enable_thinking\", False)}\n                try:\n            \
-    \        async with routing_slot:\n                        decision = await asyncio.to_thread(runtime.route,\
+    \        decision = None\n        l1_identity = None\n        selected = None\n\
+    \        async def cleanup():\n            try:\n                if upstream is\
+    \ not None:\n                    await upstream.aclose()\n            finally:\n\
+    \                state[\"inflight\"] -= 1\n                log.info(json.dumps({\"\
+    event\": \"gateway_request_finished\", \"request_id\": trace, \"selected_expert\"\
+    : selected,\n                    \"decision\": asdict(decision) if decision else\
+    \ None}))\n        try:\n            body = bytearray()\n            async for\
+    \ chunk in request.stream():\n                body.extend(chunk)\n           \
+    \     if len(body) > config.get(\"max_request_bytes\", 2 * 1024 * 1024):\n   \
+    \                 raise HTTPException(413, \"request body exceeds budget\")\n\
+    \            try:\n                payload = json.loads(body)\n            except\
+    \ ValueError:\n                raise HTTPException(400, \"request must be valid\
+    \ JSON\")\n            if not isinstance(payload, dict):\n                raise\
+    \ HTTPException(400, \"request must be a JSON object\")\n            requested\
+    \ = payload.get(\"model\")\n            if not isinstance(requested, str) or requested\
+    \ not in {\"auto\", *config[\"pools\"]}:\n                raise HTTPException(400,\
+    \ \"model must name auto or a configured expert\")\n            if not isinstance(payload.get(\"\
+    stream\", False), bool):\n                raise HTTPException(400, \"stream must\
+    \ be boolean\")\n            messages = payload.get(\"messages\")\n          \
+    \  if not isinstance(messages, list) or not messages:\n                raise HTTPException(400,\
+    \ \"messages must be a nonempty list\")\n            selected = requested\n  \
+    \          if requested == \"auto\":\n                if any(not isinstance(m,\
+    \ dict) or m.get(\"role\") not in {\"system\", \"user\", \"assistant\"} or not\
+    \ isinstance(m.get(\"content\"), str) for m in messages):\n                  \
+    \  raise HTTPException(400, \"automatic routing requires plain text messages\"\
+    )\n                if any(k in payload for k in (\"tools\", \"tool_choice\", \"\
+    chat_template\", \"documents\", \"add_generation_prompt\", \"continue_final_message\"\
+    , \"truncate_prompt_tokens\", \"add_special_tokens\", \"chat_template_content_format\"\
+    )):\n                    raise HTTPException(400, \"automatic routing uses the\
+    \ canonical chat template\")\n                generation = payload.get(\"max_tokens\"\
+    , config.get(\"default_max_tokens\", 128))\n                if \"max_completion_tokens\"\
+    \ in payload or type(generation) is not int or generation <= 0:\n            \
+    \        raise HTTPException(400, \"use a positive integer max_tokens\")\n   \
+    \             kwargs = payload.get(\"chat_template_kwargs\", {\"enable_thinking\"\
+    : False})\n                if not isinstance(kwargs, dict) or set(kwargs) - {\"\
+    enable_thinking\"} or type(kwargs.get(\"enable_thinking\", False)) is not bool:\n\
+    \                    raise HTTPException(400, \"only boolean enable_thinking is\
+    \ supported\")\n                kwargs = {\"enable_thinking\": kwargs.get(\"enable_thinking\"\
+    , False)}\n                try:\n                    if getattr(runtime, \"remote\"\
+    , False):\n                        decision = await runtime.route(messages, generation,\
+    \ kwargs)\n                        l1_identity = dict(runtime.last_identity)\n\
+    \                    else:\n                        async with routing_slot:\n\
+    \                            decision = await asyncio.to_thread(runtime.route,\
     \ messages, generation, kwargs)\n                    state[\"router_calls\"] +=\
     \ 1\n                except ValueError as exc:\n                    raise HTTPException(400,\
     \ str(exc)) from exc\n                if set(decision.probabilities) != set(config[\"\
@@ -129,7 +141,10 @@ data:
     \              if name in upstream.headers:\n                    headers[name]\
     \ = upstream.headers[name]\n            if decision:\n                headers.update({\"\
     x-moqe-router-ms\": str(decision.elapsed_ms), \"x-moqe-input-tokens\": str(decision.input_tokens)})\n\
-    \            if upstream.status_code != 200:\n                if \"retry-after\"\
+    \                if getattr(runtime, \"remote\", False):\n                   \
+    \ headers.update({\"x-moqe-l1-instance\": l1_identity[\"instance_id\"], \"x-moqe-l1-node\"\
+    : l1_identity[\"node\"], \"x-moqe-l1-pod-uid\": l1_identity[\"pod_uid\"]})\n \
+    \           if upstream.status_code != 200:\n                if \"retry-after\"\
     \ in upstream.headers:\n                    headers[\"retry-after\"] = upstream.headers[\"\
     retry-after\"]\n                return JSONResponse({\"error\": {\"message\":\
     \ \"expert pool rejected request\", \"upstream_status\": upstream.status_code}},\n\
@@ -214,10 +229,11 @@ data:
     \      self.router = ContextualPreferenceHead(checkpoint[\"feature_dim\"], kind=checkpoint[\"\
     kind\"],\n                hidden_dim=checkpoint[\"hidden_dim\"], dropout=checkpoint[\"\
     dropout\"], num_experts=len(ids))\n            self.router.load_state_dict(checkpoint[\"\
-    head_state_dict\"])\n            self.router.eval().requires_grad_(False)\n  \
-    \          self.encoder_tokenizer = AutoTokenizer.from_pretrained(encoder_path,\
-    \ local_files_only=True)\n            self.encoder = AutoModel.from_pretrained(encoder_path,\
-    \ local_files_only=True,\n                torch_dtype=torch.bfloat16, attn_implementation=checkpoint[\"\
+    head_state_dict\"])\n            self.router.to(self.device)\n            torch.npu.matmul.allow_hf32\
+    \ = False\n            self.router.eval().requires_grad_(False)\n            self.encoder_tokenizer\
+    \ = AutoTokenizer.from_pretrained(encoder_path, local_files_only=True)\n     \
+    \       self.encoder = AutoModel.from_pretrained(encoder_path, local_files_only=True,\n\
+    \                torch_dtype=torch.bfloat16, attn_implementation=checkpoint[\"\
     settings\"][\"attention\"]).to(self.device)\n            self.encoder.eval().requires_grad_(False)\n\
     \            self.embedding_graphs = None\n            self.graph_threshold_margin\
     \ = settings.graph_threshold_margin\n            if settings.embedding_graph:\n\
@@ -265,7 +281,7 @@ data:
     \ encoded.items()}\n                with torch.inference_mode():\n           \
     \         def predict(pooled):\n                        features = prompt_features(pooled,\
     \ torch.tensor([len(ids)], device=self.device),\n                            torch.tensor([max_new_tokens],\
-    \ device=self.device)).cpu()\n                        return self.router(features).float().softmax(-1)[0].tolist()\n\
+    \ device=self.device))\n                        return self.router(features).float().softmax(-1).cpu()[0].tolist()\n\
     \                    pooled = self.embedding_graphs.pooled(encoded['input_ids'])\
     \ if self.embedding_graphs else None\n                    used_graph = pooled\
     \ is not None\n                    if not used_graph:\n                      \
@@ -322,9 +338,183 @@ data:
     \    return None\n        ids, positions, graph, hidden = self.entries[bucket]\n\
     \        ids[:, :length].copy_(tokens)\n        graph.replay()\n        self.hits\
     \ += 1\n        return hidden[:, length-1, :]\n"
+  heteroserve--routing--service.py: "\"\"\"Independent one-NPU probability inference;\
+    \ HTTP lifecycle stays on CPU.\"\"\"\nimport argparse\nimport asyncio\nfrom contextlib\
+    \ import asynccontextmanager\nfrom dataclasses import asdict\nimport hashlib\n\
+    import json\nimport logging\nimport os\nfrom pathlib import Path\nimport time\n\
+    \nfrom fastapi import FastAPI, HTTPException, Request\nimport uvicorn\n\nfrom\
+    \ .runtime import RouterSettings\n\n\ndef create_app(config, runtime=None):\n\
+    \    settings = RouterSettings(**config[\"router\"])\n    if type(config.get(\"\
+    max_inflight\")) is not int or config[\"max_inflight\"] < 1:\n        raise ValueError(\"\
+    L1 requires a positive request budget\")\n    devices = sorted(int(p.name[7:])\
+    \ for p in Path(\"/dev\").glob(\"davinci*\") if p.name[7:].isdigit())\n    state\
+    \ = {\"draining\": False, \"tasks\": set(), \"completed\": 0, \"rejected\": 0,\
+    \ \"started\": None, \"failed\": False}\n    slot = asyncio.Semaphore(1)\n   \
+    \ identity = {\"pod_uid\": os.environ.get(\"POD_UID\", \"local\"), \"node\": os.environ.get(\"\
+    NODE_NAME\", \"local\"),\n                \"instance_id\": config[\"instance_id\"\
+    ], \"pool\": \"l1-router\", \"physical_devices\": devices,\n                \"\
+    checkpoint_sha256\": settings.checkpoint_sha256, \"max_inflight\": config[\"max_inflight\"\
+    ],\n                \"parallelism\": {\"tp\": 1, \"pp\": 1}, \"encoder_device\"\
+    : settings.device, \"head_device\": settings.device}\n\n    @asynccontextmanager\n\
+    \    async def lifespan(app):\n        nonlocal runtime\n        if runtime is\
+    \ None:\n            if len(devices) != 1:\n                raise RuntimeError(\"\
+    L1 instance must receive exactly one NPU\")\n            from .ascend import AscendRouterRuntime\n\
+    \            runtime = await asyncio.to_thread(AscendRouterRuntime, settings)\n\
+    \            identity[\"head_device\"] = str(next(runtime.router.parameters()).device)\n\
+    \            encoder = runtime.encoder if runtime.contextual else runtime.embedding\n\
+    \            identity[\"encoder_device\"] = str(next(encoder.parameters()).device)\n\
+    \            if not all(identity[k].startswith(\"npu:\") for k in (\"head_device\"\
+    , \"encoder_device\")):\n                raise RuntimeError(\"Encoder and classifier\
+    \ must both execute on NPU\")\n        template_sha = hashlib.sha256(runtime.chat_template.encode()).hexdigest()\n\
+    \        if template_sha != config[\"chat_template_sha256\"]:\n            raise\
+    \ RuntimeError(\"L1 canonical chat template differs from the pinned contract\"\
+    )\n        identity[\"chat_template_sha256\"] = template_sha\n        yield\n\
+    \        state[\"draining\"] = True\n        if state[\"tasks\"]:\n          \
+    \  await asyncio.wait(state[\"tasks\"], timeout=config.get(\"drain_seconds\",\
+    \ 240))\n\n    app = FastAPI(lifespan=lifespan)\n    app.state.l1 = state\n  \
+    \  def unhealthy():\n        return state[\"failed\"] or (state[\"started\"] is\
+    \ not None and time.monotonic()-state[\"started\"] > config.get(\"compute_timeout_seconds\"\
+    ,120))\n\n    @app.get(\"/identity\")\n    async def get_identity():\n       \
+    \ return identity\n\n    @app.get(\"/live\")\n    async def live():\n        if\
+    \ unhealthy():raise HTTPException(503,\"L1 compute requires recovery\")\n    \
+    \    return {\"live\": True}\n\n    @app.get(\"/ready\")\n    async def ready():\n\
+    \        if runtime is None or state[\"draining\"] or unhealthy():\n         \
+    \   raise HTTPException(503, \"L1 is not accepting requests\")\n        return\
+    \ {\"ready\": True, **identity}\n\n    @app.get(\"/metrics\")\n    async def metrics():\n\
+    \        from fastapi.responses import Response\n        return Response(f\"heteroserve_l1_inflight\
+    \ {len(state['tasks'])}\\nheteroserve_l1_completed_total {state['completed']}\\\
+    nheteroserve_l1_rejected_total {state['rejected']}\\n\", media_type=\"text/plain\"\
+    )\n\n    @app.post(\"/drain\")\n    async def drain(request: Request):\n     \
+    \   if request.client is None or request.client.host not in {\"127.0.0.1\", \"\
+    ::1\"}:\n            raise HTTPException(403, \"drain is local-only\")\n     \
+    \   state[\"draining\"] = True\n        deadline = time.monotonic() + config.get(\"\
+    drain_seconds\", 240)\n        while state[\"tasks\"] and time.monotonic() < deadline:\n\
+    \            await asyncio.sleep(.05)\n        return {\"draining\": True, \"\
+    remaining\": len(state[\"tasks\"])}\n\n    @app.post(\"/route\")\n    async def\
+    \ route(request: Request):\n        if runtime is None or state[\"draining\"]\
+    \ or unhealthy():\n            raise HTTPException(503, \"L1 is unavailable\"\
+    )\n        if len(state[\"tasks\"]) >= config[\"max_inflight\"]:\n           \
+    \ state[\"rejected\"] += 1\n            raise HTTPException(429, \"L1 request\
+    \ budget reached\", headers={\"Retry-After\": \"1\"})\n        body = bytearray()\n\
+    \        async for chunk in request.stream():\n            body.extend(chunk)\n\
+    \            if len(body) > config.get(\"max_request_bytes\", 2 * 1024 * 1024):\n\
+    \                raise HTTPException(413, \"L1 request body exceeds budget\")\n\
+    \        try:\n            payload = json.loads(body)\n            messages, generation\
+    \ = payload[\"messages\"], payload[\"max_new_tokens\"]\n            kwargs = payload.get(\"\
+    template_kwargs\", {\"enable_thinking\": False})\n            if not isinstance(messages,\
+    \ list) or not messages or any(not isinstance(m, dict) or m.get(\"role\") not\
+    \ in {\"system\", \"user\", \"assistant\"} or not isinstance(m.get(\"content\"\
+    ), str) for m in messages):\n                raise ValueError(\"L1 requires plain\
+    \ text messages\")\n            if type(generation) is not int or generation <\
+    \ 1 or not isinstance(kwargs, dict) or set(kwargs) != {\"enable_thinking\"} or\
+    \ type(kwargs[\"enable_thinking\"]) is not bool:\n                raise ValueError(\"\
+    Invalid generation/template settings\")\n        except (ValueError, KeyError,\
+    \ TypeError) as error:\n            raise HTTPException(400, str(error)) from\
+    \ error\n        # Check again after reading a body; parsing must not oversubscribe\
+    \ the device.\n        if state[\"draining\"] or len(state[\"tasks\"]) >= config[\"\
+    max_inflight\"]:\n            raise HTTPException(429 if not state[\"draining\"\
+    ] else 503, \"L1 no longer has admission capacity\")\n        async def compute():\n\
+    \            async with slot:\n                if state[\"draining\"]:\n     \
+    \               raise HTTPException(503, \"L1 is draining\")\n               \
+    \ state[\"started\"] = time.monotonic()\n                try:\n              \
+    \      return await asyncio.to_thread(runtime.route, messages, generation, kwargs)\n\
+    \                except (RuntimeError,OSError):\n                    state[\"\
+    failed\"] = True\n                    raise\n                finally:\n      \
+    \              state[\"started\"] = None\n        task = asyncio.create_task(compute())\n\
+    \        state[\"tasks\"].add(task)\n        def completed(future):\n        \
+    \    state[\"tasks\"].discard(future)\n            if not future.cancelled():\n\
+    \                future.exception()  # Consume errors even if the HTTP caller\
+    \ disconnected.\n        task.add_done_callback(completed)\n        try:\n   \
+    \         decision = await asyncio.shield(task)\n        except ValueError as\
+    \ error:\n            raise HTTPException(400, str(error)) from error\n      \
+    \  state[\"completed\"] += 1\n        return {\"decision\": asdict(decision),\
+    \ \"chat_template\": runtime.chat_template, \"identity\": identity}\n\n    return\
+    \ app\n\n\ndef main():\n    parser = argparse.ArgumentParser(description=__doc__)\n\
+    \    parser.add_argument(\"--config\", required=True)\n    args = parser.parse_args()\n\
+    \    config = json.loads(Path(args.config).read_text())\n    logging.basicConfig(level=logging.INFO)\n\
+    \    uvicorn.run(create_app(config), host=\"0.0.0.0\", port=8000, workers=1,\n\
+    \                timeout_graceful_shutdown=config.get(\"drain_seconds\", 240)\
+    \ + 10)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  heteroserve--routing--client.py: "\"\"\"One Gateway dispatches probability RPCs\
+    \ across Ready headless-Service replicas.\"\"\"\nimport asyncio\nimport hashlib\n\
+    import ipaddress\nimport math\nimport socket\nimport time\nfrom urllib.parse import\
+    \ urlparse\n\nimport httpx\nfrom fastapi import HTTPException\n\nfrom .runtime\
+    \ import RoutingDecision\n\n\nclass RemoteRouterClient:\n    remote = True\n\n\
+    \    def __init__(self, settings, config, client, resolver=None):\n        self.settings,\
+    \ self.config, self.client = settings, config, client\n        self.resolver =\
+    \ resolver or self.resolve\n        self.addresses, self.active = [], {}\n   \
+    \     self.updated = None\n        self.cursor = 0\n        self.last_identity\
+    \ = None\n\n    async def resolve(self):\n        parsed = urlparse(self.config[\"\
+    base_url\"])\n        if parsed.scheme != \"http\" or not parsed.hostname or parsed.path\
+    \ not in {\"\", \"/\"}:\n            raise ValueError(\"L1 discovery requires\
+    \ an internal HTTP headless Service\")\n        port = parsed.port or 80\n   \
+    \     rows = await asyncio.to_thread(socket.getaddrinfo, parsed.hostname, port,\
+    \ 0, socket.SOCK_STREAM)\n        return sorted({f\"http://[{ipaddress.ip_address(row[4][0])}]:{port}\"\
+    \ if ':' in row[4][0] else f\"http://{ipaddress.ip_address(row[4][0])}:{port}\"\
+    \ for row in rows})\n\n    async def endpoints(self):\n        now = time.monotonic()\n\
+    \        if self.updated is None or now - self.updated >= self.config.get(\"refresh_seconds\"\
+    , 2):\n            try:\n                addresses = await self.resolver()\n \
+    \               if not addresses:\n                    raise OSError(\"Headless\
+    \ Service has no Ready endpoints\")\n                self.addresses, self.updated\
+    \ = addresses, now\n            except (OSError, ValueError):\n              \
+    \  if self.updated is None or now - self.updated > self.config.get(\"cache_seconds\"\
+    , 15):\n                    raise HTTPException(503, \"L1 discovery is unavailable\
+    \ or expired\")\n        return list(self.addresses)\n\n    def validate_identity(self,\
+    \ value):\n        if value.get(\"checkpoint_sha256\") != self.settings.checkpoint_sha256\
+    \ or value.get(\"chat_template_sha256\") != self.config[\"chat_template_sha256\"\
+    ]:\n            raise HTTPException(503, \"L1 checkpoint/template contract mismatch\"\
+    )\n        if not all(isinstance(value.get(k), str) and value[k] for k in (\"\
+    pod_uid\", \"node\", \"instance_id\")):\n            raise HTTPException(503,\
+    \ \"L1 response lacks instance identity\")\n        if not all(isinstance(value.get(k),\
+    \ str) and value[k].startswith(\"npu:\") for k in (\"encoder_device\", \"head_device\"\
+    )):\n            raise HTTPException(503, \"L1 encoder/classifier device contract\
+    \ mismatch\")\n\n    async def ready(self):\n        try:\n            for address\
+    \ in await self.endpoints():\n                try:\n                    response\
+    \ = await self.client.get(address + \"/ready\", timeout=3)\n                 \
+    \   if response.status_code == 200:\n                        self.validate_identity(response.json())\n\
+    \                        return True\n                except (httpx.HTTPError,\
+    \ ValueError):\n                    continue\n        except HTTPException:\n\
+    \            pass\n        return False\n\n    async def route(self, messages,\
+    \ generation, kwargs):\n        endpoints = await self.endpoints()\n        offset\
+    \ = self.cursor % len(endpoints)\n        self.cursor += 1\n        rotated =\
+    \ endpoints[offset:] + endpoints[:offset]\n        candidates = sorted(rotated,\
+    \ key=lambda address: self.active.get(address, 0))\n        overloaded = False\n\
+    \        for address in candidates:\n            self.active[address] = self.active.get(address,\
+    \ 0) + 1\n            try:\n                response = await self.client.post(address\
+    \ + \"/route\", json={\"messages\": messages, \"max_new_tokens\": generation,\
+    \ \"template_kwargs\": kwargs}, timeout=self.config.get(\"timeout_seconds\", 30))\n\
+    \                if response.status_code in {429, 503}:\n                    overloaded\
+    \ |= response.status_code == 429\n                    continue\n             \
+    \   if response.status_code == 400:\n                    raise ValueError(response.json().get(\"\
+    detail\", \"L1 rejected the prompt\"))\n                response.raise_for_status()\n\
+    \                try:\n                    data = response.json()\n          \
+    \      except ValueError as error:\n                    raise HTTPException(503,\
+    \ \"Malformed L1 JSON response\") from error\n                self.validate_identity(data[\"\
+    identity\"])\n                template = data[\"chat_template\"]\n           \
+    \     if not isinstance(template, str) or hashlib.sha256(template.encode()).hexdigest()\
+    \ != self.config[\"chat_template_sha256\"]:\n                    raise HTTPException(503,\
+    \ \"L1 returned a different canonical template\")\n                decision =\
+    \ RoutingDecision(**data[\"decision\"])\n                if decision.expert not\
+    \ in self.settings.expert_mapping.values() or set(decision.probabilities) != set(self.settings.expert_mapping.values())\
+    \ or not all(math.isfinite(v) and 0 <= v <= 1 for v in decision.probabilities.values())\
+    \ or not math.isclose(sum(decision.probabilities.values()), 1, abs_tol=1e-4) or\
+    \ type(decision.input_tokens) is not int or decision.input_tokens < 1 or not math.isfinite(decision.elapsed_ms)\
+    \ or decision.elapsed_ms < 0:\n                    raise HTTPException(503, \"\
+    L1 returned an invalid probability decision\")\n                self.chat_template,\
+    \ self.last_identity = template, data[\"identity\"]\n                return decision\n\
+    \            except httpx.HTTPError:\n                continue\n            except\
+    \ (KeyError, TypeError) as error:\n                raise HTTPException(503, \"\
+    Malformed L1 protocol response\") from error\n            finally:\n         \
+    \       self.active[address] -= 1\n        raise HTTPException(429 if overloaded\
+    \ else 503, \"No L1 instance accepted the routing request\", headers={\"Retry-After\"\
+    : \"1\"})\n"
   gateway.json: "{\n  \"host\": \"0.0.0.0\",\n  \"port\": 8000,\n  \"max_inflight\"\
     : 16,\n  \"max_request_bytes\": 2097152,\n  \"timeout_seconds\": 180,\n  \"default_max_tokens\"\
-    : 128,\n  \"drain_seconds\": 240,\n  \"router\": {\n    \"checkpoint\": \"/assets/router/checkpoint_best.pt\"\
+    : 128,\n  \"drain_seconds\": 240,\n  \"router_service\": {\n    \"base_url\":\
+    \ \"http://heteroserve-l1-router.heteroserve.svc.cluster.local:8000\",\n    \"\
+    chat_template_sha256\": \"a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8\"\
+    ,\n    \"refresh_seconds\": 2,\n    \"cache_seconds\": 15,\n    \"timeout_seconds\"\
+    : 30\n  },\n  \"router\": {\n    \"checkpoint\": \"/assets/router/checkpoint_best.pt\"\
     ,\n    \"checkpoint_sha256\": \"03c64f8099e3ab0c641e8584480cf0f1710a4da96478d59e4d460227b9870529\"\
     ,\n    \"tokenizer\": \"/assets/router/tokenizer\",\n    \"training_code\": \"\
     /assets/router/architecture\",\n    \"embedding_model\": \"/assets/router/embedding\"\
@@ -333,9 +523,10 @@ data:
     : false,\n    \"graph_buckets\": [\n      64,\n      128,\n      256,\n      512,\n\
     \      1024\n    ],\n    \"graph_threshold_margin\": 0.01\n  },\n  \"pools\":\
     \ {\n    \"awq\": {\n      \"enabled\": true,\n      \"base_url\": \"http://awq-ascend910b-vllm-router.heteroserve.svc.cluster.local:8000/v1\"\
-    ,\n      \"model\": \"awq\"\n    },\n    \"gptq\": {\n      \"enabled\": false,\n\
-    \      \"base_url\": null,\n      \"model\": \"gptq\"\n    }\n  },\n  \"deployment\"\
-    : {\n    \"node\": \"heteroserve-lab-209\",\n    \"asset_path\": \"/var/lib/rancher/k3s/heteroserve-assets/router-model\"\
+    ,\n      \"model\": \"awq\"\n    },\n    \"gptq\": {\n      \"enabled\": true,\n\
+    \      \"base_url\": \"http://gptq-ascend910b-vllm-router.heteroserve.svc.cluster.local:8000/v1\"\
+    ,\n      \"model\": \"gptq\"\n    }\n  },\n  \"deployment\": {\n    \"node\":\
+    \ \"heteroserve-lab-209\",\n    \"asset_path\": \"/var/lib/rancher/k3s/heteroserve-assets/router-model\"\
     ,\n    \"asset_source_host\": \"10.107.206.212\",\n    \"asset_source_root\":\
     \ \"/root/zhangjinhao/router-single-npu\",\n    \"source_checkpoint\": \"router-training/contextual-multitask-v7/mlp-seed20261005/checkpoint_best.pt\"\
     ,\n    \"source_embedding\": \"models/Qwen3-Embedding-0.6B\",\n    \"source_tokenizer\"\
@@ -364,7 +555,7 @@ spec:
     metadata:
       labels: *id001
       annotations:
-        heteroserve.io/runtime-sha256: 772fdda2c447f4d675bb0f34e3864ccf5772cf05da2d9ad45b71dfd5533780b4
+        heteroserve.io/runtime-sha256: 040f168f9e7404517d050e394d0fe54634d5a4546751f47198dfa7e908f8287d
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 300
@@ -376,11 +567,11 @@ spec:
         image: docker.io/heteroserve/ascend-runtime@sha256:440ec6e9625b2344a4c37733f591beeb3a9f8ade57c35dc74d873ce754cb69b4
         imagePullPolicy: Never
         command:
-        - bash
-        - -ec
-        args:
-        - source /usr/local/Ascend/ascend-toolkit/set_env.sh; source /usr/local/Ascend/nnal/atb/set_env.sh;
-          exec python3 -m heteroserve.gateway --config /opt/runtime/gateway.json
+        - python3
+        - -m
+        - heteroserve.gateway
+        - --config
+        - /opt/runtime/gateway.json
         env:
         - name: PYTHONPATH
           value: /opt/runtime:/workspace/zhangjinhao/moqe-runtime/python-deps
@@ -396,16 +587,21 @@ spec:
           value: '1'
         - name: OMP_NUM_THREADS
           value: '4'
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
         ports:
         - name: http
           containerPort: 8000
         resources:
           requests:
             cpu: '2'
-            memory: 4Gi
-            huawei.com/Ascend910: '1'
-          limits:
-            huawei.com/Ascend910: '1'
+            memory: 512Mi
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -442,12 +638,6 @@ spec:
         - name: runtime
           mountPath: /opt/runtime
           readOnly: true
-        - name: assets
-          mountPath: /assets/router
-          readOnly: true
-        - name: driver
-          mountPath: /usr/local/Ascend/driver
-          readOnly: true
         - name: deps
           mountPath: /workspace/zhangjinhao/moqe-runtime/python-deps
           readOnly: true
@@ -472,6 +662,10 @@ spec:
             path: heteroserve/routing/ascend.py
           - key: heteroserve--routing--embedding_graph.py
             path: heteroserve/routing/embedding_graph.py
+          - key: heteroserve--routing--service.py
+            path: heteroserve/routing/service.py
+          - key: heteroserve--routing--client.py
+            path: heteroserve/routing/client.py
           - key: gateway.json
             path: gateway.json
       - name: scratch
@@ -480,14 +674,6 @@ spec:
       - name: tmp
         emptyDir:
           sizeLimit: 1Gi
-      - name: assets
-        hostPath:
-          path: /var/lib/rancher/k3s/heteroserve-assets/router-model
-          type: Directory
-      - name: driver
-        hostPath:
-          path: /usr/local/Ascend/driver
-          type: Directory
       - name: deps
         hostPath:
           path: /var/lib/rancher/k3s/heteroserve-assets/adapter/python-deps

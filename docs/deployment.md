@@ -391,6 +391,21 @@ AWQ 的 `awq-02` 进一步完成真实独立 TP2 发布、max_num_seqs=3 和实�
 本轮试改参数恢复，最近保存前的原回退配置保留；未新建环境或镜像，没有额外实验容器。
 Gateway 全局和专家默认参数页仍明确标记未采集/逐实例查看，不能将默认值当成所有实例的运行值；本轮未实现这两类参数的独立进程快照。
 
+## 独立一级 Router 与 CPU Gateway 验收（2026-10-09）
+
+一级学习式路由从 Gateway Pod 拆为 `l1-01`（`.209`）、`l1-02`（`.210`），复用原 Ascend 镜像、checkpoint、tokenizer、编码器资产和架构代码。
+每实例申请一张 `huawei.com/Ascend910`。编码器保持原 BF16 执行，分类头移到同一 NPU 保持 FP32 参数并关闭 matmul HF32；两者的实际参数设备通过 `/identity` 验证。
+单个 Gateway 改为 CPU 服务，不申请或映射 NPU，保留总请求预算和普通/SSE 数据转发。headless Service 只发布 Ready 副本，Gateway 按在途路由 RPC 负载和轮换顺序选副本；不需要增加 Gateway 副本或共享其计数。
+
+迁移前从原 Gateway 捕获六条真实输入及其概率决策；两个独立副本逐一对照，专家选择和输入 token 数一致，最大概率差异约 `6.9052e-5`，低于预先设定的 `1e-4` 容差。
+保留 checkpoint 原二分类阈值政策，未改成 argmax 或 regret；数值容差对照不等于全量任务质量评估。
+切换后的自动路由、显式 AWQ/GPTQ 请求和普通/SSE 推理通过。使用总控执行一级副本 `2 → 1 → 2`，恢复后两副本都收到请求；六个生成专家 Pod UID 保持不变，用户新增的 `gptq-02` 配置保留。
+
+部署模型资产只对 `.210` 补齐；`.209` 复用并验证既有发布清单。不新建外层 Docker、环境或镜像，已暂停旧服务保持暂停。
+一级请求取消不会提前释放仍在运行的计算名额；发生模型错误或计算长期无响应时，健康探针可触发恢复。
+记录位于 `artifacts/kubernetes/l1-migration-baseline.json`、`l1-parity.json`、`l1-scaling-acceptance.json` 和 `l1-router-verification.json`。
+初版仍为单 Gateway；没有跨节点 TP/PP、动态批处理、持续吞吐/SLO 压测，所有新增或更新副本必须在目标节点有可用 NPU 和已发布资产。
+
 ## 参考资料
 
 - [K3s Docker server/agent](https://docs.k3s.io/advanced#running-k3s-in-docker)

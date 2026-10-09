@@ -14,11 +14,13 @@ def config():
     return json.loads((ROOT / "deploy/gateway.json").read_text())
 
 
-def objects(cluster, pool, npu, cfg):
-    name = "heteroserve-gateway"
+def objects(cluster, pool, npu, cfg, role="gateway", name="heteroserve-gateway"):
+    accelerated = role == "l1-router" or not cfg.get("router_service")
     namespace = pool["namespace"]
-    labels = {"app.kubernetes.io/part-of": "heteroserve", "app.kubernetes.io/name": "gateway", OWNER: cluster["name"]}
-    files = [ROOT / "src/heteroserve" / p for p in ["__init__.py", "gateway.py", "routing/__init__.py", "routing/runtime.py", "routing/ascend.py", "routing/embedding_graph.py"]]
+    labels = {"app.kubernetes.io/part-of": "heteroserve", "app.kubernetes.io/name": role, OWNER: cluster["name"]}
+    if role == "l1-router":
+        labels.update({"heteroserve.io/instance": cfg["instance_id"], "heteroserve.io/pool": "l1-router"})
+    files = [ROOT / "src/heteroserve" / p for p in ["__init__.py", "gateway.py", "routing/__init__.py", "routing/runtime.py", "routing/ascend.py", "routing/embedding_graph.py", "routing/service.py", "routing/client.py"]]
     data, items = {}, []
     for path in files:
         relative = path.relative_to(ROOT / "src").as_posix()
@@ -45,6 +47,17 @@ def objects(cluster, pool, npu, cfg):
         {"name": "scratch", "emptyDir": {"sizeLimit": "2Gi"}}, {"name": "tmp", "emptyDir": {"sizeLimit": "1Gi"}}]
     for key, path in [("assets", cfg["deployment"]["asset_path"]), ("driver", "/usr/local/Ascend/driver"), ("deps", "/var/lib/rancher/k3s/heteroserve-assets/adapter/python-deps")]:
         volumes.append({"name": key, "hostPath": {"path": path, "type": "Directory"}})
+    container["env"] += [{"name": key, "valueFrom": {"fieldRef": {"fieldPath": path}}} for key, path in [("POD_UID", "metadata.uid"), ("NODE_NAME", "spec.nodeName")]]
+    container["lifecycle"]["preStop"]["exec"]["command"][-1] = container["lifecycle"]["preStop"]["exec"]["command"][-1].replace("timeout=245", "timeout="+str(cfg.get("drain_seconds",240)+5))
+    if role == "l1-router":
+        container["name"] = "l1-router"
+        container["args"][0] = container["args"][0].replace("heteroserve.gateway", "heteroserve.routing.service")
+    if not accelerated:
+        container.update(command=["python3", "-m", "heteroserve.gateway", "--config", "/opt/runtime/gateway.json"])
+        container.pop("args")
+        container["resources"] = {"requests": {"cpu": "2", "memory": "512Mi"}}
+        container["volumeMounts"] = [v for v in container["volumeMounts"] if v["name"] not in {"assets", "driver"}]
+        volumes = [v for v in volumes if v["name"] not in {"assets", "driver"}]
     return [{"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": name, "namespace": namespace, "labels": labels}, "data": data},
         {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": name, "namespace": namespace, "labels": labels}, "spec": {
             "replicas": 1, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": labels}, "template": {"metadata": {"labels": labels,
@@ -181,8 +194,9 @@ print(json.dumps({'ready':ready,'requests':records,'auto_generation_verified':bo
                   scope="real checkpoint with configured expert pools", enabled_experts=enabled)
     devices = json.loads(kubectl(cluster, ["exec", "-n", pool["namespace"], pod["metadata"]["name"], "--", "python3", "-c",
         "import json;from pathlib import Path;print(json.dumps([p.name for p in Path('/dev').glob('davinci*') if p.name[7:].isdigit()]))"]).stdout)
-    if len(devices) != 1:
-        raise RuntimeError("Learned Router did not receive exactly one NPU")
+    expected = 0 if config().get("router_service") else 1
+    if len(devices) != expected:
+        raise RuntimeError("Gateway device allocation differs from its routing mode")
     result["physical_devices"] = devices
     path = ROOT / "artifacts/kubernetes/learned-gateway.json"
     path.write_text(json.dumps(result, indent=2), encoding="utf-8")

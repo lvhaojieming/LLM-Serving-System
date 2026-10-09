@@ -34,7 +34,7 @@ def objects(cluster):
         {"job_name": "kube-state-metrics", "static_configs": [{"targets": ["kube-state-metrics." + NAMESPACE + ".svc:8080"]}]},
         {"job_name": "inference", "kubernetes_sd_configs": [{"role": "pod", "namespaces": {"names": ["heteroserve"]}}], "relabel_configs": [
             {"source_labels": ["__meta_kubernetes_pod_label_app_kubernetes_io_part_of"], "action": "keep", "regex": "heteroserve"},
-            {"source_labels": ["__meta_kubernetes_pod_label_app_kubernetes_io_name"], "action": "keep", "regex": "expert|router"},
+            {"source_labels": ["__meta_kubernetes_pod_label_app_kubernetes_io_name"], "action": "keep", "regex": "expert|router|gateway|l1-router"},
             {"source_labels": ["__meta_kubernetes_pod_ready"], "action": "keep", "regex": "true"},
             {"source_labels": ["__address__"], "target_label": "__address__", "regex": "([^:]+)(?::\\d+)?", "replacement": "$1:8000"},
             *[{"source_labels": [source], "target_label": target} for source, target in [

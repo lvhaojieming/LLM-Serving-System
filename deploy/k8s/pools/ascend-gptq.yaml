@@ -429,6 +429,388 @@ spec:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: gptq-ascend910b-vllm-gptq-02-runtime
+  namespace: heteroserve
+  labels:
+    app.kubernetes.io/part-of: heteroserve
+    heteroserve.io/pool: gptq-ascend910b-vllm
+    app.kubernetes.io/name: expert
+    io.heteroserve.lab: heteroserve-lab
+    heteroserve.io/expert: gptq
+    heteroserve.io/hardware: ascend910b4
+    heteroserve.io/backend: vllm-ascend
+    heteroserve.io/model-version: 2d3cfeb764f12642
+    heteroserve.io/instance: gptq-02
+data:
+  worker.py: "\"\"\"Supervise vLLM, admit real model output, and drain direct Pod\
+    \ traffic safely.\"\"\"\nimport argparse\nimport asyncio\nimport copy\nfrom contextlib\
+    \ import asynccontextmanager\nimport json\nimport logging\nimport os\nfrom pathlib\
+    \ import Path\nimport re\nimport signal\nimport time\nimport uuid\n\nimport httpx\n\
+    from fastapi import FastAPI, HTTPException, Request\nfrom fastapi.responses import\
+    \ Response, StreamingResponse\nimport uvicorn\n\nlog = logging.getLogger(\"heteroserve.worker\"\
+    )\nHOP_HEADERS = {\"connection\", \"keep-alive\", \"proxy-authenticate\", \"proxy-authorization\"\
+    ,\n               \"te\", \"trailer\", \"transfer-encoding\", \"upgrade\", \"\
+    content-length\"}\n\n\ndef identity(config):\n    devices = sorted(int(m.group(1))\
+    \ for p in Path(\"/dev\").glob(\"davinci*\")\n                     if (m := re.fullmatch(r\"\
+    davinci([0-9]+)\", p.name)))\n    return {\"pod_uid\": os.environ.get(\"POD_UID\"\
+    , \"local\"), \"node\": os.environ.get(\"NODE_NAME\", \"local\"),\n          \
+    \  \"physical_devices\": devices, \"device_type\": config[\"device_type\"], \"\
+    pool\": config[\"pool\"],\n            \"model\": config[\"model\"], \"weights_manifest_sha256\"\
+    : config[\"weights_manifest_sha256\"],\n            \"image\": config[\"image\"\
+    ], \"instance_id\": config.get(\"instance_id\", \"legacy\"),\n            \"parallelism\"\
+    : config.get(\"parallelism\", {\"tp\": 1, \"pp\": 1}),\n            \"expected_devices\"\
+    : config.get(\"device_count\", 1)}\n\n\ndef create_app(config, transport=None,\
+    \ start_engine=True):\n    # ConfigMap files can change while this process retains\
+    \ its startup settings.\n    config = copy.deepcopy(config)\n    state = {\"admitted\"\
+    : False, \"draining\": False, \"health_failures\": 0, \"leases\": {},\n      \
+    \       \"engine\": None, \"last_error\": None, \"identity\": identity(config),\
+    \ \"completed\": 0, \"cancelled\": 0}\n\n    async def admit(client):\n      \
+    \  response = await client.get(\"/v1/models\", timeout=10)\n        response.raise_for_status()\n\
+    \        if config[\"model\"] not in {m[\"id\"] for m in response.json()[\"data\"\
+    ]}:\n            raise RuntimeError(\"Engine reports an unexpected model identity\"\
+    )\n        body = {\"model\": config[\"model\"], \"messages\": [{\"role\": \"\
+    user\", \"content\": \"What is 17 + 25? Reply with the number only.\"}],\n   \
+    \             \"temperature\": 0, \"max_tokens\": 32, \"chat_template_kwargs\"\
+    : {\"enable_thinking\": False}}\n        response = await client.post(\"/v1/chat/completions\"\
+    , json=body, timeout=config[\"admission_timeout_seconds\"])\n        response.raise_for_status()\n\
+    \        answer = response.json()[\"choices\"][0][\"message\"][\"content\"].strip()\n\
+    \        if answer != \"42\":\n            raise RuntimeError(\"Real model admission\
+    \ did not produce the expected answer\")\n\n    async def monitor(client):\n \
+    \       while True:\n            engine = state[\"engine\"]\n            if engine\
+    \ is not None and engine.returncode is not None:\n                state.update(admitted=False,\
+    \ last_error=\"engine exited\", health_failures=config[\"liveness_failures\"])\n\
+    \                log.error(json.dumps({\"event\": \"engine_exited\", \"returncode\"\
+    : engine.returncode, **state[\"identity\"]}))\n                os.kill(os.getpid(),\
+    \ signal.SIGTERM)\n                return\n            try:\n                response\
+    \ = await client.get(\"/health\", timeout=config[\"health_timeout_seconds\"])\n\
+    \                response.raise_for_status()\n                if not state[\"\
+    admitted\"] and not state[\"draining\"]:\n                    await admit(client)\n\
+    \                    state[\"admitted\"] = True\n                    log.info(json.dumps({\"\
+    event\": \"model_admitted\", **state[\"identity\"]}))\n                state.update(health_failures=0,\
+    \ last_error=None)\n            except Exception as exc:\n                state[\"\
+    health_failures\"] += 1\n                state[\"last_error\"] = type(exc).__name__\
+    \ + \": \" + str(exc)[:300]\n                if state[\"health_failures\"] >=\
+    \ config[\"readiness_failures\"]:\n                    state[\"admitted\"] = False\n\
+    \            await asyncio.sleep(config[\"health_interval_seconds\"])\n\n    @asynccontextmanager\n\
+    \    async def lifespan(app):\n        if start_engine:\n            if len(state[\"\
+    identity\"][\"physical_devices\"]) != config.get(\"device_count\", 1):\n     \
+    \           raise RuntimeError(\"Actual NPU allocation does not match the configured\
+    \ parallel world size\")\n            state[\"engine\"] = await asyncio.create_subprocess_exec(*config[\"\
+    engine_command\"], start_new_session=True,\n                env={**os.environ,\
+    \ **config.get(\"engine_env\", {})})\n        async with httpx.AsyncClient(base_url=config[\"\
+    engine_url\"], transport=transport,\n                                    timeout=httpx.Timeout(connect=10,\
+    \ read=config[\"request_timeout_seconds\"], write=30, pool=10),\n            \
+    \                        trust_env=False) as client:\n            app.state.client\
+    \ = client\n            watcher = asyncio.create_task(monitor(client))\n     \
+    \       try:\n                yield\n            finally:\n                state[\"\
+    draining\"] = True\n                watcher.cancel()\n                await asyncio.gather(watcher,\
+    \ return_exceptions=True)\n                for lease in list(state[\"leases\"\
+    ].values()):\n                    if lease.get(\"response\"):\n              \
+    \          await lease[\"response\"].aclose()\n                engine = state[\"\
+    engine\"]\n                if engine is not None and engine.returncode is None:\n\
+    \                    os.killpg(engine.pid, signal.SIGTERM)\n                 \
+    \   try:\n                        await asyncio.wait_for(engine.wait(), config[\"\
+    engine_stop_seconds\"])\n                    except asyncio.TimeoutError:\n  \
+    \                      os.killpg(engine.pid, signal.SIGKILL)\n               \
+    \         await engine.wait()\n\n    app = FastAPI(lifespan=lifespan)\n    app.state.worker\
+    \ = state\n\n    @app.get(\"/identity\")\n    async def get_identity():\n    \
+    \    return state[\"identity\"]\n\n    @app.get(\"/configuration\")\n    async\
+    \ def configuration():\n        return {**state[\"identity\"], \"engine\": config.get(\"\
+    engine_parameters\", {}),\n                \"traffic\": {\"max_inflight\": config.get(\"\
+    max_inflight\", 8),\n                            \"request_timeout_seconds\":\
+    \ config[\"request_timeout_seconds\"]},\n                \"lifecycle\": {\"drain_seconds\"\
+    : config[\"drain_seconds\"]},\n                \"ready\": state[\"admitted\"]\
+    \ and not state[\"draining\"], \"draining\": state[\"draining\"]}\n\n    @app.get(\"\
+    /ready\")\n    @app.get(\"/health\")\n    async def ready():\n        if state[\"\
+    draining\"] or not state[\"admitted\"]:\n            raise HTTPException(503,\
+    \ \"worker unavailable\")\n        return {\"ready\": True, **state[\"identity\"\
+    ]}\n\n    @app.get(\"/live\")\n    async def live():\n        if not state[\"\
+    draining\"] and state[\"health_failures\"] >= config[\"liveness_failures\"]:\n\
+    \            raise HTTPException(503, \"engine requires recovery\")\n        return\
+    \ {\"live\": True, \"inflight\": len(state[\"leases\"])}\n\n    @app.post(\"/drain\"\
+    )\n    async def drain(request: Request):\n        if request.client is None or\
+    \ request.client.host not in {\"127.0.0.1\", \"::1\"}:\n            raise HTTPException(403,\
+    \ \"drain is local-only\")\n        state[\"draining\"] = True\n        deadline\
+    \ = time.monotonic() + config[\"drain_seconds\"]\n        while state[\"leases\"\
+    ] and time.monotonic() < deadline:\n            await asyncio.sleep(0.05)\n  \
+    \      cancelled = len(state[\"leases\"])\n        for lease in list(state[\"\
+    leases\"].values()):\n            lease[\"cancelled\"] = True\n            if\
+    \ lease.get(\"response\"):\n                await lease[\"response\"].aclose()\n\
+    \            task = lease.get(\"task\")\n            if task is not None and task\
+    \ is not asyncio.current_task():\n                task.cancel()\n        state[\"\
+    cancelled\"] += cancelled\n        log.info(json.dumps({\"event\": \"drained\"\
+    , \"cancelled\": cancelled, **state[\"identity\"]}))\n        return {\"draining\"\
+    : True, \"cancelled\": cancelled, \"inflight\": len(state[\"leases\"])}\n\n  \
+    \  @app.get(\"/metrics\")\n    async def metrics():\n        text = \"\\n\".join([\n\
+    \            \"# TYPE heteroserve_worker_inflight gauge\",\n            f\"heteroserve_worker_inflight\
+    \ {len(state['leases'])}\",\n            \"# TYPE heteroserve_worker_ready gauge\"\
+    ,\n            f\"heteroserve_worker_ready {int(state['admitted'] and not state['draining'])}\"\
+    ,\n            \"# TYPE heteroserve_worker_completed_total counter\",\n      \
+    \      f\"heteroserve_worker_completed_total {state['completed']}\",\n       \
+    \     \"# TYPE heteroserve_worker_cancelled_total counter\",\n            f\"\
+    heteroserve_worker_cancelled_total {state['cancelled']}\", \"\"])\n        try:\n\
+    \            response = await app.state.client.get(\"/metrics\", timeout=3)\n\
+    \            if response.status_code == 200:\n                text += response.text\n\
+    \        except httpx.HTTPError:\n            pass\n        return Response(text,\
+    \ media_type=\"text/plain\")\n\n    @app.api_route(\"/v1/{path:path}\", methods=[\"\
+    GET\", \"POST\"])\n    async def proxy(path: str, request: Request):\n       \
+    \ if not state[\"admitted\"] or state[\"draining\"]:\n            raise HTTPException(503,\
+    \ \"worker is not accepting new requests\")\n        if request.method == \"POST\"\
+    \ and len(state[\"leases\"]) >= config.get(\"max_inflight\", 8):\n           \
+    \ raise HTTPException(429, \"worker request budget reached\", headers={\"Retry-After\"\
+    : \"1\"})\n        lease_id = uuid.uuid4().hex\n        lease = {\"task\": asyncio.current_task(),\
+    \ \"response\": None, \"cancelled\": False}\n        state[\"leases\"][lease_id]\
+    \ = lease\n        upstream = None\n        try:\n            body = await request.body()\n\
+    \            headers = {k: v for k, v in request.headers.items() if k.lower()\
+    \ not in HOP_HEADERS | {\"host\"}}\n            upstream_request = app.state.client.build_request(request.method,\
+    \ \"/v1/\" + path,\n                                                         \
+    \     params=request.query_params, headers=headers, content=body)\n          \
+    \  upstream = await app.state.client.send(upstream_request, stream=True)\n   \
+    \         lease[\"response\"] = upstream\n            response_headers = {k: v\
+    \ for k, v in upstream.headers.items() if k.lower() not in HOP_HEADERS}\n    \
+    \        response_headers.update({\"x-heteroserve-pod-uid\": state[\"identity\"\
+    ][\"pod_uid\"],\n                                     \"x-heteroserve-node\":\
+    \ state[\"identity\"][\"node\"]})\n            if \"text/event-stream\" in upstream.headers.get(\"\
+    content-type\", \"\"):\n                async def stream():\n                \
+    \    lease[\"task\"] = asyncio.current_task()\n                    try:\n    \
+    \                    async for chunk in upstream.aiter_raw():\n              \
+    \              if lease[\"cancelled\"]:\n                                break\n\
+    \                            yield chunk\n                        state[\"completed\"\
+    ] += 1\n                    finally:\n                        state[\"leases\"\
+    ].pop(lease_id, None)\n                        await asyncio.shield(upstream.aclose())\n\
+    \                return StreamingResponse(stream(), status_code=upstream.status_code,\
+    \ headers=response_headers,\n                                         media_type=\"\
+    text/event-stream\")\n            result = await upstream.aread()\n          \
+    \  await upstream.aclose()\n            state[\"leases\"].pop(lease_id, None)\n\
+    \            state[\"completed\"] += 1\n            return Response(result, status_code=upstream.status_code,\
+    \ headers=response_headers)\n        except BaseException:\n            state[\"\
+    leases\"].pop(lease_id, None)\n            if upstream is not None:\n        \
+    \        await asyncio.shield(upstream.aclose())\n            raise\n\n    return\
+    \ app\n\n\ndef main():\n    parser = argparse.ArgumentParser(description=__doc__)\n\
+    \    parser.add_argument(\"--config\", required=True)\n    args = parser.parse_args()\n\
+    \    config = json.loads(Path(args.config).read_text())\n    logging.basicConfig(level=logging.INFO)\n\
+    \    logging.getLogger(\"httpx\").setLevel(logging.WARNING)\n    uvicorn.run(create_app(config),\
+    \ host=\"0.0.0.0\", port=config[\"port\"], workers=1,\n                access_log=False,\
+    \ timeout_graceful_shutdown=config[\"drain_seconds\"] + 10)\n\n\nif __name__ ==\
+    \ \"__main__\":\n    main()\n"
+  worker.json: "{\n  \"pool\": \"gptq-ascend910b-vllm\",\n  \"instance_id\": \"gptq-02\"\
+    ,\n  \"parallelism\": {\n    \"tp\": 1,\n    \"pp\": 1\n  },\n  \"device_count\"\
+    : 1,\n  \"model\": \"moqe-qwen3-gptq\",\n  \"device_type\": \"Ascend910B4\",\n\
+    \  \"weights_manifest_sha256\": \"2d3cfeb764f1264250d5f1148270dc316a851c00cead215efd5929fef2f4c58b\"\
+    ,\n  \"image\": \"docker.io/heteroserve/ascend-runtime@sha256:440ec6e9625b2344a4c37733f591beeb3a9f8ade57c35dc74d873ce754cb69b4\"\
+    ,\n  \"port\": 8000,\n  \"engine_url\": \"http://127.0.0.1:8001\",\n  \"engine_command\"\
+    : [\n    \"python3\",\n    \"-m\",\n    \"vllm.entrypoints.openai.api_server\"\
+    ,\n    \"--model\",\n    \"/workspace/zhangjinhao/model/Qwen3-14B-GPTQ-Ascend-INT4\"\
+    ,\n    \"--served-model-name\",\n    \"moqe-qwen3-gptq\",\n    \"--host\",\n \
+    \   \"127.0.0.1\",\n    \"--port\",\n    \"8001\",\n    \"--tensor-parallel-size\"\
+    ,\n    \"1\",\n    \"--seed\",\n    \"0\",\n    \"--dtype\",\n    \"float16\"\
+    ,\n    \"--max-model-len\",\n    \"4096\",\n    \"--max-num-seqs\",\n    \"2\"\
+    ,\n    \"--gpu-memory-utilization\",\n    \"0.5\",\n    \"--max-num-batched-tokens\"\
+    ,\n    \"2048\",\n    \"--enforce-eager\",\n    \"--disable-frontend-multiprocessing\"\
+    ,\n    \"--disable-log-requests\",\n    \"--quantization\",\n    \"moqe_ascend_int4\"\
+    \n  ],\n  \"engine_parameters\": {\n    \"dtype\": \"float16\",\n    \"max_model_len\"\
+    : 4096,\n    \"max_num_seqs\": 2,\n    \"gpu_memory_utilization\": 0.5,\n    \"\
+    max_num_batched_tokens\": 2048,\n    \"enforce_eager\": true,\n    \"disable_frontend_multiprocessing\"\
+    : true,\n    \"disable_log_requests\": true,\n    \"quantization\": \"moqe_ascend_int4\"\
+    \n  },\n  \"engine_env\": {\n    \"MOQE_ASCEND_INT4_ADAPTER\": \"1\",\n    \"\
+    MOQE_ASCEND_INT4_PARALLEL\": \"0\"\n  },\n  \"health_interval_seconds\": 3,\n\
+    \  \"health_timeout_seconds\": 10,\n  \"readiness_failures\": 3,\n  \"liveness_failures\"\
+    : 10,\n  \"admission_timeout_seconds\": 120,\n  \"request_timeout_seconds\": 180,\n\
+    \  \"drain_seconds\": 240,\n  \"engine_stop_seconds\": 30,\n  \"max_inflight\"\
+    : 8\n}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gptq-ascend910b-vllm-gptq-02
+  namespace: heteroserve
+  labels: &id001
+    app.kubernetes.io/part-of: heteroserve
+    heteroserve.io/pool: gptq-ascend910b-vllm
+    app.kubernetes.io/name: expert
+    io.heteroserve.lab: heteroserve-lab
+    heteroserve.io/expert: gptq
+    heteroserve.io/hardware: ascend910b4
+    heteroserve.io/backend: vllm-ascend
+    heteroserve.io/model-version: 2d3cfeb764f12642
+    heteroserve.io/instance: gptq-02
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 1320
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels: &id002
+      app.kubernetes.io/part-of: heteroserve
+      heteroserve.io/pool: gptq-ascend910b-vllm
+      app.kubernetes.io/name: expert
+      heteroserve.io/instance: gptq-02
+  template:
+    metadata:
+      labels: *id001
+      annotations:
+        heteroserve.io/runtime-sha256: b703a6010c8a4af9d546b4d19906050001105912d2a44664e3ff4cf8a1b099e5
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '8000'
+        prometheus.io/path: /metrics
+        heteroserve.io/max-inflight: '8'
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 300
+      nodeSelector:
+        heteroserve.io/hardware: ascend910b4
+        heteroserve.io/backend: vllm-ascend
+        heteroserve.io/npu-ready: 'true'
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - heteroserve-lab-216
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels: *id002
+      containers:
+      - name: expert
+        image: docker.io/heteroserve/ascend-runtime@sha256:440ec6e9625b2344a4c37733f591beeb3a9f8ade57c35dc74d873ce754cb69b4
+        imagePullPolicy: Never
+        command:
+        - /bin/bash
+        - -ec
+        args:
+        - mkdir -p /scratch/home /scratch/cache /scratch/vllm; source /usr/local/Ascend/ascend-toolkit/set_env.sh;
+          source /usr/local/Ascend/nnal/atb/set_env.sh; exec python3 /opt/heteroserve/worker.py
+          --config /opt/heteroserve/worker.json
+        env:
+        - name: HOME
+          value: /scratch/home
+        - name: XDG_CACHE_HOME
+          value: /scratch/cache
+        - name: VLLM_CACHE_ROOT
+          value: /scratch/vllm
+        - name: VLLM_USE_V1
+          value: '1'
+        - name: VLLM_NO_USAGE_STATS
+          value: '1'
+        - name: VLLM_VERSION
+          value: 0.8.4
+        - name: OMP_NUM_THREADS
+          value: '4'
+        - name: TE_PARALLEL_COMPILER
+          value: '1'
+        - name: HF_HUB_OFFLINE
+          value: '1'
+        - name: TRANSFORMERS_OFFLINE
+          value: '1'
+        - name: MOQE_ASCEND_INT4_ADAPTER
+          value: '0'
+        - name: PYTHONPATH
+          value: /workspace/zhangjinhao/moqe-runtime/adapter:/workspace/zhangjinhao/moqe-runtime/python-deps:/workspace/vllm:/workspace/vllm-ascend
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          requests:
+            cpu: '4'
+            memory: 16Gi
+            huawei.com/Ascend910: '1'
+          limits:
+            huawei.com/Ascend910: '1'
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 240
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 3
+          timeoutSeconds: 3
+          failureThreshold: 1
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - python3
+              - -c
+              - import urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/drain',method='POST'),timeout=245).read()
+        volumeMounts:
+        - name: runtime
+          mountPath: /opt/heteroserve
+          readOnly: true
+        - name: driver
+          mountPath: /usr/local/Ascend/driver
+          readOnly: true
+        - name: weights
+          mountPath: /workspace/zhangjinhao/model/Qwen3-14B-GPTQ-Ascend-INT4
+          readOnly: true
+        - name: adapter
+          mountPath: /workspace/zhangjinhao/moqe-runtime
+          readOnly: true
+        - name: scratch
+          mountPath: /scratch
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: runtime
+        configMap:
+          name: gptq-ascend910b-vllm-gptq-02-runtime
+      - name: driver
+        hostPath:
+          path: /usr/local/Ascend/driver
+          type: Directory
+      - name: weights
+        hostPath:
+          path: /var/lib/rancher/k3s/heteroserve-assets/models/gptq
+          type: Directory
+      - name: adapter
+        hostPath:
+          path: /var/lib/rancher/k3s/heteroserve-assets/adapter
+          type: Directory
+      - name: scratch
+        emptyDir:
+          sizeLimit: 20Gi
+      - name: tmp
+        emptyDir:
+          sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: gptq-ascend910b-vllm-router-runtime
   namespace: heteroserve
   labels:

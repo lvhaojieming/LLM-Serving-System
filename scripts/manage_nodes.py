@@ -194,6 +194,12 @@ def plan(action, host):
         if name == gateway["deployment"]["node"] or name in pool["router_nodes"]:
             raise RuntimeError("Migrate Gateway/Router configuration before retiring this worker")
         from manage_pool import load_pool
+        l1_file = ROOT / "deploy/l1-router.json"
+        if l1_file.exists():
+            l1 = read("deploy/l1-router.json")
+            bound = [ident for ident, spec in l1["instances"].items() if spec.get("enabled", True) and spec["node"] == name]
+            if bound:
+                raise RuntimeError("Move/pause and apply bound L1 instances before retiring node: " + ",".join(bound))
         for path in (ROOT / "deploy/pools").glob("ascend-*.json"):
             other = load_pool(path)
             bound = [ident for ident, spec in other.get("instances", {}).items()

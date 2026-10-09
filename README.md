@@ -5,7 +5,8 @@
 
 面向昇腾的 Kubernetes 推理工程。实例生命周期由 Kubernetes 管理，负载均衡与动态发现复用官方 vLLM Router。
 当前 AWQ 池有四个模型副本，分别运行在 `.209`、`.210`、`.211`、`.216`；GPTQ 池有一个模型副本，运行在 `.216` 的另一张 NPU。
-五个模型现分别为 `awq-01`～`awq-04`、`gptq-01`，共用部署模板，拥有独立 Deployment 和实例参数。
+生成专家使用独立实例，例如 `awq-01`～`awq-04`、`gptq-01`、`gptq-02`，共用部署模板，拥有独立 Deployment 和实例参数。
+一级学习式 Router 已独立为 `l1-01`、`l1-02`，每实例一张 NPU，编码器和分类头均在 NPU；单个 CPU Gateway 统一准入并调用路由服务，池内分配仍由官方 vLLM Router 执行。
 AWQ/GPTQ 的单节点 TP2、PP2 及 TP2/PP2 组合已实测普通/SSE 推理；当前生产配置保持 TP1/PP1 基线，跨节点并行后置。
 每个专家池使用一个官方二级 Router 维护本池入口计数；同池跨 Router 副本协调后置。
 一级概率 Router 已从 `MLsys_inference` 迁入 `heteroserve.routing`，Gateway 通过池 Service 接入二级路由。

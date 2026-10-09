@@ -4,6 +4,8 @@ resources:
   - ../base
   - ascend-awq.yaml
   - ascend-gptq.yaml
+  - ../l1-router.yaml
+  - ../gateway.yaml
 patches:
   - target:
       kind: Namespace

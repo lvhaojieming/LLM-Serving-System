@@ -6,6 +6,13 @@
   "timeout_seconds": 180,
   "default_max_tokens": 128,
   "drain_seconds": 240,
+  "router_service": {
+    "base_url": "http://heteroserve-l1-router.heteroserve.svc.cluster.local:8000",
+    "chat_template_sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
+    "refresh_seconds": 2,
+    "cache_seconds": 15,
+    "timeout_seconds": 30
+  },
   "router": {
     "checkpoint": "/assets/router/checkpoint_best.pt",
     "checkpoint_sha256": "03c64f8099e3ab0c641e8584480cf0f1710a4da96478d59e4d460227b9870529",

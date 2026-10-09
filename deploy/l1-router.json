@@ -1,0 +1,17 @@
+{
+  "namespace": "heteroserve",
+  "max_inflight": 4,
+  "drain_seconds": 240,
+  "startup_seconds": 1200,
+  "termination_seconds": 300,
+  "instances": {
+    "l1-01": {
+      "node": "heteroserve-lab-209",
+      "enabled": true
+    },
+    "l1-02": {
+      "node": "heteroserve-lab-210",
+      "enabled": true
+    }
+  }
+}

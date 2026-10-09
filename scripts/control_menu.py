@@ -34,6 +34,7 @@ class Menu:
     def __init__(self):
         self.draft = c.Draft()
         self.selected = None
+        self.selected_scope = "pool"
         self.saved = c.publication_record().get("pending", [])
         self.resource_rows = []
         self.resource_error = "尚未刷新"
@@ -46,6 +47,8 @@ class Menu:
                 c.FILES["pool"] = context["pool"]
             if context.get("selected") in self.draft.instances():
                 self.selected = context["selected"]
+            if context.get("selected") in self.draft.file(c.FILES["l1"])["instances"]:
+                self.selected, self.selected_scope = context["selected"], "l1"
             print("已恢复上次未确认草稿；请查看差异后继续编辑或确认。")
 
     def checkpoint(self):
@@ -77,6 +80,10 @@ class Menu:
                 index[expert + "/" + ident] = {"expert": expert, "relative": relative, "pool": pool["pool"], "ident": ident, "spec": spec}
                 short.setdefault(ident, []).append(index[expert + "/" + ident])
         index.update({ident: values[0] for ident, values in short.items() if len(values) == 1})
+        for ident, spec in self.draft.file(c.FILES["l1"])["instances"].items():
+            row={"expert":"l1","relative":c.FILES["l1"],"pool":"l1-router","ident":ident,"spec":spec}
+            index["l1/"+ident]=row
+            if ident not in index:index[ident]=row
         return index
 
     def resources(self):
@@ -107,14 +114,33 @@ class Menu:
         print("申请卡数和 TP/PP 是期望配置；进入实例页查看实际参数、物理卡及 Pod UID。")
 
     def select_instance(self, row):
+        if row["expert"] == "l1":
+            self.selected, self.selected_scope = row["ident"], "l1"
+            self.field_editor("一级 Router / "+self.selected,{"node":"运行节点","enabled":"启用实例","max_inflight":"路由请求预算"},"l1",self.selected)
+            return
+        self.selected_scope = "pool"
         c.select_pool(row["expert"])
         self.selected = row["ident"]
         fields = {key: label for group in c.INSTANCE_GROUPS.values() for key, label in group.items()}
         self.field_editor("实例工作台 / " + self.selected, fields, "pool", self.selected)
 
     def create_instance(self):
-        expert = pick("新增实例 / 专家池", list(c.available_pools()))
+        expert = pick("新增实例 / 服务类型", [*c.available_pools(), "一级 Router"])
         if not expert:
+            return
+        if expert == "一级 Router":
+            specs=self.draft.file(c.FILES["l1"])["instances"]
+            seq=1
+            while "l1-"+str(seq).zfill(2) in specs:seq+=1
+            suggested="l1-"+str(seq).zfill(2)
+            ident=input(f"一级 Router ID（回车={suggested}）: ").strip() or suggested
+            if ident in specs:raise ValueError("实例 ID 已存在")
+            cluster=load_config(c.ROOT/'deploy/lab/cluster.json')
+            choices={n['host']:names(cluster,n)[0] for n in active_nodes(cluster) if n['host'] in c.read_configs()['engine']['device_hosts']}
+            chosen=pick("选择一级 Router 节点（每实例一张 NPU）",list(choices))
+            if chosen:
+                specs[ident]={"node":choices[chosen],"enabled":True}
+                self.checkpoint();self.select_instance({"expert":"l1","ident":ident})
             return
         c.select_pool(expert)
         specs = self.draft.instances()
@@ -189,7 +215,7 @@ class Menu:
     def context(self, page):
         pool = self.draft.pool()
         self.saved = c.publication_record().get("pending", [])
-        print(f"\n位置：{page} | 专家={pool['expert']} | 实例={self.selected or '未选择'} | 未确认草稿={len(self.draft.changes())} | 已确认待更新={len(self.saved)}")
+        print(f"\n位置：{page} | 服务={'一级Router' if self.selected_scope=='l1' else pool['expert']} | 实例={self.selected or '未选择'} | 未确认草稿={len(self.draft.changes())} | 已确认待更新={len(self.saved)}")
 
     def confirm_changes(self, update=False):
         if self.draft.changes():
@@ -216,7 +242,7 @@ class Menu:
             print("没有已确认待更新的配置。")
             return
         paths = {c.FILES["gateway"], c.FILES["engine"], "deploy/lab/cluster.json",
-                 "deploy/pools/defaults.json", *c.available_pools().values()}
+                 "deploy/pools/defaults.json", c.FILES["l1"], *c.available_pools().values()}
         snapshot = {name: (c.ROOT / name).read_bytes() for name in paths}
         for name in scopes:
             if name in record.get("pending", []) and hashlib.sha256(snapshot[name]).hexdigest() != record.get("confirmed", {}).get(name):
@@ -228,9 +254,11 @@ class Menu:
                 print("\n发布影响：" + name)
                 if name == c.FILES["gateway"]:
                     c.main(["apply", "gateway", "--plan"])
+                elif name == c.FILES["l1"]:
+                    self.publication_plan(selected, section="l1")
                 elif name in c.available_pools().values():
                     c.FILES["pool"] = name
-                    self.publication_plan(selected)
+                    self.publication_plan(selected, section="pool")
                 else:
                     raise ValueError("不支持的更新范围: " + name)
             print("更新会创建/更新/停用对应实例；模型就绪并通过普通/SSE及路由验收后才报告完成。")
@@ -251,16 +279,16 @@ class Menu:
                     raise RuntimeError("发布计划生成后配置发生变化；未继续更新，请重新查看并确认计划")
                 if name != c.FILES["gateway"]:
                     c.FILES["pool"] = name
-                target = "gateway" if name == c.FILES["gateway"] else "pool"
+                target = "gateway" if name == c.FILES["gateway"] else "l1" if name == c.FILES["l1"] else "pool"
                 stage = "applying"
                 try:
                     self.job.update(scope=name, stage=stage); self.write_job()
                     c.record_publication(name, stage)
-                    self.command(["instance", "apply", selected] if selected else ["apply", target], log_path)
+                    self.command(["l1" if target=="l1" else "instance", "apply", selected] if selected else ["apply", target], log_path)
                     stage = "verifying"
                     self.job.update(stage=stage); self.write_job()
                     c.record_publication(name, stage)
-                    self.command(["instance", "verify", selected] if selected else ["verify", target], log_path)
+                    self.command(["l1" if target=="l1" else "instance", "verify", selected] if selected else ["verify", target], log_path)
                     if any((c.ROOT / path).read_bytes() != data for path, data in snapshot.items()):
                         raise RuntimeError("更新期间配置发生变化；保留待更新记录，请重新确认运行结果")
                     c.record_publication(name, "instance_verified" if selected else "verified")
@@ -326,9 +354,10 @@ class Menu:
             state = "待确认" if wanted != stored else "未核实" if not values or None in values else "一致" if all(v == stored for v in values) else "待更新/更新中"
             source = "全局配置"
             if ident:
-                spec = self.draft.instances()[ident]
+                spec = self.draft.file(c.FILES["l1"])["instances"][ident] if section == "l1" else self.draft.instances()[ident]
                 group, _, name = key.partition(".")
                 source = "实例配置" if not name or name in spec.get(group, {}) else "专家默认"
+                if section == "l1":source = "一级实例覆盖" if key in spec else "一级默认"
                 if group == "engine" and name not in spec.get("engine", {}) and name not in self.draft.pool().get("runtime", {}).get("model_parameters", {}):
                     source = "共享默认"
             if key == "lifecycle.startup_seconds" and state == "待更新/更新中" and type(stored) is int and all(v == ((stored + 4) // 5) * 5 for v in values):
@@ -371,7 +400,9 @@ class Menu:
                 if supplied:
                     supplied = supplied.strip()
                     if supplied == "default" and ident:
-                        self.draft.inherit(key, ident)
+                        if section == "l1" and key == "max_inflight":
+                            self.draft.file(c.FILES["l1"])["instances"][ident].pop(key,None)
+                        else:self.draft.inherit(key, ident)
                         continue
                     if key == "node":
                         cluster = load_config(ROOT / "deploy/lab/cluster.json")
@@ -410,11 +441,18 @@ class Menu:
                 print(f"{node['host']} | {device} | {','.join(owners) or '-'} | {state}")
 
     def field_editor(self, title, fields, section, ident=None):
-        rows, error = self.live_instance(ident) if ident else ([], None)
+        self.selected_scope = "l1" if section == "l1" else "pool"
+        if ident:self.selected = ident
+        def observed():
+            if section == "l1":
+                try:return instances.inventory(load_config(c.ROOT/'deploy/lab/cluster.json'), {"pool":"l1-router"}, runtime=True, selected=ident),None
+                except c.ERRORS as exc:return [],str(exc)
+            return self.live_instance(ident) if ident else ([],None)
+        rows, error = observed()
         while True:
             self.context(title)
             if ident:
-                spec = self.draft.instances()[ident]
+                spec = self.draft.file(c.FILES["l1"])["instances"][ident] if section == "l1" else self.draft.instances()[ident]
                 p = spec.get("parallelism", {"tp": 1, "pp": 1})
                 print(f"请求卡数：{p['tp'] * p['pp']}（TP×PP），卡号由 K8s 分配。")
             self.parameter_panel(fields, section, ident, rows, error)
@@ -427,11 +465,11 @@ class Menu:
                     for i, (key, label) in enumerate(fields.items(), 1):
                         print(f"{i}. {label}: {key}")
                 elif value == "r":
-                    rows, error = self.live_instance(ident) if ident else ([], None)
+                    rows, error = observed()
                 elif value in {"c", "u", "s", "a"}:
                     self.confirm_changes(update=value in {"u", "a"})
                     if value in {"u", "a"} and ident:
-                        rows, error = self.live_instance(ident)
+                        rows, error = observed()
                 else:
                     self.edit_fields(value, fields, section, ident)
             except c.ERRORS as exc:
@@ -514,10 +552,17 @@ class Menu:
                 finally:
                     c.FILES["pool"] = previous
 
-    def publication_plan(self, selected=None):
+    def publication_plan(self, selected=None, section=None):
         if self.draft.changes():
             raise ValueError("还有草稿未保存；先保存才能生成实际发布计划")
         cluster = load_config(ROOT / "deploy/lab/cluster.json")
+        if (section or self.selected_scope) == "l1":
+            import manage_l1
+            pool=c.read_configs()["pool"]
+            rows=manage_l1.plan(cluster,pool,c.read_configs()["engine"],self.draft.file(c.FILES["l1"]),c.read_configs()["gateway"],selected)
+            print("一级实例 | 操作 | 节点 | 一实例一张 NPU")
+            for row in rows:print(f"{row['instance']} | {row['action']} | {row['node']} | {int(row['enabled'])}")
+            return
         pool = c.read_configs()["pool"]
         if "instances" in pool:
             print("实例 | 操作 | 节点 | TP/PP | 申请卡数")
@@ -569,7 +614,7 @@ class Menu:
             elif action in {"更新当前专家", "仅更新选中实例"}:
                 if action == "仅更新选中实例" and not self.selected:
                     raise ValueError("先选择具体实例")
-                self.update_system([c.FILES["pool"]], self.selected if action == "仅更新选中实例" else None)
+                self.update_system([c.FILES["l1"] if self.selected_scope == "l1" else c.FILES["pool"]], self.selected if action == "仅更新选中实例" else None)
             elif action == "更新 Gateway 入口":
                 self.update_system([c.FILES["gateway"]])
             elif action == "验收当前专家":
@@ -587,7 +632,7 @@ class Menu:
             if action == "当前实例日志":
                 if not self.selected:
                     raise ValueError("先选择实例")
-                c.main(["instance", "logs", self.selected])
+                c.main(["l1" if self.selected_scope=="l1" else "instance", "logs", self.selected])
             elif action == "现有监控接入验收":
                 c.subprocess.run([c.sys.executable, str(ROOT / "scripts/manage_monitoring.py"), "verify"], check=True)
             else:

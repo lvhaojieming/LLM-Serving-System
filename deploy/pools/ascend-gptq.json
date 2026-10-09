@@ -22,6 +22,15 @@
         "pp": 1
       },
       "engine": {}
+    },
+    "gptq-02": {
+      "node": "heteroserve-lab-216",
+      "enabled": true,
+      "parallelism": {
+        "tp": 1,
+        "pp": 1
+      },
+      "engine": {}
     }
   }
 }

@@ -18,6 +18,7 @@ python3 scripts/control.py
 ```text
 awq-01                       # 直接打开 AWQ 实例全部参数
 gptq-01                      # 直接打开 GPTQ 实例，无需先换专家池
+l1-01                        # 一级学习式 Router：节点、启用状态、请求预算
 /awq                         # 筛选 AWQ；单独输入 / 清除筛选
 r                            # 重新读取工作负载状态
 +                            # 新增向导：专家 → ID → 节点 → TP/PP → 参数页
@@ -28,6 +29,7 @@ q                            # 安全退出
 ```
 
 同名 ID 存在于不同池时，使用完整标识 `awq/awq-01`。新实例 ID 可回车自动生成，TP/PP 可回车采用 1；PP 的默认批处理预算不足时，向导明确初始化满足约束的预算。
+新增向导选择“一级 Router”后，只需 ID 和节点，每实例固定独占一张 NPU；编码器与分类头在同一张 NPU，TP/PP 参数只用于生成专家实例。
 首页的“就绪”来自 Kubernetes 工作负载状态；申请卡数及 TP/PP 列是配置值。实际进程参数、卡号和 UID 在实例页查询，不把配置列当成运行值。
 状态带采集时间，`r` 刷新；API 不可达时显示未核实，仍允许编辑配置。
 
@@ -140,6 +142,15 @@ q                            # 安全退出
 ## 命令行
 
 ```bash
+# 一级 Router 独立数量和节点；保存后应用，原专家配置不变
+python3 scripts/control.py l1 list --live
+python3 scripts/control.py l1 resize 3 --write
+python3 scripts/control.py l1 set l1-02 node=heteroserve-lab-210 max_inflight=4 --write
+python3 scripts/control.py apply l1
+python3 scripts/control.py verify l1
+python3 scripts/control.py l1 pause l1-02 --write
+python3 scripts/control.py l1 apply l1-02
+
 # 查看稳定实例配置与实际卡分配
 python3 scripts/control.py --pool awq instance list
 python3 scripts/control.py --pool awq instance list --live
@@ -176,6 +187,9 @@ python3 scripts/control.py verify gateway
 ```
 
 原 `show/set/check/apply/status/prepare/verify/logs` CLI 保留。`set pool replicas=N` 对独立实例池等价于调整清单启用数量；节点属于具体实例，应使用 `instance set ID node=...`。
+一级 Router 使用 `deploy/l1-router.json` 的实例清单，checkpoint 与 tokenizer 契约仍由 `deploy/gateway.json` 统一定义。新目标节点先执行 `prepare l1`，复用已验收资产；缺失资产通过原有发布逻辑准备，镜像不做预检或自动搬运。
+Gateway 单副本不申请 NPU，通过内部 Ready headless Service 发现一级 Router，再按本 Gateway 的在途 RPC 数及轮换顺序分配；新增/重建地址随 DNS 更新，无需重启 Gateway。
+发现传播和 DNS 缓存存在延迟；不可达或拒绝的一级副本可以改试其他同版本副本。只重试纯路由计算，不重试已开始的文本生成，也不改选其他专家。checkpoint、模板及 NPU 设备契约不匹配时拒绝。
 `set engine ...` 修改当前专家默认值，实例覆盖值优先；所有权重身份、镜像、卡型仍由正式配置管理，镜像环境不做预检或自动传输。
 
 ## 实际卡号与资源

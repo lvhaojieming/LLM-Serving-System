@@ -47,6 +47,8 @@ class AscendRouterRuntime:
             self.router = ContextualPreferenceHead(checkpoint["feature_dim"], kind=checkpoint["kind"],
                 hidden_dim=checkpoint["hidden_dim"], dropout=checkpoint["dropout"], num_experts=len(ids))
             self.router.load_state_dict(checkpoint["head_state_dict"])
+            self.router.to(self.device)
+            torch.npu.matmul.allow_hf32 = False
             self.router.eval().requires_grad_(False)
             self.encoder_tokenizer = AutoTokenizer.from_pretrained(encoder_path, local_files_only=True)
             self.encoder = AutoModel.from_pretrained(encoder_path, local_files_only=True,
@@ -109,8 +111,8 @@ class AscendRouterRuntime:
                 with torch.inference_mode():
                     def predict(pooled):
                         features = prompt_features(pooled, torch.tensor([len(ids)], device=self.device),
-                            torch.tensor([max_new_tokens], device=self.device)).cpu()
-                        return self.router(features).float().softmax(-1)[0].tolist()
+                            torch.tensor([max_new_tokens], device=self.device))
+                        return self.router(features).float().softmax(-1).cpu()[0].tolist()
                     pooled = self.embedding_graphs.pooled(encoded['input_ids']) if self.embedding_graphs else None
                     used_graph = pooled is not None
                     if not used_graph:

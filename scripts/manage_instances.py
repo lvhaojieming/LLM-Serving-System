@@ -423,7 +423,7 @@ def inventory(cluster, pool=None, runtime=False, selected=None):
     for pod in pods:
         labels = pod["metadata"].get("labels", {})
         role = labels.get("app.kubernetes.io/name")
-        if role not in {"expert", "gateway"} or (pool and labels.get("heteroserve.io/pool") != pool["pool"]):
+        if role not in {"expert", "gateway", "l1-router"} or (pool and labels.get("heteroserve.io/pool") != pool["pool"]):
             continue
         row = {"instance": labels.get(INSTANCE_LABEL, "gateway" if role == "gateway" else "legacy"),
                "pool": labels.get("heteroserve.io/pool", "gateway"), "node": pod["spec"].get("nodeName", "Pending"),
@@ -432,14 +432,17 @@ def inventory(cluster, pool=None, runtime=False, selected=None):
                "physical_devices": None, "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
         if pod.get("status", {}).get("phase") == "Running":
             try:
-                code = ("import json,urllib.request;print(json.dumps(json.load(urllib.request.urlopen('http://127.0.0.1:8000/identity',timeout=5))))" if role == "expert" else
+                code = ("import json,urllib.request;print(json.dumps(json.load(urllib.request.urlopen('http://127.0.0.1:8000/identity',timeout=5))))" if role in {"expert", "l1-router"} else
                         "import json;from pathlib import Path;print(json.dumps({'physical_devices':[int(p.name[7:]) for p in Path('/dev').glob('davinci*') if p.name[7:].isdigit()]}))")
                 info = json.loads(kubectl(cluster, ["exec", "-n", "heteroserve", pod["metadata"]["name"], "--", "python3", "-c", code]).stdout)
-                if role == "expert" and (info["pod_uid"] != row["uid"] or info["node"] != row["node"]):
+                if role in {"expert", "l1-router"} and (info["pod_uid"] != row["uid"] or info["node"] != row["node"]):
                     raise RuntimeError("Identity does not match the observed Pod")
-                if role == "expert" and INSTANCE_LABEL in labels and info.get("instance_id") != labels[INSTANCE_LABEL]:
+                if role in {"expert", "l1-router"} and INSTANCE_LABEL in labels and info.get("instance_id") != labels[INSTANCE_LABEL]:
                     raise RuntimeError("Instance identity does not match the workload label")
                 row.update(physical_devices=info["physical_devices"], parallelism=info.get("parallelism", {"tp": 1, "pp": 1}))
+                if role == "l1-router":
+                    row.update(runtime_values={"node": row["node"], "enabled": not bool(pod["metadata"].get("deletionTimestamp")),
+                                               "max_inflight": info["max_inflight"]}, encoder_device=info["encoder_device"], head_device=info["head_device"])
                 if runtime and role == "expert":
                     code = """import json,urllib.request,urllib.error
 from pathlib import Path

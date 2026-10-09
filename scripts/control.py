@@ -17,10 +17,12 @@ from manage_lab import ROOT, kubectl, load_config, names, active_nodes, operatio
 from manage_pool import load_pool, resolve_runtime
 
 FILES = {"gateway": "deploy/gateway.json", "pool": "deploy/pools/ascend-awq.json",
-         "engine": "deploy/lab/npu.json"}
+         "engine": "deploy/lab/npu.json", "l1": "deploy/l1-router.json"}
 # Only expose parameters whose deployment effects are understood. Identity,
 # credentials, device allocation and container ownership remain protected.
 FIELDS = {
+    "l1": {"max_inflight": "一级 Router 默认请求预算", "startup_seconds": "启动预算秒数",
+           "drain_seconds": "排空预算秒数", "termination_seconds": "退出预算秒数"},
     "gateway": {"max_inflight": "入口并发预算", "max_request_bytes": "请求体字节上限",
                 "timeout_seconds": "上游读取超时秒数", "default_max_tokens": "默认输出长度",
                 "deployment.node": "Gateway 节点（迁移前 prepare）",
@@ -46,7 +48,8 @@ def read_configs(root=None):
     root = ROOT if root is None else root
     pool = load_pool(root / FILES["pool"])
     return {"gateway": json.loads((root / FILES["gateway"]).read_text(encoding="utf-8")),
-            "pool": pool, "engine": resolve_runtime(pool, root)}
+            "pool": pool, "engine": resolve_runtime(pool, root),
+            "l1": json.loads((root / FILES["l1"]).read_text(encoding="utf-8"))}
 
 
 def available_pools(root=None):
@@ -115,6 +118,8 @@ def validate(configs, cluster):
     if "instances" in pool:
         from manage_instances import validate_instances
         validate_instances(pool, cluster)
+    from manage_l1 import validate as validate_l1
+    validate_l1(configs["l1"], cluster, engine)
 
 
 def parse_value(old, raw):
@@ -192,12 +197,13 @@ def edit_locked(root, section, assignments, write=False, expected=None):
 def commands(action, target):
     mapping = {
         "apply": {"pool": [("manage_pool.py", "apply"), ("manage_pool.py", "router")],
+                  "l1": [("manage_l1.py", "apply")],
                   "gateway": [("manage_gateway.py", "apply")]},
         "status": {"cluster": [("manage_lab.py", "status")], "pool": [("manage_pool.py", "status")],
-                   "gateway": [("manage_gateway.py", "status")]},
+                   "gateway": [("manage_gateway.py", "status")], "l1": [("manage_l1.py", "status")]},
         "verify": {"pool": [("manage_pool.py", "verify"), ("verify_lifecycle.py", "routing")],
-                   "gateway": [("manage_gateway.py", "verify")]},
-        "prepare": {"pool": [("manage_pool.py", "prepare-model"), ("manage_pool.py", "prepare-router")], "gateway": [("manage_gateway.py", "prepare")]},
+                   "gateway": [("manage_gateway.py", "verify")], "l1": [("manage_l1.py", "verify")]},
+        "prepare": {"pool": [("manage_pool.py", "prepare-model"), ("manage_pool.py", "prepare-router")], "gateway": [("manage_gateway.py", "prepare")], "l1": [("manage_l1.py", "prepare")]},
     }
     choices = mapping[action]
     if target != "all" and target not in choices:
@@ -234,7 +240,7 @@ def publication_record(root=None):
     root = ROOT if root is None else root
     path = root / "artifacts/kubernetes/control/last-save.json"
     record = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    allowed = {FILES["gateway"], *available_pools(root).values()}
+    allowed = {FILES["gateway"], FILES["l1"], *available_pools(root).values()}
     if any(name not in allowed for name in record.get("pending", [])):
         raise RuntimeError("发布记录包含不支持的配置文件")
     return record
@@ -276,7 +282,7 @@ class Draft:
             return False
         payload = self.checkpoint_path.read_bytes()
         record = json.loads(payload)
-        allowed = {FILES["gateway"], *available_pools(self.root).values()}
+        allowed = {FILES["gateway"], FILES["l1"], *available_pools(self.root).values()}
         recovered = record.get("files", {})
         if not isinstance(recovered, dict) or any(name not in allowed for name in recovered):
             raise RuntimeError("草稿恢复文件包含不支持的目标，已保留文件")
@@ -353,6 +359,9 @@ class Draft:
         return raw["instances"]
 
     def value(self, section, key, ident=None):
+        if section == "l1":
+            cfg = self.file(FILES["l1"])
+            return cfg["instances"][ident].get(key, True if key == "enabled" else cfg.get(key)) if ident else lookup(cfg, key)
         if ident:
             from manage_instances import effective
             p, n = effective(self.pool(), ident, self.root)
@@ -371,7 +380,11 @@ class Draft:
         return lookup(self.pool(), key)
 
     def set(self, section, key, supplied, ident=None):
-        if ident:
+        if section == "l1" and ident:
+            if key not in {"node", "enabled", "max_inflight"}:
+                raise ValueError("L1 instances expose node, enabled and max_inflight")
+            target = self.file(FILES["l1"])["instances"][ident]
+        elif ident:
             allowed = {k for group in INSTANCE_GROUPS.values() for k in group}
             if key not in allowed:
                 raise ValueError("Unsupported instance parameter: " + key)
@@ -451,7 +464,7 @@ class Draft:
         gateway = copy.deepcopy(self.file(FILES["gateway"]))
         for relative in available_pools(self.root).values():
             pool = self.pool(relative)
-            validate({"gateway": gateway, "pool": pool, "engine": resolve_runtime(pool, self.root)}, cluster)
+            validate({"gateway": gateway, "pool": pool, "engine": resolve_runtime(pool, self.root), "l1": self.file(FILES["l1"])}, cluster)
         with operation_lock(self.root):
             self.check_checkpoint()
             for name, data in changes.items():
@@ -514,7 +527,7 @@ ENGINE_FIELDS_FOR_INSTANCE = {k.split(".", 1)[1] for k in FIELDS["engine"]}
 def rollback_configuration(execute=False):
     path = ROOT / "artifacts/kubernetes/control/last-save.json"
     record = json.loads(path.read_text())
-    allowed = {FILES["gateway"], *available_pools().values()}
+    allowed = {FILES["gateway"], FILES["l1"], *available_pools().values()}
     draft = Draft()
     for relative, text in record["before"].items():
         if relative not in allowed:
@@ -613,6 +626,59 @@ def node_menu():
         main(["node", action, host, "--execute"])
 
 
+def l1_command(args):
+    import manage_l1 as manager
+    draft = Draft()
+    cfg = draft.file(FILES["l1"])
+    specs = cfg["instances"]
+    ident = args.ident
+    if args.operation in {"add", "resize", "set", "pause", "resume", "remove"}:
+        if args.operation == "resize":
+            count = int(ident)
+            if count < 0:
+                raise ValueError("L1 count must be nonnegative")
+            active = [i for i,v in specs.items() if v.get("enabled",True)]
+            for i in active[count:]: specs[i]["enabled"] = False
+            active = active[:count]
+            for i,v in specs.items():
+                if len(active) == count: break
+                if not v.get("enabled",True): v["enabled"] = True; active.append(i)
+            nodes = [v["node"] for v in specs.values()]
+            seq = 1
+            while len(active) < count:
+                if not nodes: raise ValueError("Add an L1 instance with a node before resizing")
+                new = "l1-" + str(seq).zfill(2); seq += 1
+                if new in specs: continue
+                node = min(nodes, key=lambda n:sum(v.get("enabled",True) and v["node"]==n for v in specs.values()))
+                specs[new] = {"node":node,"enabled":True}; active.append(new)
+        elif args.operation == "add":
+            if not ident or ident in specs or not args.node: raise ValueError("L1 add needs a new ID and --node")
+            specs[ident] = {"node":args.node,"enabled":True}
+        elif args.operation == "set":
+            for assignment in args.assignments:
+                key,sep,value = assignment.partition("=")
+                if not sep: raise ValueError("Use key=value")
+                draft.set("l1",key,value,ident)
+        elif args.operation == "remove":
+            del specs[ident]
+        else:
+            specs[ident]["enabled"] = args.operation == "resume"
+        draft.summary()
+        if args.write: draft.save()
+        return
+    if args.operation == "list" and not args.live:
+        print(json.dumps(cfg,indent=2));return
+    if args.operation == "logs":
+        cluster=load_config(ROOT/'deploy/lab/cluster.json')
+        selector='app.kubernetes.io/name=l1-router' + (',heteroserve.io/instance='+ident if ident else '')
+        print(kubectl(cluster,['logs','-n',cfg['namespace'],'-l',selector,'--all-containers=true','--prefix=true','--tail=100']).stdout);return
+    action = "status" if args.operation == "list" else args.operation
+    command=[sys.executable,str(ROOT/'scripts/manage_l1.py'),action]
+    if ident:command+=['--instance',ident]
+    with operation_lock(ROOT) if action in {'apply','prepare'} else nullcontext():
+        subprocess.run(command,cwd=ROOT,check=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pool", help="Expert pool to manage, e.g. awq or gptq")
@@ -634,6 +700,13 @@ def main(argv=None):
     instance.add_argument("--node")
     instance.add_argument("--tp", type=int, default=1)
     instance.add_argument("--pp", type=int, default=1)
+    l1 = sub.add_parser("l1", help="Independent one-NPU first-stage probability Router")
+    l1.add_argument("operation", choices=["list","add","resize","set","pause","resume","remove","plan","apply","verify","logs"])
+    l1.add_argument("ident", nargs="?")
+    l1.add_argument("assignments", nargs="*")
+    l1.add_argument("--node")
+    l1.add_argument("--write",action="store_true")
+    l1.add_argument("--live",action="store_true")
     rollback = sub.add_parser("rollback", help="Preview or restore the previous configuration")
     rollback.add_argument("--write", action="store_true")
     node = sub.add_parser("node", help="Plan or execute reversible worker membership")
@@ -642,7 +715,7 @@ def main(argv=None):
     node.add_argument("--execute", action="store_true", help="Execute the inspected membership change")
     for action in ("apply", "status", "verify", "prepare"):
         command = sub.add_parser(action)
-        command.add_argument("target", choices=["pool", "gateway", "cluster", "all"])
+        command.add_argument("target", choices=["pool", "gateway", "l1", "cluster", "all"])
         command.add_argument("--plan", action="store_true", help="Print commands without executing")
     logs = sub.add_parser("logs", help="Bounded log snapshot from the private lab")
     logs.add_argument("target", choices=["pool", "router", "gateway"])
@@ -652,6 +725,9 @@ def main(argv=None):
         select_pool(args.pool)
     if args.action == "instance":
         instance_command(args)
+        return
+    if args.action == "l1":
+        l1_command(args)
         return
     if args.action == "rollback":
         rollback_configuration(args.write)

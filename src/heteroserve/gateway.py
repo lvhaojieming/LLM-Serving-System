@@ -46,13 +46,19 @@ def create_app(config, transport=None, router_runtime=None):
     async def lifespan(app):
         nonlocal runtime
         if runtime is None:
-            from .routing.ascend import AscendRouterRuntime
-            runtime = await asyncio.to_thread(AscendRouterRuntime, settings)
+            if config.get("router_service"):
+                from .routing.client import RemoteRouterClient
+                runtime = RemoteRouterClient(settings, config["router_service"], httpx.AsyncClient(timeout=30, trust_env=False))
+            else:
+                from .routing.ascend import AscendRouterRuntime
+                runtime = await asyncio.to_thread(AscendRouterRuntime, settings)
         async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(config.get("timeout_seconds", 180)), trust_env=False) as client:
             app.state.client = client
             app.state.runtime = runtime
             yield
             state["draining"] = True
+            if getattr(runtime, "remote", False):
+                await runtime.client.aclose()
 
     app = FastAPI(lifespan=lifespan)
     app.state.gateway = state
@@ -76,8 +82,10 @@ def create_app(config, transport=None, router_runtime=None):
             except httpx.HTTPError:
                 pass
         if healthy:
+            l1_ready = await runtime.ready() if getattr(runtime, "remote", False) else True
             return {"ready": True, "ready_experts": healthy,
-                    "auto_expert_coverage_complete": len(healthy) == len(config["pools"])}
+                    "l1_router_ready": l1_ready,
+                    "auto_expert_coverage_complete": l1_ready and len(healthy) == len(config["pools"])}
         raise HTTPException(503, "no ready downstream expert pool")
 
     @app.get("/v1/models")
@@ -114,6 +122,7 @@ def create_app(config, transport=None, router_runtime=None):
         upstream = None
         streaming = False
         decision = None
+        l1_identity = None
         selected = None
         async def cleanup():
             try:
@@ -157,8 +166,12 @@ def create_app(config, transport=None, router_runtime=None):
                     raise HTTPException(400, "only boolean enable_thinking is supported")
                 kwargs = {"enable_thinking": kwargs.get("enable_thinking", False)}
                 try:
-                    async with routing_slot:
-                        decision = await asyncio.to_thread(runtime.route, messages, generation, kwargs)
+                    if getattr(runtime, "remote", False):
+                        decision = await runtime.route(messages, generation, kwargs)
+                        l1_identity = dict(runtime.last_identity)
+                    else:
+                        async with routing_slot:
+                            decision = await asyncio.to_thread(runtime.route, messages, generation, kwargs)
                     state["router_calls"] += 1
                 except ValueError as exc:
                     raise HTTPException(400, str(exc)) from exc
@@ -178,6 +191,8 @@ def create_app(config, transport=None, router_runtime=None):
                     headers[name] = upstream.headers[name]
             if decision:
                 headers.update({"x-moqe-router-ms": str(decision.elapsed_ms), "x-moqe-input-tokens": str(decision.input_tokens)})
+                if getattr(runtime, "remote", False):
+                    headers.update({"x-moqe-l1-instance": l1_identity["instance_id"], "x-moqe-l1-node": l1_identity["node"], "x-moqe-l1-pod-uid": l1_identity["pod_uid"]})
             if upstream.status_code != 200:
                 if "retry-after" in upstream.headers:
                     headers["retry-after"] = upstream.headers["retry-after"]

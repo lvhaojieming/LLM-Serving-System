@@ -218,7 +218,7 @@ def confirmed_menu(monkeypatch, project, answers):
     menu_inputs(monkeypatch, project, answers)
     monkeypatch.setattr(control_menu, "ROOT", project)
     menu = control_menu.Menu()
-    monkeypatch.setattr(menu, "publication_plan", lambda selected=None: None)
+    monkeypatch.setattr(menu, "publication_plan", lambda selected=None, section=None: None)
     return menu
 
 
@@ -553,3 +553,30 @@ def test_controller_command_captures_details_in_log(monkeypatch, project, operat
         original(menu, [operation], log)
         assert "DETAIL_ONLY_IN_LOG" not in capsys.readouterr().out
     assert "DETAIL_ONLY_IN_LOG" in log.read_text(encoding="utf-8")
+
+
+def test_l1_draft_checkpoint_and_default_override_are_independent_of_experts(monkeypatch,project):
+    menu=confirmed_menu(monkeypatch,project,[])
+    before=(project/control.FILES['pool']).read_bytes()
+    menu.edit_fields('max_inflight=6',{'max_inflight':'预算'},'l1','l1-01')
+    assert menu.draft.value('l1','max_inflight','l1-01')==6
+    menu.draft.save()
+    assert (project/control.FILES['pool']).read_bytes()==before
+    assert control.publication_record(project)['pending']==[control.FILES['l1']]
+
+
+def test_l1_resize_preserves_nodes_and_existing_instance_config(monkeypatch,project):
+    monkeypatch.setattr(control,'ROOT',project)
+    control.main(['l1','resize','3','--write'])
+    data=control.read_configs(project)['l1']
+    assert len(data['instances'])==3 and data['instances']['l1-01']['node']=='heteroserve-lab-209'
+    control.main(['l1','resize','1','--write'])
+    assert sum(v.get('enabled',True) for v in control.read_configs(project)['l1']['instances'].values())==1
+
+
+def test_l1_resource_selection_opens_its_own_parameter_scope(monkeypatch,project):
+    menu=confirmed_menu(monkeypatch,project,['l1-01','0'])
+    opened=[]
+    monkeypatch.setattr(menu,'field_editor',lambda title,fields,section,ident:opened.append((section,ident)))
+    menu.run()
+    assert opened==[('l1','l1-01')] and menu.selected_scope=='l1'
