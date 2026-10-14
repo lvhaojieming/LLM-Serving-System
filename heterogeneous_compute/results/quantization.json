@@ -1,0 +1,35 @@
+{
+  "checked_at": "2026-10-14T05:24:53.764142+00:00",
+  "model": "Qwen3-14B",
+  "calibration": {
+    "sha256": "e778cd5ada5fc19227ac80591479a505eab4dd03b858098d361e396e9b9ca916",
+    "samples": 256,
+    "max_tokens": 512,
+    "benchmark_overlap": 0
+  },
+  "awq": {
+    "status": "export_verified",
+    "format": "standard AWQ GEMM",
+    "bits": 4,
+    "group_size": 128,
+    "packed_linear_layers": 280,
+    "versions": {
+      "gptqmodel": "7.5.0",
+      "torch": "2.10.0+cpu",
+      "torch-npu": "2.10.0.post4",
+      "transformers": "5.14.1",
+      "compressed-tensors": "0.17.0",
+      "torchao": "0.16.0"
+    },
+    "tokenizer": "original files restored; vocabulary and calibration token IDs verified",
+    "artifact_bytes": 9992668783,
+    "manifest_sha256": "0c3ff63c17092c3354c0faf12c4664e3fc7116a7f45683d96e98b134487ea6f9",
+    "inference_validation": "pending"
+  },
+  "gptq": {
+    "status": "quantization_running",
+    "format": "standard GPTQ legacy",
+    "inference_validation": "pending"
+  },
+  "scope": "Weight generation only; multi-vendor loading, quality and speed acceptance remain pending."
+}

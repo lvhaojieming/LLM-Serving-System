@@ -3,6 +3,8 @@
 此目录独立管理跨厂商算力适配。已完成的同构集群、扩容和路由管理位于
 `homogeneous/`，不在这里重新实现。`configs/baselines/` 保存多厂商原生基线；
 `platforms/iluvatar/` 保存天数部署与官方 benchmark 入口；`probes/` 保存通信预检。
+`quantization/` 保存共用校准集与标准 AWQ/GPTQ W4A16 权重生成入口，
+部署继续复用现有后端。详见 [量化说明](quantization/README.md)。
 
 ## Qwen3-14B Ascend / MUSA TP2 PP2 experimental executor
 

@@ -1,0 +1,21 @@
+{
+  "source": "/models/Qwen3-14B",
+  "calibration": "/quantization/calibration/calibration-w4.jsonl",
+  "calibration_sha256": "e778cd5ada5fc19227ac80591479a505eab4dd03b858098d361e396e9b9ca916",
+  "samples": 256,
+  "max_sequence_length": 512,
+  "seed": 20261014,
+  "work": "/quantization/work",
+  "outputs": {
+    "awq": "/quantization/models/Qwen3-14B-AWQ",
+    "gptq": "/quantization/models/Qwen3-14B-GPTQ"
+  },
+  "versions": {
+    "gptqmodel": "7.5.0",
+    "torch": "2.10.0+cpu",
+    "torch-npu": "2.10.0.post4",
+    "transformers": "5.14.1",
+    "compressed-tensors": "0.17.0",
+    "torchao": "0.16.0"
+  }
+}
