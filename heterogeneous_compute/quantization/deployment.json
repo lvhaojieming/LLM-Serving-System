@@ -1,0 +1,24 @@
+{
+  "node": "ascend910c-02",
+  "container": "heteroserve-quantization",
+  "host": "192.168.162.24",
+  "device": 0,
+  "dtype": "float16",
+  "tp": 1,
+  "pp": 1,
+  "resource_limits_enabled": false,
+  "max_model_len": 2048,
+  "gpu_memory_utilization": 0.60,
+  "max_num_seqs": 8,
+  "max_num_batched_tokens": 2048,
+  "source": "/models/Qwen3-14B",
+  "result_dir": "artifacts/quantization/inference",
+  "profiles": {
+    "awq": {"model": "/quantization/models/Qwen3-14B-AWQ", "port": 18424, "served_model": "Qwen3-14B-AWQ"},
+    "gptq": {"model": "/models/Qwen3-14B-GPTQ-Int4", "port": 18425, "served_model": "Qwen3-14B-GPTQ-Int4"},
+    "fp16": {"model": "/models/Qwen3-14B", "port": 18426, "served_model": "Qwen3-14B-FP16"}
+  },
+  "order": ["awq", "gptq", "fp16"],
+  "client": {"node": "iluvatar150-01", "container": "heteroserve-iluvatar"},
+  "benchmark": {"concurrencies": [1, 4, 8], "num_prompts": 200, "num_warmups": 3, "output_len": 64, "seed": 20261010, "temperature": 0}
+}

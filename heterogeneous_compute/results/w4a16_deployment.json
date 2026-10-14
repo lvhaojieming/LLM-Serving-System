@@ -1,0 +1,288 @@
+{
+  "checked_at": "2026-10-14T09:29:31.031192+00:00",
+  "model": "Qwen3-14B",
+  "node": "Ascend .24",
+  "reused_container": {
+    "id": "f4a6b5f622a564f6d2f29c435516e28e28153b768b1fd05298668982f60612c5",
+    "image_id": "sha256:1b80fda08829723082eba0a758fffbb8f5ef11cb431f39fff47f0d8d74eaf9e5",
+    "image": "quay.io/ascend/vllm-ascend:v0.26.0rc2-a3",
+    "memory": 0,
+    "nano_cpus": 0,
+    "versions": {
+      "torch": "2.10.0+cpu",
+      "torch_npu": "2.10.0.post4",
+      "vllm": "0.26.0+empty",
+      "transformers": "5.14.1",
+      "cann_home": "/usr/local/Ascend/cann-9.1.0"
+    }
+  },
+  "config": {
+    "node": "ascend910c-02",
+    "container": "heteroserve-quantization",
+    "host": "192.168.162.24",
+    "device": 0,
+    "dtype": "float16",
+    "tp": 1,
+    "pp": 1,
+    "resource_limits_enabled": false,
+    "max_model_len": 2048,
+    "gpu_memory_utilization": 0.6,
+    "max_num_seqs": 8,
+    "max_num_batched_tokens": 2048,
+    "source": "/models/Qwen3-14B",
+    "result_dir": "artifacts/quantization/inference",
+    "profiles": {
+      "awq": {
+        "model": "/quantization/models/Qwen3-14B-AWQ",
+        "port": 18424,
+        "served_model": "Qwen3-14B-AWQ"
+      },
+      "gptq": {
+        "model": "/models/Qwen3-14B-GPTQ-Int4",
+        "port": 18425,
+        "served_model": "Qwen3-14B-GPTQ-Int4"
+      },
+      "fp16": {
+        "model": "/models/Qwen3-14B",
+        "port": 18426,
+        "served_model": "Qwen3-14B-FP16"
+      }
+    },
+    "order": [
+      "awq",
+      "gptq",
+      "fp16"
+    ],
+    "client": {
+      "node": "iluvatar150-01",
+      "container": "heteroserve-iluvatar"
+    },
+    "benchmark": {
+      "concurrencies": [
+        1,
+        4,
+        8
+      ],
+      "num_prompts": 200,
+      "num_warmups": 3,
+      "output_len": 64,
+      "seed": 20261010,
+      "temperature": 0
+    }
+  },
+  "profiles": {
+    "awq": {
+      "algorithm": "awq",
+      "passed": true,
+      "requests": [
+        {
+          "prompt": "2+3等于多少？只输出数字。",
+          "text": "5",
+          "expected": "5",
+          "passed": true
+        },
+        {
+          "prompt": "法国的首都是哪里？只回答城市名。",
+          "text": "巴黎",
+          "expected": "巴黎",
+          "passed": true
+        },
+        {
+          "prompt": "What is 7 minus 4? Reply with only the digit.",
+          "text": "3",
+          "expected": "3",
+          "passed": true
+        }
+      ],
+      "prepared_fused_linears": 160,
+      "executed_int4_linears": 160,
+      "operator_proof_passed": true,
+      "scope": "Limited real-decode acceptance; no PPL or general quality claim",
+      "native_operator_checks": {
+        "algorithm": "awq",
+        "passed": true,
+        "operator": "torch_npu.npu_weight_quant_batchmatmul",
+        "activation": "FP16",
+        "results": [
+          {
+            "projection": "self_attn.q_proj",
+            "k": 5120,
+            "n": 5120,
+            "checks": [
+              {
+                "tokens": 1,
+                "finite": true,
+                "relative_l2_error": 0.0005514768417924643
+              },
+              {
+                "tokens": 32,
+                "finite": true,
+                "relative_l2_error": 0.0002724629011936486
+              }
+            ],
+            "passed": true
+          },
+          {
+            "projection": "mlp.down_proj",
+            "k": 17408,
+            "n": 5120,
+            "checks": [
+              {
+                "tokens": 1,
+                "finite": true,
+                "relative_l2_error": 0.0005856326897628605
+              },
+              {
+                "tokens": 32,
+                "finite": true,
+                "relative_l2_error": 0.0002706417581066489
+              }
+            ],
+            "passed": true
+          }
+        ],
+        "scope": "Layer correctness only, not inference latency or model PPL"
+      }
+    },
+    "gptq": {
+      "algorithm": "gptq",
+      "passed": true,
+      "requests": [
+        {
+          "prompt": "2+3等于多少？只输出数字。",
+          "text": "5",
+          "expected": "5",
+          "passed": true
+        },
+        {
+          "prompt": "法国的首都是哪里？只回答城市名。",
+          "text": "巴黎",
+          "expected": "巴黎",
+          "passed": true
+        },
+        {
+          "prompt": "What is 7 minus 4? Reply with only the digit.",
+          "text": "3",
+          "expected": "3",
+          "passed": true
+        }
+      ],
+      "prepared_fused_linears": 160,
+      "executed_int4_linears": 160,
+      "operator_proof_passed": true,
+      "scope": "Limited real-decode acceptance; no PPL or general quality claim",
+      "native_operator_checks": {
+        "algorithm": "gptq",
+        "passed": true,
+        "operator": "torch_npu.npu_weight_quant_batchmatmul",
+        "activation": "FP16",
+        "results": [
+          {
+            "projection": "self_attn.q_proj",
+            "k": 5120,
+            "n": 5120,
+            "checks": [
+              {
+                "tokens": 1,
+                "finite": true,
+                "relative_l2_error": 0.0005251042894087732
+              },
+              {
+                "tokens": 32,
+                "finite": true,
+                "relative_l2_error": 0.0002693048445507884
+              }
+            ],
+            "passed": true
+          },
+          {
+            "projection": "mlp.down_proj",
+            "k": 17408,
+            "n": 5120,
+            "checks": [
+              {
+                "tokens": 1,
+                "finite": true,
+                "relative_l2_error": 0.0005451369215734303
+              },
+              {
+                "tokens": 32,
+                "finite": true,
+                "relative_l2_error": 0.0002657349978107959
+              }
+            ],
+            "passed": true
+          }
+        ],
+        "scope": "Layer correctness only, not inference latency or model PPL"
+      }
+    },
+    "fp16": {
+      "algorithm": "fp16",
+      "passed": true,
+      "requests": [
+        {
+          "prompt": "2+3等于多少？只输出数字。",
+          "text": "5",
+          "expected": "5",
+          "passed": true
+        },
+        {
+          "prompt": "法国的首都是哪里？只回答城市名。",
+          "text": "巴黎",
+          "expected": "巴黎",
+          "passed": true
+        },
+        {
+          "prompt": "What is 7 minus 4? Reply with only the digit.",
+          "text": "3",
+          "expected": "3",
+          "passed": true
+        }
+      ],
+      "prepared_fused_linears": 0,
+      "executed_int4_linears": 0,
+      "operator_proof_passed": true,
+      "scope": "Limited real-decode acceptance; no PPL or general quality claim"
+    }
+  },
+  "source_sha256": {
+    "shared/ascend_int4/layout.py": "dbdec9229d4143b24ab573df515db6fee186d960be04f3847af75af458d306fc",
+    "shared/ascend_int4/vllm_adapter.py": "e7b068b55a960fd221a538bb5631089f43ebf0fd7c4d35d38851e24f2fe41da6",
+    "shared/ascend_int4/sitecustomize.py": "600e6043d79f5242874457e98fa81a5a6a426b049516b311a3823eeba517ab18",
+    "heterogeneous_compute/quantization/deploy.py": "68b13c96bbf90322ce05f3daa672a3fe15f81a96bdc5dc2696610c2affaf8cba",
+    "heterogeneous_compute/quantization/deployment.json": "ee0060bb4f4f4e163c88585ef304353313ccc90ce74a4684a3ea9e4c8d027f88"
+  },
+  "adapter": "Existing integer-layout/NPU adapter promoted to shared module and extended to installed vLLM API. Custom Dense compatibility, not official Dense AWQ/GPTQ support.",
+  "unit_tests": {
+    "passed": 3,
+    "scope": "Independent known AWQ packing, GPTQ legacy zero convention, negative INT32 words"
+  },
+  "precision_scope": "W4 FP16 activations versus matched TP1/PP1 FP16 floating-weight control; all are Eager with prefix cache off. Not a comparison against earlier TP2 BF16 results.",
+  "quality_limit": "Limited arithmetic/capital decode and operator checks only. No PPL or downstream quality acceptance. AWQ self-generated and GPTQ community calibration differ.",
+  "inference_repack": "Integer values, scales and zero points preserved; signed INT4 repacked at load time. No full FP16 weight expansion, no floating-weight matmul fallback.",
+  "performance": {
+    "status": "running_startup_verified",
+    "current": "awq",
+    "current_case": "c1",
+    "observed_completed": 40,
+    "requests_per_case": 200,
+    "concurrencies": [
+      1,
+      4,
+      8
+    ],
+    "num_warmups": 3,
+    "output_tokens": 64,
+    "seed": 20261010,
+    "total_requests": 1800,
+    "estimated_remaining_minutes": [
+      45,
+      60
+    ],
+    "client_vllm": "0.23.0",
+    "controller_pid": 27784
+  },
+  "artifacts": "artifacts/quantization/inference",
+  "cleanup": "Only task-owned model processes drained during sequential acceptance; original containers, services, dependencies, models and datasets preserved. No temporary prototype scripts created."
+}
