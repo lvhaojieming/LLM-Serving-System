@@ -2,7 +2,7 @@
 
 2026-10-14 当前选择：AWQ 自量化权重已通过导出校验，保留用于复现；GPTQModel NPU 自量化在第一层 down_proj 的 AICPU QR 上失败，按用户要求停止重跑。未采用的自定义 Hessian 实现、msModelSlim 安装临时文件和失败 GPTQ offload 缓存已清理，保留必要失败日志。用户已选择直接下载社区 `JunHowie/Qwen3-14B-GPTQ-Int4`，不将其标为 Qwen 官方发布。
 
-社区模型的 ModelScope revision 固定为 `63ca45ac5d22ed49897a9e55112a1c32360869fc`，配置为标准 GPTQ、bits=4、group_size=128、desc_act=false、checkpoint_format=gptq。当前下载节点 `.24`，目录 `~/models/Qwen3-14B-GPTQ-Int4`；复用 `shared/download_model.py --quantization gptq`。已验证下载进程及三个权重分片持续增长，完整文件哈希和推理验收待完成。确认启动后按工程约定不持续轮询。
+社区模型的 ModelScope revision 固定为 `63ca45ac5d22ed49897a9e55112a1c32360869fc`，配置为标准 GPTQ、bits=4、group_size=128、desc_act=false、checkpoint_format=gptq。`.24` 的 HF 镜像下载较慢；同文件短测发现 HF 镜像回源 Xet，`.29` 的 ModelScope 国内 CDN 明显更快，因此将已下载部分迁至 `.29` 续传，完成后自动 SCP 回 `.24`。两节点目录均为 `~/models/Qwen3-14B-GPTQ-Int4`；复用 `shared/download_model.py --quantization gptq --mirror modelscope` 和通用分发器。完整文件哈希和推理验收待完成。确认启动后按工程约定不持续轮询。
 
 复用原始 BF16 模型与固定 ShareGPT 校准集，使用同一入口通过 `--algorithm awq|gptq` 切换算法。复用同构项目的 SHA256 与 tokenizer 校验函数，不复制量化后端。
 
