@@ -129,6 +129,7 @@ class ContinuousScheduler:
             if request.inflight is not None or request.finishing:
                 raise RuntimeError('Ready queue contains a busy request')
             ids = request.item['prompt_token_ids']
+            phase = 'prefill' if request.cursor < len(ids) else 'decode'
             if request.cursor < len(ids):
                 count = min(len(ids)-request.cursor, self.prefill_chunk_tokens, budget)
                 positions = list(range(request.cursor, request.cursor+count))
@@ -142,7 +143,10 @@ class ContinuousScheduler:
                 tokens = [request.output[-1]]
                 count, sample = 1, True
             segments.append(dict(request_id=identifier, positions=positions,
-                                 input_token_ids=tokens, sample_token=sample, step=len(request.output)))
+                                 input_token_ids=tokens, sample_token=sample, step=len(request.output),
+                                 step_id=len(request.output), phase=phase,
+                                 length=count, past=positions[0], max_tokens=request.item['max_tokens'],
+                                 ignore_eos=request.item.get('ignore_eos',False), sampling=dict(temperature=0)))
             budget -= count
         batch_id = self.sequence
         self.sequence += 1
@@ -152,7 +156,10 @@ class ContinuousScheduler:
         self.stats['microbatches'] += 1
         self.stats['max_batch_size'] = max(self.stats['max_batch_size'], len(segments))
         self.stats['max_inflight_batches'] = max(self.stats['max_inflight_batches'], len(self.inflight))
-        return dict(op='forward_batch', batch_id=batch_id, segments=segments)
+        phases={s['phase'] for s in segments}
+        return dict(op='forward_batch', batch_id=batch_id, step_id=batch_id,
+                    phase=next(iter(phases)) if len(phases)==1 else 'mixed',
+                    request_order=[s['request_id'] for s in segments], segments=segments)
 
     def complete(self, batch_id, samples, elapsed, eos_ids, canceled_ids=None):
         if batch_id not in self.inflight:

@@ -404,13 +404,165 @@
             "executed": 160
           }
         },
-        "scope": "Limited real-decode acceptance; no PPL or general quality claim"
+        "scope": "Limited real-decode acceptance; no PPL or general quality claim",
+        "performance": {
+          "1": {
+            "completed": 200,
+            "failed": 0,
+            "duration": 727.1415885910392,
+            "output_throughput": 17.603174128442003,
+            "mean_ttft_ms": 70.09668120881543,
+            "p95_ttft_ms": 93.33624336868525,
+            "p99_ttft_ms": 97.53077916800976,
+            "mean_tpot_ms": 56.593385591459956,
+            "p95_tpot_ms": 58.63865753968379,
+            "p99_tpot_ms": 64.00123542625576
+          },
+          "4": {
+            "completed": 200,
+            "failed": 0,
+            "duration": 199.67744113504887,
+            "output_throughput": 64.10338557645534,
+            "mean_ttft_ms": 197.68349760444835,
+            "p95_ttft_ms": 243.47780784592032,
+            "p99_ttft_ms": 275.76425667852163,
+            "mean_tpot_ms": 60.23915097634825,
+            "p95_tpot_ms": 60.95780201906722,
+            "p99_tpot_ms": 61.1382976049439
+          },
+          "8": {
+            "completed": 200,
+            "failed": 0,
+            "duration": 100.5034772879444,
+            "output_throughput": 127.3587774811786,
+            "mean_ttft_ms": 238.7412273627706,
+            "p95_ttft_ms": 290.9323416650295,
+            "p99_ttft_ms": 414.73876068834215,
+            "mean_tpot_ms": 59.98233587536517,
+            "p95_tpot_ms": 61.083331258804904,
+            "p99_tpot_ms": 61.37938205817981
+          }
+        },
+        "performance_validation": "600/600 successful; output budgets, identical inputs across cases, throughput recomputation verified"
       },
       "gptq": {
-        "status": "pending_sequential_acceptance"
+        "performance": {
+          "1": {
+            "completed": 200,
+            "failed": 0,
+            "duration": 721.7726892493665,
+            "output_throughput": 17.734115173174285,
+            "mean_ttft_ms": 69.8713664477691,
+            "p95_ttft_ms": 93.53701027575879,
+            "p99_ttft_ms": 97.40335709881035,
+            "mean_tpot_ms": 56.1710738792779,
+            "p95_tpot_ms": 58.77534726612448,
+            "p99_tpot_ms": 60.23743531836699
+          },
+          "4": {
+            "completed": 200,
+            "failed": 0,
+            "duration": 198.95938377594575,
+            "output_throughput": 64.33473886516693,
+            "mean_ttft_ms": 198.1750886212103,
+            "p95_ttft_ms": 244.6842668345198,
+            "p99_ttft_ms": 275.1579817850143,
+            "mean_tpot_ms": 60.002784205430615,
+            "p95_tpot_ms": 60.47017676940572,
+            "p99_tpot_ms": 60.496904808318334
+          },
+          "8": {
+            "completed": 200,
+            "failed": 0,
+            "duration": 100.41711235884577,
+            "output_throughput": 127.46831390907293,
+            "mean_ttft_ms": 236.28980180248618,
+            "p95_ttft_ms": 286.5694562671706,
+            "p99_ttft_ms": 408.40017159469426,
+            "mean_tpot_ms": 59.96616745556128,
+            "p95_tpot_ms": 60.77930112812845,
+            "p99_tpot_ms": 61.5017572039413
+          }
+        },
+        "performance_validation": "600/600 successful; output budgets, identical inputs across cases, throughput recomputation verified",
+        "algorithm": "gptq",
+        "passed": true,
+        "requests": [
+          {
+            "prompt": "2+3等于多少？只输出数字。",
+            "text": "5",
+            "expected": "5",
+            "passed": true
+          },
+          {
+            "prompt": "法国的首都是哪里？只回答城市名。",
+            "text": "巴黎",
+            "expected": "巴黎",
+            "passed": true
+          },
+          {
+            "prompt": "What is 7 minus 4? Reply with only the digit.",
+            "text": "3",
+            "expected": "3",
+            "passed": true
+          }
+        ],
+        "prepared_fused_linears": 320,
+        "executed_int4_linears": 320,
+        "operator_proof_passed": true,
+        "tp": 2,
+        "pp": 1,
+        "per_rank": {
+          "0": {
+            "prepared": 160,
+            "executed": 160
+          },
+          "1": {
+            "prepared": 160,
+            "executed": 160
+          }
+        },
+        "scope": "Limited real-decode acceptance; no PPL or general quality claim"
       },
       "fp16": {
-        "status": "pending_sequential_acceptance"
+        "algorithm": "fp16",
+        "passed": true,
+        "requests": [
+          {
+            "prompt": "2+3等于多少？只输出数字。",
+            "text": "5",
+            "expected": "5",
+            "passed": true
+          },
+          {
+            "prompt": "法国的首都是哪里？只回答城市名。",
+            "text": "巴黎",
+            "expected": "巴黎",
+            "passed": true
+          },
+          {
+            "prompt": "What is 7 minus 4? Reply with only the digit.",
+            "text": "3",
+            "expected": "3",
+            "passed": true
+          }
+        ],
+        "prepared_fused_linears": 0,
+        "executed_int4_linears": 0,
+        "operator_proof_passed": true,
+        "tp": 2,
+        "pp": 1,
+        "per_rank": {
+          "0": {
+            "prepared": 0,
+            "executed": 0
+          },
+          "1": {
+            "prepared": 0,
+            "executed": 0
+          }
+        },
+        "scope": "Limited real-decode acceptance; no PPL or general quality claim"
       }
     },
     "native_operator_checks": {
@@ -461,18 +613,15 @@
       }
     },
     "performance": {
-      "status": "running_startup_verified",
+      "status": "fp16_benchmark_running",
       "controller_pid": 15760,
       "total_requests": 1800,
-      "current": "awq",
-      "current_case": "c1",
-      "observed_completed": 25,
+      "current": "fp16",
       "requests_per_case": 200,
-      "estimated_remaining_minutes": [
-        60,
-        90
-      ],
-      "estimated_case_remaining_minutes": 11
+      "completed_profiles": [
+        "awq",
+        "gptq"
+      ]
     },
     "source_sha256": {
       "shared/ascend_int4/vllm_adapter.py": "d97434c0ec79b71f98297432c9a79ad3036ea781b7a9fc911bf9a978abc4cba8",

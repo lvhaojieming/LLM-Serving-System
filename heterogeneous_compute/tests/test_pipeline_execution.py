@@ -5,6 +5,7 @@ import unittest
 import concurrent.futures
 import queue
 import importlib.util
+from unittest.mock import patch
 from types import SimpleNamespace
 from heterogeneous_compute.pipeline_execution import RequestState, TensorChannel
 from heterogeneous_compute.pipeline_execution import FeedbackReceiver
@@ -59,6 +60,21 @@ class PipelineExecutionTests(unittest.TestCase):
         state.install([dict(request_id='c', positions=[0]), dict(request_id='b', positions=[1])])
         self.assertFalse(state.requests['c'].caches)
 
+    def test_tensor_dtype_and_byte_count_rejected_before_body_read(self):
+        for dtype,size in [('float16',8),('bfloat16',7)]:
+            listener=socket.socket()
+            listener.bind(('127.0.0.1',0));listener.listen(1)
+            a=socket.create_connection(listener.getsockname())
+            b,_=listener.accept()
+            try:
+                header=json.dumps(dict(version=3,metadata={},tensors=[dict(
+                    name='hidden_states',shape=[2,2],dtype=dtype,bytes=size)])).encode()
+                a.sendall(struct.pack('!I',len(header))+header)
+                with self.assertRaisesRegex(ValueError,'descriptor'):
+                    TensorChannel(b,version=3).receive('cpu')
+            finally:
+                a.close();b.close();listener.close()
+
     def test_two_inflight_batches_never_share_requests_and_refill_after_release(self):
         scheduler = ContinuousScheduler(max_active=4, microbatch_size=2)
         for i in range(4):
@@ -97,6 +113,21 @@ class PipelineExecutionTests(unittest.TestCase):
         first,second=scheduler.plan(),scheduler.plan()
         self.assertEqual([len(first['segments']),len(second['segments'])],[2,2])
         self.assertEqual(scheduler.stats['max_inflight_batches'],2)
+
+    def test_protocol_tracks_request_order_phase_positions_and_sampling(self):
+        scheduler=ContinuousScheduler(max_inflight=1,prefill_chunk_tokens=2)
+        scheduler.admit(dict(id='a',prompt_token_ids=[1,2,3],max_tokens=2,ignore_eos=True))
+        first=scheduler.plan()
+        self.assertEqual(first['request_order'],['a'])
+        self.assertEqual(first['step_id'],first['batch_id'])
+        self.assertEqual(first['phase'],'prefill')
+        scheduler.complete(first['batch_id'],{'a':None},.1,set())
+        second=scheduler.plan();scheduler.complete(second['batch_id'],{'a':7},.1,set())
+        third=scheduler.plan();segment=third['segments'][0]
+        self.assertEqual(third['phase'],'decode')
+        self.assertEqual((segment['step_id'],segment['past'],segment['length']),(1,3,1))
+        self.assertEqual(segment['sampling'],{'temperature':0})
+        self.assertTrue(segment['ignore_eos'])
 
     def test_cancellation_is_explicit_and_identical_across_tp_lanes(self):
         schedulers = [ContinuousScheduler(), ContinuousScheduler()]
@@ -150,6 +181,17 @@ class PipelineExecutionTests(unittest.TestCase):
             independent[row].install([dict(request_id=identifier,positions=[position])])
             expected = packed_attention(q[row:row+1],k[row:row+1],v[row:row+1],attention,independent[row],0)
             torch.testing.assert_close(result[row:row+1], expected, rtol=0, atol=0)
+        # Different query lengths and nonzero histories must share two matmuls,
+        # with independent causal masks and no cross-request KV contamination.
+        q,k,v=[torch.randn(4,width,dtype=torch.bfloat16) for width in [32,16,16]]
+        packed.install([dict(request_id='a',positions=[4]),dict(request_id='b',positions=[6,7,8])])
+        with patch.object(torch,'matmul',wraps=torch.matmul) as operation:
+            result=packed_attention(q,k,v,attention,packed,0)
+            self.assertEqual(operation.call_count,2)
+        for row,identifier,start,end,positions in [(0,'a',0,1,[4]),(1,'b',1,4,[6,7,8])]:
+            independent[row].install([dict(request_id=identifier,positions=positions)])
+            expected=packed_attention(q[start:end],k[start:end],v[start:end],attention,independent[row],0)
+            torch.testing.assert_close(result[start:end],expected,rtol=0,atol=0)
         q,k,v = [torch.randn(5,width,dtype=torch.bfloat16) for width in [32,16,16]]
         full, chunked = BatchState(1), BatchState(1)
         full.install([dict(request_id='c',positions=list(range(5)))])

@@ -90,30 +90,349 @@
   "numerical_limitation": "Long greedy output differs with batch size; same prompt across different output budgets is not token-prefix invariant. Cause not fully isolated. Not a general model-quality acceptance.",
   "transport_diagnostics": "MCCL timed out when resuming a second wave. Current tested setting uses Socket, disables P2P and SHM, and fences native TP collectives on MUSA. Original services, drivers and containers preserved.",
   "performance": {
-    "status": "running_startup_verified",
-    "client": "Official vLLM bench serve v0.23.0 on existing .58 container",
-    "concurrencies": [
-      1,
-      4,
-      8
-    ],
-    "requests_per_case": 200,
-    "output_tokens": 64,
-    "num_warmups": 3,
-    "seed": 20261010,
-    "temperature": 0,
-    "ignore_eos": true,
-    "result_dir": "artifacts/baselines/cross-vendor-pp/performance-continuous",
-    "serial_control": "heterogeneous_compute/results/cross_vendor_performance.json",
-    "verified_at": "2026-10-14T08:49:31.315869+00:00",
-    "warmups_completed": 3,
-    "first_case_completed_requests_at_check": 5,
-    "estimated_remaining_minutes": [
-      60,
-      90
-    ],
-    "scope": "Startup only; no final TTFT/TPOT/throughput claims yet. Do not poll after normal startup."
+    "status": "complete",
+    "model": "Qwen3-14B",
+    "dtype": "BF16",
+    "tp": 2,
+    "pp": 2,
+    "total_devices": 4,
+    "executor": "custom cross-vendor continuous microbatch executor; native local TP; CPU-staged TCP PP",
+    "cases": {
+      "1": {
+        "completed": 200,
+        "failed": 0,
+        "duration": 2136.933146855794,
+        "request_throughput": 0.09359207156025108,
+        "output_throughput": 5.989892579856069,
+        "mean_ttft_ms": 3173.0977079295553,
+        "p95_ttft_ms": 8866.784447384998,
+        "p99_ttft_ms": 10284.040230126117,
+        "mean_tpot_ms": 119.1885669617766,
+        "p95_tpot_ms": 124.35082820731968,
+        "p99_tpot_ms": 126.36108884040917,
+        "mean_itl_ms": 119.18857116096963,
+        "p95_itl_ms": 127.60129193775354,
+        "p99_itl_ms": 133.214079355821,
+        "mean_e2el_ms": 10681.97742652148,
+        "p95_e2el_ms": 16293.043618486263,
+        "p99_e2el_ms": 18260.35571414977
+      },
+      "4": {
+        "completed": 200,
+        "failed": 0,
+        "duration": 1386.4083984703757,
+        "request_throughput": 0.1442576373748601,
+        "output_throughput": 9.232488791991047,
+        "mean_ttft_ms": 6011.868698524777,
+        "p95_ttft_ms": 14765.511477645476,
+        "p99_ttft_ms": 19243.54097312779,
+        "mean_tpot_ms": 328.8374173701445,
+        "p95_tpot_ms": 485.01328678269465,
+        "p99_tpot_ms": 544.2348321102968,
+        "mean_itl_ms": 328.83742134175486,
+        "p95_itl_ms": 252.19842207152394,
+        "p99_itl_ms": 4770.736889848515,
+        "mean_e2el_ms": 26728.62599284388,
+        "p95_e2el_ms": 37593.92234873957,
+        "p99_e2el_ms": 42799.25478951539
+      },
+      "8": {
+        "completed": 200,
+        "failed": 0,
+        "duration": 1169.4266980090179,
+        "request_throughput": 0.17102397297796063,
+        "output_throughput": 10.94553427058948,
+        "mean_ttft_ms": 10097.262483672239,
+        "p95_ttft_ms": 24278.880574903433,
+        "p99_ttft_ms": 33638.06211516726,
+        "mean_tpot_ms": 555.1653158826946,
+        "p95_tpot_ms": 770.619302714199,
+        "p99_tpot_ms": 866.1731773603057,
+        "mean_itl_ms": 555.1653196823798,
+        "p95_itl_ms": 396.68968147598207,
+        "p99_itl_ms": 6861.704723942094,
+        "mean_e2el_ms": 45072.677384282,
+        "p95_e2el_ms": 58531.619025021784,
+        "p99_e2el_ms": 70345.81584704109
+      }
+    },
+    "raw_sha256": {
+      "1": "8ccf7421e60352e63cfc91b1a9cae7f2e5f6aa78719e9db1efb671e3fe288204",
+      "4": "9fe280ce6be67f36c029d35e892773db8a2bed288e142ef1d2608e66c571e99c",
+      "8": "7522d8ac4dc16a1aae78de6ba03b18df7a5099c15c9ab19157b72c0a510052b7"
+    },
+    "validation": "600/600 success; fixed 64 outputs; identical input lengths across cases; 52469 input tokens/case; throughput recomputed; percentile order checked",
+    "benchmark": "official vLLM bench serve 0.23.0; c1/4/8; 200 requests each; 3 warmups; seed20261010",
+    "quality_limit": "Prior functional acceptance matched 6/7 native text cases; batch invariance unresolved."
   },
   "raw_evidence": "artifacts/baselines/cross-vendor-pp/scheduled",
-  "cleanup": "No project copies or new environments/containers. Temporary local scripts were not created. Diagnostic runs retained in the task artifact directory for numerical/MCCL diagnosis; no unrelated resources deleted."
+  "cleanup": "No project copies or new environments/containers. Temporary local scripts were not created. Diagnostic runs retained in the task artifact directory for numerical/MCCL diagnosis; no unrelated resources deleted.",
+  "interpretation": "Continuous admission and stage overlap are functional, but this measured implementation is slower than retained serial control in every concurrency. No performance improvement claimed. CPU staging, collective fences and microbatch scheduling remain candidates, not isolated causes.",
+  "current_batched": {
+    "checked_at": "2026-10-14T11:06:44.439524+00:00",
+    "protocol_version": 3,
+    "config": {
+      "model": "Qwen/Qwen3-14B",
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "resource_limits_enabled": false,
+      "status": "batched_protocol_v3_acceptance_pending",
+      "model_inference_verified": true,
+      "master": "192.168.162.23",
+      "port": 29650,
+      "stages": [
+        {
+          "stage": 0,
+          "ssh_alias": "ascend910c-01",
+          "host": "192.168.162.23",
+          "container": "heteroserve-ascend",
+          "device": "npu",
+          "devices": [
+            0,
+            1
+          ],
+          "ranks": [
+            0,
+            1
+          ],
+          "planned_layers": [
+            0,
+            20
+          ],
+          "tp_backend": "hccl",
+          "env": {
+            "GLOO_SOCKET_IFNAME": "enp196s0f0",
+            "HCCL_HOST_SOCKET_PORT_RANGE": "60600-60631",
+            "HCCL_NPU_SOCKET_PORT_RANGE": "60700-60731",
+            "HCCL_IF_BASE_PORT": "60800",
+            "VLLM_USE_V1": "1",
+            "OMP_NUM_THREADS": "2"
+          }
+        },
+        {
+          "stage": 1,
+          "ssh_alias": "s5000-01",
+          "host": "192.168.162.97",
+          "container": "heteroserve-musa",
+          "device": "musa",
+          "devices": [
+            0,
+            1
+          ],
+          "ranks": [
+            2,
+            3
+          ],
+          "planned_layers": [
+            20,
+            40
+          ],
+          "tp_backend": "mccl",
+          "env": {
+            "GLOO_SOCKET_IFNAME": "ens18f0",
+            "VLLM_USE_V1": "0",
+            "OMP_NUM_THREADS": "2",
+            "MCCL_IB_DISABLE": "1",
+            "MCCL_NET": "Socket",
+            "MCCL_DEBUG": "WARN",
+            "MCCL_P2P_DISABLE": "1",
+            "MCCL_SHM_DISABLE": "1"
+          }
+        }
+      ],
+      "layer_interval": "start inclusive, end exclusive; actual vLLM PP layer allocation",
+      "pp_rank_pairs": [
+        [
+          0,
+          2
+        ],
+        [
+          1,
+          3
+        ]
+      ],
+      "probe": "heterogeneous_compute/probes/communication_probe.py",
+      "results": "artifacts/baselines/cross-vendor-pp/isolated-ports",
+      "next_requirement": "Batch-size numerical invariance and broader quality validation pending; native attention, graphs and performance tuning remain separate",
+      "execution": {
+        "model_path": "/models/Qwen3-14B",
+        "tp_port": 29661,
+        "pp_port": 29662,
+        "max_model_len": 2048,
+        "result_dir": "/workspace/artifacts/baselines/cross-vendor-pp/batched",
+        "requests": [
+          {
+            "id": "math-first",
+            "prompt": "2+3等于多少？只输出数字。",
+            "max_tokens": 8
+          },
+          {
+            "id": "capital",
+            "prompt": "法国的首都是哪里？只回答城市名。",
+            "max_tokens": 12
+          },
+          {
+            "id": "english",
+            "prompt": "What is 7 minus 4? Reply with only the digit.",
+            "max_tokens": 8
+          },
+          {
+            "id": "math-repeat",
+            "prompt": "2+3等于多少？只输出数字。",
+            "max_tokens": 8
+          },
+          {
+            "id": "explain",
+            "prompt": "请用一句话解释什么是流水线并行。",
+            "max_tokens": 32
+          },
+          {
+            "id": "sequence",
+            "prompt": "按顺序输出从1到10的整数，用逗号隔开，不要解释。",
+            "max_tokens": 32
+          },
+          {
+            "id": "context",
+            "prompt": "背景资料：今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。请忽略背景资料，只回答9加8的结果，输出数字。",
+            "max_tokens": 8
+          }
+        ],
+        "mode": "http",
+        "api_port": 18230,
+        "scope": "Custom vLLM-component executor; batched mixed attention and LM head; bounded asynchronous CPU-staged PP; native local TP",
+        "scheduler": "continuous",
+        "max_active_requests": 8,
+        "microbatch_size": 4,
+        "max_inflight_batches": 2,
+        "max_batch_tokens": 1024,
+        "prefill_chunk_tokens": 512
+      },
+      "validation": {
+        "references": {
+          "ascend": "http://127.0.0.1:18023",
+          "musa": "http://192.168.162.97:18097"
+        }
+      }
+    },
+    "source_sha256": {
+      "heterogeneous_compute/pipeline_execution.py": "35cc21f562bae63d389f4b2ab6d9bf9667240dbe88a825f80efaf61ffee96554",
+      "heterogeneous_compute/scheduling.py": "fc09962df77a191b50ea9a5bf0fe8a7328830c46dd087369de8e03010c2d7a8d"
+    },
+    "nodes": [
+      {
+        "ssh_alias": "ascend910c-01",
+        "container_id": "625ac9d102f508dfce62b401a0e77552b2d512f68bed6581f8d431fecb3e3c8b",
+        "image_id": "sha256:70867a256476880c4312ae5dc29b4343b06ae43f99886e15b2b78f5d2429c235",
+        "versions": {
+          "torch": "2.7.1+cpu",
+          "transformers": "4.57.1",
+          "vllm": "0.11.0+empty"
+        }
+      },
+      {
+        "ssh_alias": "s5000-01",
+        "container_id": "a725763f7114c94a7f113a162f27d421db6b611ed008e4690c36261114de1032",
+        "image_id": "sha256:34cb8777a848bc0689118801fc720c46906b45cfab6dba95d7010601ba60b1c1",
+        "versions": {
+          "transformers": "4.52.4",
+          "vllm": "0.9.3.dev0+ga5dd03c1e.d20260309.empty",
+          "torch": "2.5.0"
+        }
+      }
+    ],
+    "functional_passed": true,
+    "batch_invariance_passed": false,
+    "native_text_matched_cases": 6,
+    "native_text_cases": 7,
+    "unmatched_case_ids": [
+      "explain"
+    ],
+    "unit_tests": {
+      "local_total_passed": 15,
+      "pipeline_tests_passed_on_each_vendor_container": 12,
+      "scope": "mixed variable-length attention matches independent CPU math; two matmuls for entire mixed batch; KV ownership; protocol metadata and malformed tensor descriptors; scheduler/refill/cancellation"
+    },
+    "continuous": {
+      "passed": true,
+      "requests": 12,
+      "tp_lane_tokens_match": true,
+      "token_prefixes_match": true,
+      "native_64token_text_match": true,
+      "overlap": [
+        {
+          "lane": 0,
+          "clock_uncertainty_ms": 0.058947596698999405,
+          "clock_assumption": "Stable monotonic offset during this short acceptance; RTT uncertainty, drift not measured",
+          "overlapping_windows": 166,
+          "conservative_max_overlap_ms": 86.12056262791157,
+          "max_packed_batch_size": 4
+        },
+        {
+          "lane": 1,
+          "clock_uncertainty_ms": 0.054366886615753174,
+          "clock_assumption": "Stable monotonic offset during this short acceptance; RTT uncertainty, drift not measured",
+          "overlapping_windows": 167,
+          "conservative_max_overlap_ms": 86.65237482637167,
+          "max_packed_batch_size": 4
+        }
+      ],
+      "scope": "Stage execution window overlap, including dispatch and native TP; not a GPU kernel profiler",
+      "health_after": {
+        "ready": true,
+        "tp": 2,
+        "pp": 2,
+        "queue": 0,
+        "execution": "continuous",
+        "draining": false,
+        "completed": 20,
+        "active_requests": 0,
+        "inflight_batches": 0,
+        "kv_owners": 0,
+        "max_batch_size": 4,
+        "max_inflight_batches": 2,
+        "admitted_requests": 21,
+        "microbatches": 195,
+        "generated_tokens": 365
+      },
+      "refilled_before_all_requests_finished": true,
+      "max_observed_active": 8,
+      "max_observed_queued": 4,
+      "chunked_prefill_passed": true,
+      "chunked_prompt_tokens": 827,
+      "cancellation_passed": true,
+      "canceled_generated_tokens": 2,
+      "shorter_request_seconds": 3.223548112437129,
+      "longer_request_seconds": 15.532226457260549
+    },
+    "changes": [
+      "Protocol v3: batch/step/phase/request order; BF16 tensor dtype/shape/bytes; sampling and termination feedback validation",
+      "One batched attention calculation for prefill/decode/mixed; one batched LM head",
+      "Bounded asynchronous send and receive workers; separate copy streams; per-batch events and consumer record_stream",
+      "Native TP waits matching collective Work; no per-layer whole-device synchronize"
+    ],
+    "precision_scope": "BF16 TP2/PP2 Qwen3-14B greedy with separate KV owners. Custom vLLM-component executor; not native vLLM Engine or a FlagCX integration. CPU staging and portable padded reference attention remain.",
+    "performance": {
+      "status": "running_startup_verified",
+      "result_dir": "artifacts/baselines/cross-vendor-pp/performance-batched",
+      "requests_per_case": 200,
+      "concurrencies": [
+        1,
+        4,
+        8
+      ],
+      "output_tokens": 64,
+      "seed": 20261010,
+      "launcher_pid": 41901,
+      "startup_failure_fixed": "CRLF normalized; no official request case occurred in failed launcher; .gitattributes now enforces shell/config LF",
+      "current_case": "c1",
+      "warmups_completed": 3,
+      "observed_completed": 3,
+      "estimated_case_remaining_minutes": [
+        30,
+        45
+      ]
+    },
+    "cleanup": "No new containers/environments/project copies. Only previous owned executor ranks drained; existing native services and W4 experiment preserved. Source edits consolidated into existing modules; old valid baseline results retained."
+  }
 }

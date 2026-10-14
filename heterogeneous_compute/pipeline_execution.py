@@ -51,7 +51,7 @@ class TensorChannel:
                 raise ValueError('PP activations must be two-dimensional BF16')
             cpu = tensor.detach().cpu().contiguous()
             payload = cpu.view(torch.uint16).numpy().tobytes()
-            descriptors.append(dict(name=name, shape=list(cpu.shape), bytes=len(payload)))
+            descriptors.append(dict(name=name, shape=list(cpu.shape), dtype='bfloat16', bytes=len(payload)))
             payloads.append(payload)
         header = json.dumps(dict(version=self.VERSION, metadata=metadata,
                                  tensors=descriptors)).encode()
@@ -76,7 +76,7 @@ class TensorChannel:
             shape = desc['shape']
             size = desc['bytes']
             total += size
-            if (len(shape) != 2 or any(type(x) is not int or x <= 0 for x in shape)
+            if (desc.get('dtype') != 'bfloat16' or len(shape) != 2 or any(type(x) is not int or x <= 0 for x in shape)
                     or size != shape[0] * shape[1] * 2 or total > self.MAX_PAYLOAD
                     or desc['name'] in tensors):
                 raise ValueError('Invalid PP tensor descriptor')
@@ -85,19 +85,140 @@ class TensorChannel:
         return header['metadata'], tensors
 
 
+class AsyncTensorSender:
+    """Bounded FIFO transport worker; only batch events gate activation copies."""
+    def __init__(self, channel, device, trace, capacity=2):
+        self.channel, self.device, self.trace = channel, device, trace
+        self.queue = queue.Queue(maxsize=capacity)
+        self.error = None
+        self.thread = threading.Thread(target=self.run,daemon=True)
+        self.thread.start()
+
+    def send(self, metadata, tensors=None, events=None, started=None):
+        self.check()
+        while True:
+            try:
+                self.queue.put(None if metadata is None else (metadata,tensors,events,started),timeout=.1)
+                break
+            except queue.Full:
+                self.check()
+
+    def check(self):
+        if self.error is not None:
+            raise RuntimeError('Asynchronous PP transport failed') from self.error
+
+    def run(self):
+        try:
+            import torch
+            accelerator=getattr(torch,self.device.type)
+            accelerator.set_device(self.device)
+            stream=accelerator.Stream()
+            with torch.inference_mode():
+                while True:
+                    item=self.queue.get()
+                    if item is None:
+                        break
+                    metadata,tensors,events,started=item
+                    copied={}
+                    if tensors:
+                        with accelerator.stream(stream):
+                            stream.wait_event(events[1])
+                            copied={name:t.detach().to('cpu') for name,t in tensors.items()}
+                        # CPU reads only these copies; producer may enqueue next batch.
+                        stream.synchronize()
+                        self.trace.write(event='execution',batch_id=metadata['batch_id'],
+                            start=started,end=time.perf_counter(),
+                            device_ms=events[0].elapsed_time(events[1]),
+                            batch_size=len(metadata['segments']),
+                            tokens=sum(len(s['positions']) for s in metadata['segments']),
+                            scope='host execution window includes copy; device_ms is local device event time')
+                    sent=time.perf_counter()
+                    self.channel.send(metadata,copied)
+                    self.trace.write(event='transport_send',batch_id=metadata.get('batch_id'),
+                                     start=sent,end=time.perf_counter())
+        except Exception as error:
+            self.error=error
+            try:
+                self.channel.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def close(self):
+        if self.thread.is_alive() and self.error is None:
+            self.send(None)
+            # None metadata is the worker sentinel, not a protocol message.
+            self.thread.join(timeout=10)
+            if self.thread.is_alive():
+                self.channel.connection.shutdown(socket.SHUT_RDWR)
+                self.thread.join(timeout=5)
+                raise TimeoutError('PP transport did not drain')
+        self.check()
+
+
+class AsyncTensorReceiver:
+    """Prefetch ordered PP packets on a separate copy stream."""
+    def __init__(self,channel,device,capacity=2):
+        self.channel,self.device=channel,device
+        self.queue=queue.Queue(maxsize=capacity)
+        self.closing=False
+        self.thread=threading.Thread(target=self.run,daemon=True)
+        self.thread.start()
+
+    def publish(self,value):
+        while not self.closing:
+            try:
+                self.queue.put(value,timeout=.1)
+                return
+            except queue.Full:
+                pass
+
+    def run(self):
+        try:
+            import torch
+            accelerator=getattr(torch,self.device.type)
+            accelerator.set_device(self.device)
+            stream=accelerator.Stream()
+            with torch.inference_mode():
+                while not self.closing:
+                    packet,cpu=self.channel.receive('cpu',allow_idle=True)
+                    with accelerator.stream(stream):
+                        tensors={name:value.to(self.device) for name,value in cpu.items()}
+                        event=accelerator.Event()
+                        event.record()
+                    self.publish((packet,tensors,event))
+                    if packet['op']=='stop':
+                        break
+        except Exception as error:
+            self.publish(error)
+
+    def receive(self):
+        value=self.queue.get()
+        if isinstance(value,Exception):
+            raise value
+        packet,tensors,event=value
+        import torch
+        compute_stream=getattr(torch,self.device.type).current_stream()
+        compute_stream.wait_event(event)
+        for tensor in tensors.values():
+            tensor.record_stream(compute_stream)
+        return packet,tensors
+
+    def close(self):
+        self.closing=True
+        try:
+            self.channel.connection.shutdown(socket.SHUT_RD)
+        except OSError:
+            pass
+        self.thread.join(timeout=5)
+
+
 class ParallelGroup:
     """vLLM group interface: native TP stays local, PP is transport-managed."""
-    def __init__(self, rank, size, device, native=True, synchronize_collectives=False):
+    def __init__(self, rank, size, device, native=True):
         self.rank_in_group = rank
         self.world_size = size
         self.device = device
         self.native = native
-        self.synchronize_collectives = synchronize_collectives
-
-    def synchronize(self):
-        if self.synchronize_collectives:
-            import torch
-            getattr(torch, self.device.type).synchronize()
 
     @property
     def is_first_rank(self):
@@ -109,16 +230,16 @@ class ParallelGroup:
 
     def all_reduce(self, tensor):
         import torch.distributed as dist
-        dist.all_reduce(tensor)
-        self.synchronize()
+        work=dist.all_reduce(tensor,async_op=True)
+        work.wait()
         return tensor
 
     def all_gather(self, tensor, dim=-1):
         import torch
         import torch.distributed as dist
         pieces = [torch.empty_like(tensor) for _ in range(self.world_size)]
-        dist.all_gather(pieces, tensor)
-        self.synchronize()
+        work=dist.all_gather(pieces,tensor,async_op=True)
+        work.wait()
         return torch.cat(pieces, dim=dim)
 
 
@@ -146,23 +267,22 @@ def packed_attention(q, k, v, attention, state, index):
         owner.caches[index] = (kk, vv)
         pieces.append((queries[:, start:start+count], kk.repeat_interleave(ratio, 0),
                        vv.repeat_interleave(ratio, 0), past))
-    if len(pieces) > 1 and all(s['length'] == 1 for s in state.segments):
-        maximum = max(kk.shape[1] for _,kk,_,_ in pieces)
-        lengths = torch.tensor([kk.shape[1] for _,kk,_,_ in pieces], device=q.device)
-        qq = torch.stack([p[0] for p in pieces])
-        kk = torch.stack([torch.nn.functional.pad(p[1], (0, 0, 0, maximum-p[1].shape[1])) for p in pieces])
-        vv = torch.stack([torch.nn.functional.pad(p[2], (0, 0, 0, maximum-p[2].shape[1])) for p in pieces])
-        scores = torch.matmul(qq.float(), kk.float().transpose(-1, -2)) * attention.scaling
-        mask = torch.arange(maximum, device=q.device)[None, :] >= lengths[:, None]
-        scores.masked_fill_(mask[:, None, None, :], float('-inf'))
-        return torch.matmul(scores.softmax(-1), vv.float()).to(q.dtype).reshape(n, -1)
-    outputs = []
-    for qq,kk,vv,past in pieces:
-        scores = torch.matmul(qq.float(), kk.float().transpose(1, 2)) * attention.scaling
-        mask = torch.arange(kk.shape[1], device=q.device)[None, :] > (past+torch.arange(qq.shape[1], device=q.device)[:, None])
-        scores.masked_fill_(mask[None, :, :], float('-inf'))
-        outputs.append(torch.matmul(scores.softmax(-1), vv.float()).to(q.dtype).transpose(0, 1).reshape(qq.shape[1], -1))
-    return torch.cat(outputs, dim=0)
+    # One batched attention calculation for prefill, decode and mixed phases.
+    # Padding preserves independent KV owners; causal positions include past KV.
+    maximum_k = max(kk.shape[1] for _,kk,_,_ in pieces)
+    maximum_q = max(qq.shape[1] for qq,_,_,_ in pieces)
+    qq = torch.stack([torch.nn.functional.pad(p[0], (0,0,0,maximum_q-p[0].shape[1])) for p in pieces])
+    kk = torch.stack([torch.nn.functional.pad(p[1], (0,0,0,maximum_k-p[1].shape[1])) for p in pieces])
+    vv = torch.stack([torch.nn.functional.pad(p[2], (0,0,0,maximum_k-p[2].shape[1])) for p in pieces])
+    lengths = torch.tensor([p[1].shape[1] for p in pieces],device=q.device)
+    past = torch.tensor([p[3] for p in pieces],device=q.device)
+    query_positions = past[:,None]+torch.arange(maximum_q,device=q.device)[None,:]
+    key_positions = torch.arange(maximum_k,device=q.device)[None,None,:]
+    mask = (key_positions>=lengths[:,None,None]) | (key_positions>query_positions[:,:,None])
+    scores = torch.matmul(qq.float(),kk.float().transpose(-1,-2))*attention.scaling
+    scores.masked_fill_(mask[:,None,:,:],float('-inf'))
+    output = torch.matmul(scores.softmax(-1),vv.float()).to(q.dtype).transpose(1,2)
+    return torch.cat([output[row,:p[0].shape[1]].reshape(p[0].shape[1],-1) for row,p in enumerate(pieces)],dim=0)
 
 
 def load_stage(config, stage, lane):
@@ -184,8 +304,7 @@ def load_stage(config, stage, lane):
     cpu_group = dist.new_group([0, 1], backend='gloo',
                                timeout=datetime.timedelta(days=365))
     from vllm.distributed import parallel_state
-    parallel_state._TP = ParallelGroup(lane, 2, device,
-                                      synchronize_collectives=spec.get('tp_synchronize_collectives', False))
+    parallel_state._TP = ParallelGroup(lane, 2, device)
     parallel_state._PP = ParallelGroup(stage, 2, device, native=False)
     from vllm.engine.arg_utils import EngineArgs
     from vllm.config import set_current_vllm_config
@@ -261,7 +380,7 @@ def open_channel(config, stage, lane):
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(1)
-    version = 2 if config['execution'].get('scheduler') == 'continuous' else 1
+    version = 3 if config['execution'].get('scheduler') == 'continuous' else 1
     return TensorChannel(connection, version)
 
 
@@ -640,6 +759,22 @@ class FeedbackReceiver:
                 if tensors or response.get('op') not in {'completed_batch', 'released'}:
                     raise ValueError('Invalid PP feedback')
                 if response['op'] == 'completed_batch':
+                    with self.lock:
+                        segments=self.pending[response['batch_id']]
+                        if (response.get('step_id')!=response['batch_id'] or
+                                response.get('request_order')!=[s['request_id'] for s in segments] or
+                                set(response.get('results',{}))!={s['request_id'] for s in segments}):
+                            raise ValueError('Stale or reordered PP completion')
+                        for segment in segments:
+                            identifier=segment['request_id']
+                            result=response['results'][identifier]
+                            item=self.requests[identifier]['item']
+                            token=response['samples'][identifier]
+                            finished=token is not None and (segment['step']+1>=item['max_tokens'] or
+                                (not item.get('ignore_eos',False) and token in self.eos_ids))
+                            if (result['step_id']!=segment['step_id'] or result['next_token']!=token or
+                                    result['finished']!=finished or result['sampling']!={'temperature':0}):
+                                raise ValueError('Invalid PP sampling/termination feedback')
                     self.emit(response)
                     self.trace.write(event='peer_execution', **response)
                 self.queue.put(response)
@@ -670,13 +805,14 @@ def execute_continuous(config, stage, lane):
     calibrate_channel(channel, stage, trace)
     accelerator = getattr(torch, config['stages'][stage]['device'])
     directory = Path(config['execution']['result_dir'])
-    receiver, server = None, None
+    receiver, server, sender, incoming = None, None, None, None
     try:
         with torch.inference_mode():
             if stage == 1:
+                incoming=AsyncTensorReceiver(channel,device,capacity=config['execution'].get('max_inflight_batches',2))
                 expected_batch = 0
                 while True:
-                    packet, tensors = channel.receive(device, allow_idle=True)
+                    packet, tensors = incoming.receive()
                     if packet['op'] == 'stop':
                         if state.requests:
                             raise ValueError('Cannot stop with live KV owners')
@@ -686,16 +822,26 @@ def execute_continuous(config, stage, lane):
                         trace.write(event='release', request_id=packet['request_id'], kv_owners=len(state.requests))
                         channel.send(dict(op='released', request_id=packet['request_id']))
                         continue
-                    if packet['op'] != 'forward_batch' or packet['batch_id'] != expected_batch:
+                    if (packet['op'] != 'forward_batch' or packet['batch_id'] != expected_batch
+                            or packet.get('step_id') != expected_batch):
                         raise ValueError('Invalid or out-of-order PP microbatch')
                     expected_batch += 1
                     segments = packet['segments']
+                    if packet.get('request_order') != [s['request_id'] for s in segments]:
+                        raise ValueError('PP request order mismatch')
+                    for segment in segments:
+                        if (segment['length']!=len(segment['positions']) or segment['past']!=segment['positions'][0]
+                                or segment['step_id']!=segment['step'] or segment['phase'] not in {'prefill','decode'}
+                                or segment['sampling']!={'temperature':0}):
+                            raise ValueError('Invalid PP execution metadata')
                     positions = [p for s in segments for p in s['positions']]
                     expected = (len(positions), model.config.hidden_size)
                     if set(tensors) != {'hidden_states', 'residual'} or any(tuple(t.shape) != expected for t in tensors.values()):
                         raise ValueError('PP activations disagree with packed positions')
                     state.install(segments)
                     started = time.perf_counter()
+                    begin,end=accelerator.Event(enable_timing=True),accelerator.Event(enable_timing=True)
+                    begin.record()
                     hidden = model(None, torch.tensor(positions, dtype=torch.int64, device=device), IntermediateTensors(tensors))
                     offset, sample_rows, owners = 0, [], []
                     samples = {s['request_id']:None for s in segments}
@@ -705,17 +851,21 @@ def execute_continuous(config, stage, lane):
                             sample_rows.append(offset-1)
                             owners.append(segment['request_id'])
                     if sample_rows:
-                        # Keep the serial control's BF16 head shape; decoder math is batched.
-                        logits = torch.cat([torch.nn.functional.linear(hidden[row:row+1], model.lm_head.weight)
-                                            for row in sample_rows], dim=0).float()
+                        logits = torch.nn.functional.linear(hidden[sample_rows], model.lm_head.weight).float()
                         from vllm.distributed import get_tp_group
                         logits = get_tp_group().all_gather(logits)[:, :model.config.vocab_size]
                         samples.update(zip(owners, logits.argmax(-1).tolist()))
-                    accelerator.synchronize()
+                    end.record()
+                    end.synchronize()
                     ended = time.perf_counter()
                     trace.write(event='execution', batch_id=packet['batch_id'], start=started, end=ended,
-                                batch_size=len(segments), tokens=len(positions))
-                    channel.send(dict(op='completed_batch', batch_id=packet['batch_id'], samples=samples,
+                                device_ms=begin.elapsed_time(end),batch_size=len(segments), tokens=len(positions))
+                    outcomes={s['request_id']:dict(next_token=samples[s['request_id']],step_id=s['step_id'],
+                        finished=samples[s['request_id']] is not None and (s['step_id']+1>=s['max_tokens']
+                            or (not s['ignore_eos'] and samples[s['request_id']] in {151643,151645})),
+                        sampling=s['sampling']) for s in segments}
+                    channel.send(dict(op='completed_batch', batch_id=packet['batch_id'],step_id=packet['step_id'],
+                                      request_order=packet['request_order'],samples=samples,results=outcomes,
                                       start=started, end=ended))
             else:
                 from transformers import AutoTokenizer
@@ -735,8 +885,10 @@ def execute_continuous(config, stage, lane):
                     lifecycle['draining'] = True
                 receiver = FeedbackReceiver(channel, tokenizer, eos_ids, trace)
                 receiver.thread.start()
+                sender = AsyncTensorSender(channel,device,trace,capacity=settings.get('max_inflight_batches',2))
                 starts, rows = {}, []
                 while True:
+                    sender.check()
                     command, future = None, None
                     if lane == 0:
                         while command is None:
@@ -786,13 +938,13 @@ def execute_continuous(config, stage, lane):
                         tokens = [t for s in command['segments'] for t in s['input_token_ids']]
                         started = time.perf_counter()
                         starts[command['batch_id']] = started
+                        begin,end = accelerator.Event(enable_timing=True),accelerator.Event(enable_timing=True)
+                        begin.record()
                         intermediate = model(torch.tensor(tokens, dtype=torch.int64, device=device),
                                              torch.tensor(positions, dtype=torch.int64, device=device))
-                        accelerator.synchronize()
-                        ended = time.perf_counter()
-                        trace.write(event='execution', batch_id=command['batch_id'], start=started, end=ended,
-                                    batch_size=len(command['segments']), tokens=len(positions))
-                        channel.send(command, dict(hidden_states=intermediate['hidden_states'], residual=intermediate['residual']))
+                        end.record()
+                        sender.send(command, dict(hidden_states=intermediate['hidden_states'], residual=intermediate['residual']),
+                                    events=(begin,end),started=started)
                     elif operation == 'feedback':
                         response = command['response']
                         if lane != 0:
@@ -808,7 +960,7 @@ def execute_continuous(config, stage, lane):
                             finished = scheduler.complete(response['batch_id'], response['samples'], elapsed, eos_ids,
                                                           canceled_ids=command['canceled'])
                             for identifier in finished:
-                                channel.send(dict(op='release', request_id=identifier))
+                                sender.send(dict(op='release', request_id=identifier))
                         else:
                             identifier = response['request_id']
                             state.release(identifier)
@@ -829,7 +981,7 @@ def execute_continuous(config, stage, lane):
                             print(json.dumps(dict(event='request_complete', id=identifier, tokens=len(request.output),
                                                   remaining_kv_owners=len(state.requests))), flush=True)
                     elif operation == 'stop':
-                        channel.send(command)
+                        sender.send(command)
                         break
                     else:
                         raise ValueError('Unknown scheduler operation')
@@ -838,6 +990,14 @@ def execute_continuous(config, stage, lane):
                 (directory/f'stage0-lane{lane}.json').write_text(json.dumps(dict(stage=0, lane=lane, scheduler='continuous',
                     stats=scheduler.stats, requests=rows, caches_after_release=len(state.requests)), ensure_ascii=False, indent=2))
     finally:
+        transport_error=None
+        if incoming is not None:
+            incoming.close()
+        if sender is not None:
+            try:
+                sender.close()
+            except Exception as error:
+                transport_error=error
         if stage == 0 and receiver is not None:
             lifecycle['draining'] = True
             # Wake HTTP waiters on peer failure; never leave token-event readers hanging.
@@ -857,6 +1017,8 @@ def execute_continuous(config, stage, lane):
                 server.should_exit = True
             receiver.close()
         channel.connection.close()
+        if transport_error is not None:
+            raise transport_error
 
 
 def execute(config, stage, lane):

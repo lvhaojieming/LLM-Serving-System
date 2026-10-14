@@ -4,7 +4,7 @@
   "tp": 2,
   "pp": 2,
   "resource_limits_enabled": false,
-  "status": "functional_acceptance_passed_batch_invariance_pending",
+  "status": "batched_protocol_v3_acceptance_pending",
   "model_inference_verified": true,
   "master": "192.168.162.23",
   "port": 29650,
@@ -65,8 +65,7 @@
         "MCCL_DEBUG": "WARN",
         "MCCL_P2P_DISABLE": "1",
         "MCCL_SHM_DISABLE": "1"
-      },
-      "tp_synchronize_collectives": true
+      }
     }
   ],
   "layer_interval": "start inclusive, end exclusive; actual vLLM PP layer allocation",
@@ -88,7 +87,7 @@
     "tp_port": 29661,
     "pp_port": 29662,
     "max_model_len": 2048,
-    "result_dir": "/workspace/artifacts/baselines/cross-vendor-pp/scheduled",
+    "result_dir": "/workspace/artifacts/baselines/cross-vendor-pp/batched",
     "requests": [
       {
         "id": "math-first",
@@ -128,7 +127,7 @@
     ],
     "mode": "http",
     "api_port": 18230,
-    "scope": "vLLM model components, native local TP, CPU-staged PP, reference packed attention, continuous admission and two in-flight microbatches",
+    "scope": "Custom vLLM-component executor; batched mixed attention and LM head; bounded asynchronous CPU-staged PP; native local TP",
     "scheduler": "continuous",
     "max_active_requests": 8,
     "microbatch_size": 4,

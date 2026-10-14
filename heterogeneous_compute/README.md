@@ -128,14 +128,15 @@ with the final verification report. Existing uncommitted project work is preserv
 总 `passed` 标为 true。严格验收失败不会伪装成全部通过。
 
 已观察到批大小相关的长回答差异：原来的七条对照请求中六条文本一致，
-长解释在批处理时出现 token 分歧，单请求执行可匹配原基线。逐行 LM head
-未消除这个差异；它仅保留原参考执行器的头部矩阵形状。不同批大小的
+长解释在批处理时出现 token 分歧，单请求执行可匹配原基线。旧逐行 LM head
+未消除这个差异；当前改为整批 LM head。不同批大小的
 逐 token 一致性与更广泛的质量评估仍未通过。vLLM 官方也为独立于批大小
 的确定性提供专门的 [batch invariance 支持](https://docs.vllm.ai/en/stable/features/batch_invariance/)，
 这里没有安装或宣称适配这些内核，也不能仅凭文档认定本次差异的确切来源。
 
 摩尔原生 TP 曾在恢复下一轮请求时发生 MCCL 超时，保留了诊断。当前此执行器
-使用配置驱动的 Socket / 禁用 P2P、SHM，并在本地 TP collective 后同步设备；
+使用配置驱动的 Socket / 禁用 P2P、SHM。当前本地 TP 等待对应 collective 的
+`Work.wait()`，不再在每层后执行整设备同步；
 这些设置仅作用于本次执行进程，不修改驱动、原生服务或容器。它们影响性能，
 正式 benchmark 必须随结果保留这些配置。质量一致性和性能均独立于功能验收。
 
@@ -144,7 +145,40 @@ with the final verification report. Existing uncommitted project work is preserv
 827-token 长提示词分块、客户端断开后释放 KV、空闲后再次并发请求均通过。
 记录到两个阶段不同微批次的执行窗口重叠；短验收使用 RTT 校准的时钟偏移。
 七条原生文本对照为 6/7，批大小的逐 token 一致性未通过；因此严格总验收
-`passed=false`，功能项 `functional_passed=true`。正式速度结果须等待官方压测完成。
+`passed=false`，功能项 `functional_passed=true`。旧连续调度官方测速已完成
+600/600，但各并发吞吐均低于旧串行控制组，不能认定性能优化成功。
+
+## 批量计算和异步 PP 协议
+
+现有执行器扩展协议版本 3，不复制工程或改厂商 site-packages。前向包包含：
+
+| 内容 | 字段 |
+| --- | --- |
+| 批次 | `batch_id`、`step_id`、`phase`（prefill/decode/mixed） |
+| 请求 | `request_order`、每个 segment 的 request_id、step_id、phase、positions、length、past |
+| 采样 | `sample_token`、max_tokens、ignore_eos、sampling.temperature=0 |
+| 张量 | name、shape、dtype=bfloat16、bytes；hidden_states 与 residual 正文 |
+| 返回 | batch_id、step_id、request_order、每请求 next_token、finished、sampling |
+
+批次 step_id 是单调派发序号；请求 step_id 是已生成 token 数，分块 prefill
+期间可以不变，依靠 batch_id 和连续 positions 区分。接收端检查 FIFO 顺序、
+布局、长度和采样配置；返回端检查 token、结束状态和请求所有权。
+
+Prefill、Decode、混合 attention 使用独立 KV 的 padding 与因果 mask，一次
+批量 QK 和 AV 计算；LM head 一次批量矩阵计算。不同长度和已有历史 KV 的
+混合请求通过独立请求数学对照与两次 matmul 调用数检查。padding 会增加计算
+与内存，当前仍是可移植参考 attention，尚未等同于厂商原生 paged/fused 内核。
+
+stage0 使用有界 FIFO 后台发送和专用复制 stream，主线程仅记录本批设备事件。
+stage1 后台预取网络包并在独立 stream 复制，计算 stream 等待输入事件。
+本地 TP 使用对应通信 Work.wait 保持依赖，不能删除必要的数据就绪关系。
+CPU staging 仍保留，未宣称 RDMA 或设备直连。设备事件记录本地执行耗时；
+跨节点时钟校准的 host 窗口仍包含复制与等待，不能当作 GPU kernel timeline。
+
+新版功能与测速产物分别在 `artifacts/baselines/cross-vendor-pp/batched/` 和
+`artifacts/baselines/cross-vendor-pp/performance-batched/`；旧结果保留用于对照。
+当前目标是已请求的 greedy Qwen3-14B TP2/PP2；随机采样、beam search、
+其他模型/拓扑和通用跨厂商原生 vLLM Engine 尚未实现或验证。
 
 ## 独立验收入口
 
