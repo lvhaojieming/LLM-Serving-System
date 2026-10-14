@@ -1,0 +1,58 @@
+{
+  "checked_at": "2026-10-14T05:42:57.127252+00:00",
+  "model": "Qwen3-14B BF16",
+  "tp": 2,
+  "pp": 2,
+  "devices": 4,
+  "stages": [
+    "Ascend .23",
+    "MUSA .97"
+  ],
+  "scope": "Custom cross-vendor reference executor with serial FIFO; official vLLM v0.23.0 bench serve client. Not native vLLM engine throughput.",
+  "requests_per_case": 200,
+  "output_tokens": 64,
+  "cases": {
+    "1": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 1068.8151492681354,
+      "request_throughput": 0.18712309620325718,
+      "output_throughput": 11.97587815700846,
+      "total_token_throughput": 61.06668683045197,
+      "mean_ttft_ms": 225.09895401773974,
+      "mean_tpot_ms": 81.23583197686081,
+      "p95_ttft_ms": 428.14113022759545,
+      "p99_ttft_ms": 493.63749484065903,
+      "p95_tpot_ms": 85.55678622316687,
+      "p99_tpot_ms": 88.2337061755566
+    },
+    "4": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 1063.501969723031,
+      "request_throughput": 0.18805794976767767,
+      "output_throughput": 12.035708785131371,
+      "total_token_throughput": 61.37177161693277,
+      "mean_ttft_ms": 16016.995829541702,
+      "mean_tpot_ms": 80.88323605379888,
+      "p95_ttft_ms": 16845.1420688536,
+      "p99_ttft_ms": 17258.845835677348,
+      "p95_tpot_ms": 85.15581748123087,
+      "p99_tpot_ms": 87.00115584383998
+    },
+    "8": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 1069.2356351618655,
+      "request_throughput": 0.18704950847408217,
+      "output_throughput": 11.971168542341259,
+      "total_token_throughput": 61.04267184297435,
+      "mean_ttft_ms": 36923.701250257436,
+      "mean_tpot_ms": 81.32760590748003,
+      "p95_ttft_ms": 39790.00302134082,
+      "p99_ttft_ms": 40291.93452395499,
+      "p95_tpot_ms": 86.37433937780322,
+      "p99_tpot_ms": 89.7437811810671
+    }
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-10-14T05:24:53.764142+00:00",
+  "checked_at": "2026-10-14T05:42:57.127252+00:00",
   "model": "Qwen3-14B",
   "calibration": {
     "sha256": "e778cd5ada5fc19227ac80591479a505eab4dd03b858098d361e396e9b9ca916",
@@ -27,9 +27,12 @@
     "inference_validation": "pending"
   },
   "gptq": {
-    "status": "quantization_running",
+    "status": "failed",
     "format": "standard GPTQ legacy",
-    "inference_validation": "pending"
+    "inference_validation": "pending",
+    "failure_stage": "layer 0 mlp.down_proj",
+    "error": "NPU AICPU Qr execution exception, code 507018",
+    "artifact_ready": false
   },
   "scope": "Weight generation only; multi-vendor loading, quality and speed acceptance remain pending."
 }
