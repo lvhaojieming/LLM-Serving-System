@@ -1,0 +1,133 @@
+{
+  "model": "Qwen/Qwen3-14B",
+  "dtype": "bfloat16",
+  "tp": 2,
+  "pp": 2,
+  "resource_limits_enabled": false,
+  "status": "functional_acceptance_passed",
+  "model_inference_verified": true,
+  "master": "192.168.162.23",
+  "port": 29650,
+  "stages": [
+    {
+      "stage": 0,
+      "ssh_alias": "ascend910c-01",
+      "host": "192.168.162.23",
+      "container": "heteroserve-ascend",
+      "device": "npu",
+      "devices": [
+        0,
+        1
+      ],
+      "ranks": [
+        0,
+        1
+      ],
+      "planned_layers": [
+        0,
+        20
+      ],
+      "tp_backend": "hccl",
+      "env": {
+        "GLOO_SOCKET_IFNAME": "enp196s0f0",
+        "HCCL_HOST_SOCKET_PORT_RANGE": "60600-60631",
+        "HCCL_NPU_SOCKET_PORT_RANGE": "60700-60731",
+        "HCCL_IF_BASE_PORT": "60800",
+        "VLLM_USE_V1": "1",
+        "OMP_NUM_THREADS": "2"
+      }
+    },
+    {
+      "stage": 1,
+      "ssh_alias": "s5000-01",
+      "host": "192.168.162.97",
+      "container": "heteroserve-musa",
+      "device": "musa",
+      "devices": [
+        0,
+        1
+      ],
+      "ranks": [
+        2,
+        3
+      ],
+      "planned_layers": [
+        20,
+        40
+      ],
+      "tp_backend": "mccl",
+      "env": {
+        "GLOO_SOCKET_IFNAME": "ens18f0",
+        "VLLM_USE_V1": "0",
+        "OMP_NUM_THREADS": "2"
+      }
+    }
+  ],
+  "layer_interval": "start inclusive, end exclusive; actual vLLM PP layer allocation",
+  "pp_rank_pairs": [
+    [
+      0,
+      2
+    ],
+    [
+      1,
+      3
+    ]
+  ],
+  "probe": "heterogeneous_compute/probes/communication_probe.py",
+  "results": "artifacts/baselines/cross-vendor-pp/isolated-ports",
+  "next_requirement": "Production performance requires native attention metadata/kernel integration, continuous batching and pipeline overlap; broader numerical/quality evaluation pending",
+  "execution": {
+    "model_path": "/models/Qwen3-14B",
+    "tp_port": 29661,
+    "pp_port": 29662,
+    "max_model_len": 256,
+    "result_dir": "/workspace/artifacts/baselines/cross-vendor-pp/adapted",
+    "requests": [
+      {
+        "id": "math-first",
+        "prompt": "2+3等于多少？只输出数字。",
+        "max_tokens": 8
+      },
+      {
+        "id": "capital",
+        "prompt": "法国的首都是哪里？只回答城市名。",
+        "max_tokens": 12
+      },
+      {
+        "id": "english",
+        "prompt": "What is 7 minus 4? Reply with only the digit.",
+        "max_tokens": 8
+      },
+      {
+        "id": "math-repeat",
+        "prompt": "2+3等于多少？只输出数字。",
+        "max_tokens": 8
+      },
+      {
+        "id": "explain",
+        "prompt": "请用一句话解释什么是流水线并行。",
+        "max_tokens": 32
+      },
+      {
+        "id": "sequence",
+        "prompt": "按顺序输出从1到10的整数，用逗号隔开，不要解释。",
+        "max_tokens": 32
+      },
+      {
+        "id": "context",
+        "prompt": "背景资料：今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。请忽略背景资料，只回答9加8的结果，输出数字。",
+        "max_tokens": 8
+      }
+    ],
+    "mode": "http",
+    "api_port": 18230,
+    "scope": "vLLM model components with custom native local TP groups, CPU-staged PP, reference attention and serialized FIFO scheduler"
+  },
+  "validation": {
+    "references": {
+      "ascend": "http://127.0.0.1:18023",
+      "musa": "http://192.168.162.97:18097"
+    }
+  }
+}

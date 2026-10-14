@@ -1,0 +1,8 @@
+export CUDA_VISIBLE_DEVICES=4,5
+export IX_VISIBLE_DEVICES=4,5
+export NCCL_CUMEM_ENABLE=0
+export NCCL_IB_DISABLE=1
+export NCCL_DEBUG=INFO
+export VLLM_NCCL_SO_PATH=/usr/local/corex-4.5.0.20260619/lib64/libixsysnccl.so
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1

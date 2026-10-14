@@ -1,0 +1,69 @@
+{
+  "defaults": "defaults.json",
+  "pool": "awq-ascend910b-vllm",
+  "expert": "awq",
+  "router_replicas": 0,
+  "weights_manifest_sha256": "70a289a9eb8ed35d8a62aa466738c2cd5906df68df844c7731c98840230654f9",
+  "router_nodes": [
+    "heteroserve-lab-209",
+    "heteroserve-lab-210"
+  ],
+  "instances": {
+    "awq-01": {
+      "node": "heteroserve-lab-209",
+      "enabled": false,
+      "parallelism": {
+        "tp": 1,
+        "pp": 1
+      },
+      "engine": {}
+    },
+    "awq-02": {
+      "node": "heteroserve-lab-210",
+      "enabled": false,
+      "parallelism": {
+        "tp": 1,
+        "pp": 1
+      },
+      "engine": {}
+    },
+    "awq-03": {
+      "node": "heteroserve-lab-211",
+      "enabled": false,
+      "parallelism": {
+        "tp": 1,
+        "pp": 1
+      },
+      "engine": {}
+    },
+    "awq-04": {
+      "node": "heteroserve-lab-216",
+      "enabled": false,
+      "parallelism": {
+        "tp": 1,
+        "pp": 1
+      },
+      "engine": {}
+    }
+  },
+  "host_execution": {
+    "task_queue_enable": 2,
+    "cpu_affinity_conf": 0,
+    "executor": "auto"
+  },
+  "execution_optimizations": {
+    "native_int4_fast_path": true,
+    "native_int4_script_mlp": true,
+    "ascend_pp_cache_views": true,
+    "qwen3_fused_qknorm": true,
+    "qknorm_mode": "preserve_rounding",
+    "qknorm_verify_calls": 0
+  },
+  "requests_per_worker": 16,
+  "runtime": {
+    "model_parameters": {
+      "max_num_seqs": 16,
+      "max_num_batched_tokens": 4096
+    }
+  }
+}

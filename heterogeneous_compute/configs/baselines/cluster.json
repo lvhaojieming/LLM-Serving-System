@@ -1,0 +1,37 @@
+{
+  "model": "Qwen/Qwen3-14B",
+  "precision": "BF16",
+  "config": "heterogeneous_compute/configs/baselines/vllm.yaml",
+  "resource_limits_enabled": false,
+  "nodes": {
+    "ascend": {
+      "ssh_alias": "ascend910c-01",
+      "host": "172.22.162.23",
+      "container": "heteroserve-ascend",
+      "image": "quay.io/ascend/vllm-ascend:v0.11.0-a3",
+      "devices": [0, 1],
+      "port": 18023,
+      "engine_args": ["--block-size", "128"],
+      "env": {"ASCEND_RT_VISIBLE_DEVICES": "0,1"}
+    },
+    "musa": {
+      "ssh_alias": "s5000-01",
+      "host": "172.22.162.97",
+      "container": "heteroserve-musa",
+      "image": "registry.mthreads.com/public/sqt-vllm-train-musa-bench:4.3.5_kuae2.1_hygon_ubuntu",
+      "devices": [0, 1],
+      "port": 18097,
+      "engine_args": ["--block-size", "32"],
+      "env": {"MUSA_VISIBLE_DEVICES": "0,1", "MTHREADS_VISIBLE_DEVICES": "0,1", "VLLM_USE_V1": "0"}
+    },
+    "hygon": {
+      "ssh_alias": "bw1100-02",
+      "host": "172.22.162.252",
+      "container": "heteroserve-hygon",
+      "image": "harbor.sourcefind.cn:5443/dcu/admin/base/vllm:0.18.1-ubuntu22.04-dtk26.04-py3.10",
+      "devices": [0, 1],
+      "port": 18252,
+      "env": {"HIP_VISIBLE_DEVICES": "0,1", "ROCR_VISIBLE_DEVICES": "0,1"}
+    }
+  }
+}

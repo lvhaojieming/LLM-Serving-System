@@ -1,0 +1,90 @@
+{
+  "date": "2026-10-14",
+  "tp": 2,
+  "pp": 2,
+  "layers": {
+    "ascend": [
+      0,
+      20
+    ],
+    "musa": [
+      20,
+      40
+    ]
+  },
+  "model": "Qwen3-14B BF16",
+  "http": "http://192.168.162.23:18230/v1",
+  "functional_requests": 7,
+  "native_text_matches": {
+    "ascend": 7,
+    "musa": 7
+  },
+  "invalid_cases_rejected": 6,
+  "tp_lane_token_ids_identical": true,
+  "request_caches_released": true,
+  "baseline_services_accepted": true,
+  "production_performance_verified": false,
+  "scope": "vLLM component executor; CPU-staged PP; reference eager attention; serialized FIFO; no continuous batching/SSE",
+  "sources": {
+    "heterogeneous_compute\\pipeline_execution.py": "93c9c5d0bfd6cc449a5514de0909aa585e00784ea6cd3536f70b17a8db0213bf",
+    "heterogeneous_compute\\manage.py": "d432ac5ff03f98f3e5394342740bbdf882638686f3ca74e285c6e816bd8079bf",
+    "heterogeneous_compute\\validate.py": "7698f391c209399833718436b93cb99a2b65e9ec3b821a4f78bffdacd63ce1aa",
+    "heterogeneous_compute\\configs\\ascend_musa.json": "4586259935879e851c92eb9cad3b81f2ca037b740dcfb583ae7432c6dbf47ddf"
+  },
+  "base_commit": "977d541b63303d2d395806d26ddfa54daa41d755",
+  "post_190_second_idle_request_accepted": true,
+  "lifecycle": {
+    "graceful_drain_four_rank_exit": true,
+    "existing_container_restart": true,
+    "duplicate_start_rejected": true
+  },
+  "layout": "homogeneous / heterogeneous_compute / shared",
+  "reorganization_validation": {
+    "homogeneous_tests_passed": 238,
+    "heterogeneous_unit_tests_passed": 2,
+    "original_source_files_preserved": 85,
+    "real_model_revalidation": "passed: 7/7 references on both vendors, 6 rejected requests"
+  },
+  "local_test_dependencies": {
+    "pytest": "8.4.2",
+    "PyYAML": "6.0.3",
+    "jsonschema": "4.26.0",
+    "fastapi": "0.143.0",
+    "httpx": "0.28.1",
+    "uvicorn": "0.54.0"
+  },
+  "environments": {
+    "ascend": {
+      "image": "quay.io/ascend/vllm-ascend:v0.11.0-a3",
+      "image_id": "sha256:70867a256476880c4312ae5dc29b4343b06ae43f99886e15b2b78f5d2429c235",
+      "packages": {
+        "torch": "2.7.1+cpu",
+        "vllm": "0.11.0+empty",
+        "transformers": "4.57.1",
+        "safetensors": "0.7.0"
+      },
+      "container_id": "625ac9d102f508dfce62b401a0e77552b2d512f68bed6581f8d431fecb3e3c8b",
+      "resources": {
+        "Memory": 0,
+        "NanoCpus": 0,
+        "PidsLimit": null
+      }
+    },
+    "musa": {
+      "image": "registry.mthreads.com/public/sqt-vllm-train-musa-bench:4.3.5_kuae2.1_hygon_ubuntu",
+      "image_id": "sha256:34cb8777a848bc0689118801fc720c46906b45cfab6dba95d7010601ba60b1c1",
+      "packages": {
+        "torch": "2.5.0",
+        "vllm": "0.9.3.dev0+ga5dd03c1e.d20260309.empty",
+        "transformers": "4.52.4",
+        "safetensors": "0.6.2"
+      },
+      "container_id": "a725763f7114c94a7f113a162f27d421db6b611ed008e4690c36261114de1032",
+      "resources": {
+        "Memory": 0,
+        "NanoCpus": 0,
+        "PidsLimit": null
+      }
+    }
+  }
+}

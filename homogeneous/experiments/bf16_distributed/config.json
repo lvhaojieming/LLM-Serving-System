@@ -1,0 +1,105 @@
+{
+  "name": "bf16-distributed",
+  "pool": "bf16-ascend910b-vllm",
+  "expert": "bf16",
+  "native_int4_fast_path": true,
+  "native_int4_script_mlp": true,
+  "ascend_pp_cache_views": true,
+  "qwen3_fused_qknorm": true,
+  "qknorm_mode": "preserve_rounding",
+  "qknorm_verify_calls": 4,
+  "model_asset": "models/bf16",
+  "weights_manifest_file": "weights_manifest.json",
+  "weights_manifest_sha256": "a3b0e57f26191e645c3f63870d19b962607435fa193cce0eb9ce099202618645",
+  "engine_backend": "vllm",
+  "nodes": [
+    "heteroserve-lab-210",
+    "heteroserve-lab-211"
+  ],
+  "parallelism": {
+    "tp": 2,
+    "pp": 2
+  },
+  "model_overrides": {
+    "awq": {
+      "nodes": [
+        "heteroserve-lab-211"
+      ],
+      "parallelism": {
+        "tp": 2,
+        "pp": 1
+      },
+      "host_execution": {
+        "task_queue_enable": 2,
+        "cpu_affinity_conf": 0,
+        "executor": "mp"
+      }
+    },
+    "gptq": {
+      "nodes": [
+        "heteroserve-lab-211"
+      ],
+      "parallelism": {
+        "tp": 2,
+        "pp": 1
+      }
+    }
+  },
+  "requantization": {
+    "source": "/workspace/zhangjinhao/model/Qwen3-14B",
+    "calibration": "/quantization/calibration.jsonl",
+    "seed": 20261010,
+    "samples": 256,
+    "max_sequence_length": 512,
+    "llmcompressor_version": "0.6.0",
+    "outputs": {
+      "awq": "/quantization/models/Qwen3-14B-AWQ-CompressedTensors",
+      "gptq": "/quantization/models/Qwen3-14B-GPTQ-CompressedTensors"
+    },
+    "standard_outputs": {
+      "awq": "/quantization/models/Qwen3-14B-AWQ"
+    }
+  },
+  "system_benchmark": {
+    "instances": {"awq": "awq-03", "gptq": "gptq-01"},
+    "parallelism": {"tp": 2, "pp": 1}
+  },
+  "requests_per_worker": 16,
+  "runtime": {
+    "model_source": "/root/zhangjinhao/model/Qwen3-14B",
+    "served_model": "qwen3-14b-bf16",
+    "model_parameters": {
+      "dtype": "bfloat16",
+      "quantization": null,
+      "max_model_len": 4096,
+      "max_num_seqs": 16,
+      "max_num_batched_tokens": 4096,
+      "gpu_memory_utilization": 0.5,
+      "enforce_eager": true,
+      "disable_frontend_multiprocessing": true,
+      "disable_log_requests": true
+    }
+  },
+  "benchmark": {
+    "seed": 20261010,
+    "dataset": {
+      "name": "sharegpt",
+      "repository": "anon8231489123/ShareGPT_Vicuna_unfiltered",
+      "revision": "192ab2185289094fc556ec8ce5ce1e8e587154ca",
+      "filename": "ShareGPT_V3_unfiltered_cleaned_split.json",
+      "sha256": "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4",
+      "bytes": 672837942,
+      "directory": "/root/zhangjinhao/datasets/sharegpt",
+      "min_prompt_tokens": 4,
+      "max_prompt_tokens": 1024,
+      "max_total_tokens": 2048
+    },
+    "output_tokens": 64,
+    "concurrency": [
+      8
+    ],
+    "requests_per_case": 200,
+    "warmup_requests": 3,
+    "timeout_seconds": 300
+  }
+}

@@ -1,0 +1,12 @@
+model: /models/Qwen3-14B
+served-model-name: Qwen3-14B
+host: 0.0.0.0
+dtype: bfloat16
+tensor-parallel-size: 2
+max-model-len: 2048
+max-num-seqs: 8
+max-num-batched-tokens: 2048
+gpu-memory-utilization: 0.60
+enforce-eager: true
+no-enable-prefix-caching: true
+seed: 20261010
