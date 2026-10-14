@@ -1,0 +1,103 @@
+{
+  "status": "complete",
+  "started_at": "2026-10-14T07:02:22.851701+00:00",
+  "vendor": "ascend",
+  "tp": 2,
+  "pp": 2,
+  "total_devices": 4,
+  "precision": "BF16",
+  "execution": "native vLLM Ray executor; eager, prefix cache off",
+  "client_vllm": "0.23.0",
+  "config_sha256": "11672dd04c064d0806bbab29386bb8755375f295ff54379512a88094932db0ec",
+  "endpoint": "http://192.168.162.23:18323",
+  "dataset_sha256": "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4",
+  "benchmark_wrapper_sha256": "c9d91e0de7468718b0344401779e865f214ed23d4637a012237ebd79f4f14f04",
+  "validation": "all requests passed; fixed outputs; identical case input lengths; throughput recomputed",
+  "cases": {
+    "1": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 697.6535445088521,
+      "request_throughput": 0.2866752438573217,
+      "output_throughput": 18.347215606868588,
+      "total_token_throughput": 93.55503245661765,
+      "mean_ttft_ms": 95.82448395434767,
+      "p95_ttft_ms": 185.75956004206088,
+      "p99_ttft_ms": 290.2520618587728,
+      "mean_tpot_ms": 53.84385493292015,
+      "p95_tpot_ms": 58.24465518928177,
+      "p99_tpot_ms": 58.994031949781835
+    },
+    "4": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 211.74840037478134,
+      "request_throughput": 0.9445171705949731,
+      "output_throughput": 60.44909891807828,
+      "total_token_throughput": 308.2384560378165,
+      "mean_ttft_ms": 216.75060408655554,
+      "p95_ttft_ms": 369.9506420642136,
+      "p99_ttft_ms": 520.267873313239,
+      "mean_tpot_ms": 63.75970669327275,
+      "p95_tpot_ms": 72.93258748675089,
+      "p99_tpot_ms": 75.44839794651386
+    },
+    "8": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 107.12606844119728,
+      "request_throughput": 1.866959208997596,
+      "output_throughput": 119.48538937584614,
+      "total_token_throughput": 609.2728030603205,
+      "mean_ttft_ms": 256.09097776701674,
+      "p95_ttft_ms": 474.8324920423329,
+      "p99_ttft_ms": 517.5193812372163,
+      "mean_tpot_ms": 63.92574155111871,
+      "p95_tpot_ms": 68.0795111383001,
+      "p99_tpot_ms": 69.54497874603561
+    }
+  },
+  "completed_at": "2026-10-14T07:23:24.624205+00:00",
+  "deployment": {
+    "vendor": "ascend",
+    "image": "quay.io/ascend/vllm-ascend:v0.11.0-a3",
+    "image_id": "sha256:70867a256476880c4312ae5dc29b4343b06ae43f99886e15b2b78f5d2429c235",
+    "tp": 2,
+    "pp": 2,
+    "config_sha256": "11672dd04c064d0806bbab29386bb8755375f295ff54379512a88094932db0ec",
+    "nodes": [
+      {
+        "ssh_alias": "ascend910c-01",
+        "host": "192.168.162.23",
+        "ssh_port": 22,
+        "host_key_alias": "172.22.162.23",
+        "container": "heteroserve-ascend-pp",
+        "reuse": false,
+        "devices": [
+          2,
+          3
+        ],
+        "interface": "enp196s0f0",
+        "container_id": "77546192345fad9ef149f36126cd251902c259c797b743a32d8942b0fd8c0b62"
+      },
+      {
+        "ssh_alias": "ascend910c-02",
+        "host": "192.168.162.24",
+        "ssh_port": 22,
+        "host_key_alias": "172.22.162.24",
+        "container": "heteroserve-ascend-pp",
+        "reuse": false,
+        "devices": [
+          2,
+          3
+        ],
+        "interface": "enp196s0f0",
+        "container_id": "99fb2edd312973c792aa805bc0884d17350dd447a04c821c6ce0342db0f9816d"
+      }
+    ]
+  },
+  "limitations": [
+    "Native vLLM two-node TP2/PP2; cross-vendor reference executor differs",
+    "One round, 200 requests per case; not maximum-capacity or isolated-chip measurement"
+  ]
+}
