@@ -1,6 +1,6 @@
 """Reuse the existing container, INT4 layout adapter and official benchmark.
 
-One configuration drives AWQ/GPTQ and the matched FP16 TP1 control. The local
+One configuration drives AWQ/GPTQ and the matched FP16 control. The local
 controller waits for each official benchmark process, then drains only its server.
 """
 import argparse
@@ -88,18 +88,21 @@ def start_server(config, algorithm):
     marker = directory/'server.json'
     spec = config['profiles'][algorithm]
     directory.mkdir(parents=True,exist_ok=True)
-    env = dict(os.environ,ASCEND_RT_VISIBLE_DEVICES=str(config['device']),
+    env = dict(os.environ,ASCEND_RT_VISIBLE_DEVICES=','.join(map(str,config.get('devices',[config.get('device',0)]))),
                VLLM_WORKER_MULTIPROC_METHOD='spawn',OMP_NUM_THREADS='4',
                HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',VLLM_NO_USAGE_STATS='1')
+    env.update(config.get('env',{}))
     env['PYTHONPATH'] = '/workspace/shared/ascend_int4:/workspace'+(':'+env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
     env['MOQE_ASCEND_INT4_ADAPTER'] = '0' if algorithm == 'fp16' else '1'
     argv = ['python3','-m','vllm.entrypoints.cli.main','serve',spec['model'],
         '--served-model-name',spec['served_model'],'--host',config['host'],'--port',str(spec['port']),
-        '--dtype',config['dtype'],'--tensor-parallel-size','1','--pipeline-parallel-size','1',
+        '--dtype',config['dtype'],'--tensor-parallel-size',str(config['tp']),'--pipeline-parallel-size',str(config['pp']),
         '--max-model-len',str(config['max_model_len']),'--max-num-seqs',str(config['max_num_seqs']),
         '--max-num-batched-tokens',str(config['max_num_batched_tokens']),
         '--gpu-memory-utilization',str(config['gpu_memory_utilization']),
         '--enforce-eager','--no-enable-prefix-caching','--seed',str(config['benchmark']['seed'])]
+    if config['tp']>1:
+        argv += ['--distributed-executor-backend','mp']
     if algorithm != 'fp16':
         argv += ['--quantization','moqe_ascend_int4']
     if marker.exists():
@@ -172,12 +175,18 @@ def probe(config, algorithm):
     log = log[log.rfind('"event": "w4a16_serve_begin"'):]
     prepared = [json.loads(line[line.index('{'):]) for line in log.splitlines() if '"event": "w4a16_layer_prepared"' in line]
     executed = sum('"event": "w4a16_operator_executed"' in line for line in log.splitlines())
-    proof = algorithm=='fp16' or (len(prepared)==160 and executed==160 and
+    expected_linears=160*config['tp']
+    execution_lines=[json.loads(line[line.index('{'):]) for line in log.splitlines() if '"event": "w4a16_operator_executed"' in line]
+    per_rank={str(rank):dict(prepared=sum(r.get('tp_rank',0)==rank for r in prepared),
+                            executed=sum(r.get('tp_rank',0)==rank for r in execution_lines)) for rank in range(config['tp'])}
+    proof = algorithm=='fp16' or (len(prepared)==expected_linears and executed==expected_linears and
+            all(r['prepared']==160 and r['executed']==160 for r in per_rank.values()) and
             all(r['packed_dtype']=='torch.int32' and r['scale_dtype']=='torch.float16' and
                 r['packed_bytes']==r['k']*r['n']//2 for r in prepared))
     report = dict(algorithm=algorithm,passed=health==200 and all(r['passed'] for r in results) and proof,
                   requests=results,prepared_fused_linears=len(prepared),executed_int4_linears=executed,
-                  operator_proof_passed=proof,scope='Limited real-decode acceptance; no PPL or general quality claim')
+                  operator_proof_passed=proof,tp=config['tp'],pp=config['pp'],per_rank=per_rank,
+                  scope='Limited real-decode acceptance; no PPL or general quality claim')
     save(profile_dir(config,algorithm)/'acceptance.json',report)
     print(json.dumps(report,ensure_ascii=False),flush=True)
     if not report['passed']:
@@ -288,6 +297,9 @@ def main():
     parser.add_argument('--ssh-config',type=Path)
     args=parser.parse_args()
     config=json.loads(args.config.read_text(encoding='utf-8'))
+    if config['tp'] not in {1,2} or config['pp']!=1:
+        raise ValueError('Current W4A16 deployment supports TP1/TP2, PP1 only')
+    os.environ['ASCEND_RT_VISIBLE_DEVICES']=','.join(map(str,config.get('devices',[config.get('device',0)])))
     if args.action=='run':
         if args.ssh_config is None:
             parser.error('--ssh-config required for local controller')

@@ -262,7 +262,7 @@
   "quality_limit": "Limited arithmetic/capital decode and operator checks only. No PPL or downstream quality acceptance. AWQ self-generated and GPTQ community calibration differ.",
   "inference_repack": "Integer values, scales and zero points preserved; signed INT4 repacked at load time. No full FP16 weight expansion, no floating-weight matmul fallback.",
   "performance": {
-    "status": "running_startup_verified",
+    "status": "interrupted_for_tp2_transition",
     "current": "awq",
     "current_case": "c1",
     "observed_completed": 40,
@@ -281,8 +281,204 @@
       60
     ],
     "client_vllm": "0.23.0",
-    "controller_pid": 27784
+    "controller_pid": 27784,
+    "note": "TP1 AWQ/GPTQ completed; FP16 benchmark interrupted on user TP2/PP1 steering. Historical startup observation retained; not current running state."
   },
   "artifacts": "artifacts/quantization/inference",
-  "cleanup": "Only task-owned model processes drained during sequential acceptance; original containers, services, dependencies, models and datasets preserved. No temporary prototype scripts created."
+  "cleanup": "Only task-owned model processes drained during sequential acceptance; original containers, services, dependencies, models and datasets preserved. No temporary prototype scripts created.",
+  "current_tp2": {
+    "checked_at": "2026-10-14T10:29:21.127351+00:00",
+    "config": {
+      "node": "ascend910c-02",
+      "container": "heteroserve-ascend-w4",
+      "host": "192.168.162.24",
+      "devices": [
+        0,
+        1
+      ],
+      "dtype": "float16",
+      "tp": 2,
+      "pp": 1,
+      "resource_limits_enabled": false,
+      "max_model_len": 2048,
+      "gpu_memory_utilization": 0.6,
+      "max_num_seqs": 8,
+      "max_num_batched_tokens": 2048,
+      "source": "/models/Qwen3-14B",
+      "result_dir": "artifacts/quantization/inference/tp2-pp1",
+      "env": {
+        "GLOO_SOCKET_IFNAME": "enp196s0f0",
+        "HCCL_HOST_SOCKET_PORT_RANGE": "61400-61431",
+        "HCCL_NPU_SOCKET_PORT_RANGE": "61500-61531",
+        "HCCL_IF_BASE_PORT": "61600"
+      },
+      "profiles": {
+        "awq": {
+          "model": "/quantization/models/Qwen3-14B-AWQ",
+          "port": 18424,
+          "served_model": "Qwen3-14B-AWQ"
+        },
+        "gptq": {
+          "model": "/models/Qwen3-14B-GPTQ-Int4",
+          "port": 18425,
+          "served_model": "Qwen3-14B-GPTQ-Int4"
+        },
+        "fp16": {
+          "model": "/models/Qwen3-14B",
+          "port": 18426,
+          "served_model": "Qwen3-14B-FP16"
+        }
+      },
+      "order": [
+        "awq",
+        "gptq",
+        "fp16"
+      ],
+      "client": {
+        "node": "iluvatar150-01",
+        "container": "heteroserve-iluvatar"
+      },
+      "benchmark": {
+        "concurrencies": [
+          1,
+          4,
+          8
+        ],
+        "num_prompts": 200,
+        "num_warmups": 3,
+        "output_len": 64,
+        "seed": 20261010,
+        "temperature": 0
+      }
+    },
+    "container": {
+      "name": "heteroserve-ascend-w4",
+      "id": "beee674f220c1fa61cd5d3424160c6f939966a9adbd202c984a8d01de5c727f9",
+      "image_id": "sha256:abadf4beb85a371456469a2f1c1c075a5f662f120e9e9612144e24090377abc5",
+      "image_tag": "heteroserve-quantization:preserved-environment",
+      "environment_source": "docker commit of stopped original quantization container; installed dependencies preserved, no reinstall",
+      "devices": [
+        0,
+        1
+      ],
+      "npu_device_count_verified": 2,
+      "both_device_tensor_execution_verified": true,
+      "resource_limits_enabled": false
+    },
+    "profiles": {
+      "awq": {
+        "algorithm": "awq",
+        "passed": true,
+        "requests": [
+          {
+            "prompt": "2+3等于多少？只输出数字。",
+            "text": "5",
+            "expected": "5",
+            "passed": true
+          },
+          {
+            "prompt": "法国的首都是哪里？只回答城市名。",
+            "text": "巴黎",
+            "expected": "巴黎",
+            "passed": true
+          },
+          {
+            "prompt": "What is 7 minus 4? Reply with only the digit.",
+            "text": "3",
+            "expected": "3",
+            "passed": true
+          }
+        ],
+        "prepared_fused_linears": 320,
+        "executed_int4_linears": 320,
+        "operator_proof_passed": true,
+        "tp": 2,
+        "pp": 1,
+        "per_rank": {
+          "0": {
+            "prepared": 160,
+            "executed": 160
+          },
+          "1": {
+            "prepared": 160,
+            "executed": 160
+          }
+        },
+        "scope": "Limited real-decode acceptance; no PPL or general quality claim"
+      },
+      "gptq": {
+        "status": "pending_sequential_acceptance"
+      },
+      "fp16": {
+        "status": "pending_sequential_acceptance"
+      }
+    },
+    "native_operator_checks": {
+      "awq": {
+        "algorithm": "awq",
+        "passed": true,
+        "operator": "torch_npu.npu_weight_quant_batchmatmul",
+        "activation": "FP16",
+        "results": [
+          {
+            "projection": "self_attn.q_proj",
+            "k": 5120,
+            "n": 5120,
+            "checks": [
+              {
+                "tokens": 1,
+                "finite": true,
+                "relative_l2_error": 0.0005514768417924643
+              },
+              {
+                "tokens": 32,
+                "finite": true,
+                "relative_l2_error": 0.0002724629011936486
+              }
+            ],
+            "passed": true
+          },
+          {
+            "projection": "mlp.down_proj",
+            "k": 17408,
+            "n": 5120,
+            "checks": [
+              {
+                "tokens": 1,
+                "finite": true,
+                "relative_l2_error": 0.0005856326897628605
+              },
+              {
+                "tokens": 32,
+                "finite": true,
+                "relative_l2_error": 0.0002706417581066489
+              }
+            ],
+            "passed": true
+          }
+        ],
+        "scope": "Layer correctness only, not inference latency or model PPL"
+      }
+    },
+    "performance": {
+      "status": "running_startup_verified",
+      "controller_pid": 15760,
+      "total_requests": 1800,
+      "current": "awq",
+      "current_case": "c1",
+      "observed_completed": 25,
+      "requests_per_case": 200,
+      "estimated_remaining_minutes": [
+        60,
+        90
+      ],
+      "estimated_case_remaining_minutes": 11
+    },
+    "source_sha256": {
+      "shared/ascend_int4/vllm_adapter.py": "d97434c0ec79b71f98297432c9a79ad3036ea781b7a9fc911bf9a978abc4cba8",
+      "heterogeneous_compute/quantization/deploy.py": "88f37ddbf49db8b4512c345d6100b9fb762e95d4b945ad1c8af49c0fde6689fb",
+      "heterogeneous_compute/quantization/deployment.json": "46163b0c099917c333b26c2ea78a65ca42a86fb72031b3652d83384fb36fa9ea"
+    },
+    "cleanup": "Failed earlier dual-card container removed; replaced by one persistent dual-card container derived from preserved original environment. Original single-card and baseline containers retained; other users unchanged."
+  }
 }

@@ -33,7 +33,11 @@ Transformers 5 导出时可能重新序列化 tokenizer。发布先确认模型�
 
 ## 当前 W4A16 部署与官方测速
 
-复用 `.24` 的 `heteroserve-quantization`、原始和量化权重，容器 ID 保持不变。
+TP1 历史验收使用 `.24` 的 `heteroserve-quantization`，该容器现已停止并保留。
+当前 TP2/PP1 复用统一双卡容器 `heteroserve-ascend-w4`，开放逻辑 NPU 0、1。
+它保存并沿用原量化容器的已安装环境，不重新安装依赖；AWQ、GPTQ 和 FP16
+对照共用这一容器，只切换模型进程。原单卡容器不能通过 Docker update 追加设备，
+因此按用户要求单独创建这一个双卡容器；其他用户和基线容器保持原状态。
 推理采用 vLLM 0.26.0+empty、Torch 2.10.0+cpu、torch-npu 2.10.0.post4、
 Transformers 5.14.1、镜像内 CANN 9.1.0；不新增环境或安装推理依赖。
 
@@ -44,8 +48,14 @@ Transformers 5.14.1、镜像内 CANN 9.1.0；不新增环境或安装推理依�
 原始权重和 tokenizer 不变，不重新校准、不重新量化、不保留全模型 FP16 展开。
 用户已有旧原型作为来源保留，没有删除其工作。
 
-当前仅验证 **TP1/PP1、FP16 激活、group128、AWQ GEMM/GPTQ legacy**；
-GPTQ act-order、非连续 g_idx、其他 group size、TP2 等均拒绝或未验证。
+历史验收已验证 **TP1/PP1、FP16 激活、group128、AWQ GEMM/GPTQ legacy**。
+当前入口增加 TP2：按 vLLM 参数加载接口切分 packed 权重、零点和尺度，
+GPTQ 行并行分片额外检查全局 g_idx 的组号偏移。整模型 TP2 验收由控制器
+检查每个 rank 的 160 层真实 INT4 调用后才允许启动对应测速；未通过就停止。
+GPTQ act-order、非连续 g_idx、其他 group size、TP 大于 2 均拒绝。
+当前 AWQ TP2 已通过三个整模型问答及每 rank 160 层 INT4 算子验收，官方
+并发 1 测速已实际推进。GPTQ TP2 与 FP16 TP2 将按顺序验收，尚未完成；
+完整性能结果也尚未完成，不据此声明 TP2 比 TP1 更快。
 LM head 和 embedding 保持浮点，280 个标准量化 Linear 在 vLLM 中融合成
 160 个实际执行 Linear。它们的 INT32 参数以每权重 4 bit 存储，调用
 `torch_npu.npu_weight_quant_batchmatmul`，不会静默回退为浮点权重 matmul。
@@ -56,9 +66,10 @@ LM head 和 embedding 保持浮点，280 个标准量化 Linear 在 vLLM 中融�
 这些是有限功能验收，不代表 PPL、下游任务质量或完整的量化误差评估。
 
 统一入口与参数为 `deploy.py`、`deployment.json`。顺序执行 AWQ → GPTQ →
-FP16 对照，固定复用一张空闲逻辑 NPU 0、同一环境、TP1/PP1、Eager、
+FP16 对照，固定复用空闲逻辑 NPU 0、1、同一环境、TP2/PP1、Eager、
 关闭 prefix cache、context 2048、max_num_seqs 8、gpu_memory_utilization 0.60。
 与过去 TP2/BF16 基线分开；这次 FP16 是同资源、同激活精度的浮点控制组。
+历史 TP1 的 AWQ/GPTQ 测速结果保留，TP1 FP16 测速因切换 TP2 而中断。
 AWQ 是本项目自量化，GPTQ 是所选社区权重，不能将二者质量差异全归因于算法。
 
 从客户端仓库根目录运行（Windows 可用隐藏后台进程启动）：
@@ -81,6 +92,7 @@ temperature 0、seed 20261010。三模型共 1800 正式请求。
 校验固定数据集 SHA256、成功数、输出长度、各档输入长度和吞吐重算；
 输出 TTFT/TPOT/ITL/E2EL 与 P50/P95/P99。
 
-控制器状态与本地原始摘要在 `artifacts/quantization/inference/`；服务端验收与
+当前控制器状态与本地原始摘要在 `artifacts/quantization/inference/tp2-pp1/`；历史
+TP1 结果仍位于其父目录，不能混合两种资源配置计算加速比。服务端验收与
 日志在 `.24` 同目录；官方原始测速结果在 `.58` 同目录的各算法
 `performance/`。完成后只提交必要结果摘要，保留权重、配置和复现信息。
