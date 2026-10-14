@@ -413,7 +413,7 @@
     ],
     "precision_scope": "BF16 TP2/PP2 Qwen3-14B greedy with separate KV owners. Custom vLLM-component executor; not native vLLM Engine or a FlagCX integration. CPU staging and portable padded reference attention remain.",
     "performance": {
-      "status": "running_startup_verified",
+      "status": "complete",
       "result_dir": "artifacts/baselines/cross-vendor-pp/performance-batched",
       "requests_per_case": 200,
       "concurrencies": [
@@ -425,12 +425,25 @@
       "startup_failure_fixed": "CRLF normalized; no official request case occurred in failed launcher; .gitattributes now enforces shell/config LF",
       "current_case": "c4",
       "interrupted_case": "new c1 stopped on user c4-only steering; no complete c1 result",
-      "warmups_completed": 3,
-      "observed_completed": 11,
-      "estimated_case_remaining_minutes": [
-        15,
-        25
-      ]
+      "cases": {
+        "4": {
+          "completed": 200,
+          "failed": 0,
+          "duration": 1183.566162172705,
+          "output_throughput": 10.814773528589807,
+          "mean_ttft_ms": 5772.648994207848,
+          "p95_ttft_ms": 14560.593663970938,
+          "p99_ttft_ms": 19137.670294330437,
+          "mean_tpot_ms": 268.17490499115564,
+          "p95_tpot_ms": 419.34814906516476,
+          "p99_tpot_ms": 483.4171030674835
+        }
+      },
+      "raw_sha256": {
+        "4": "656f1e6f2a04419ea94b54f38766f9124f0ab7f3a59489c854b399f2505f018f"
+      },
+      "validation": "200/200 success; 64 outputs/request; throughput recomputed",
+      "comparison": "Output throughput +17.1% versus prior continuous, -10.1% versus retained serial control; one run, no chip-ranking or statistical significance claim."
     },
     "cleanup": "No new containers/environments/project copies. Only previous owned executor ranks drained; existing native services and W4 experiment preserved. Source edits consolidated into existing modules; old valid baseline results retained."
   }

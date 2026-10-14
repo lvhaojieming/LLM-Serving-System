@@ -562,7 +562,46 @@
             "executed": 0
           }
         },
-        "scope": "Limited real-decode acceptance; no PPL or general quality claim"
+        "scope": "Limited real-decode acceptance; no PPL or general quality claim",
+        "performance": {
+          "1": {
+            "completed": 200,
+            "failed": 0,
+            "duration": 719.2478439207189,
+            "output_throughput": 17.796368954302928,
+            "mean_ttft_ms": 68.14715315820649,
+            "p95_ttft_ms": 87.27502566762269,
+            "p99_ttft_ms": 94.03266163542862,
+            "mean_tpot_ms": 55.99802056231374,
+            "p95_tpot_ms": 57.8685547483878,
+            "p99_tpot_ms": 60.89590442440812
+          },
+          "4": {
+            "completed": 200,
+            "failed": 0,
+            "duration": 207.4581771423109,
+            "output_throughput": 61.69918282478465,
+            "mean_ttft_ms": 201.92605901975185,
+            "p95_ttft_ms": 245.24913385976106,
+            "p99_ttft_ms": 281.1308214161545,
+            "mean_tpot_ms": 62.64070108617907,
+            "p95_tpot_ms": 65.3874678892039,
+            "p99_tpot_ms": 67.54207166887466
+          },
+          "8": {
+            "completed": 200,
+            "failed": 0,
+            "duration": 100.73867343785241,
+            "output_throughput": 127.06143095974518,
+            "mean_ttft_ms": 234.57712401635945,
+            "p95_ttft_ms": 290.7344983890652,
+            "p99_ttft_ms": 407.75057658553123,
+            "mean_tpot_ms": 60.19853436824171,
+            "p95_tpot_ms": 63.09419051699695,
+            "p99_tpot_ms": 63.27830267005732
+          }
+        },
+        "performance_validation": "600/600 successful; output budgets, identical inputs across cases, throughput recomputation verified"
       }
     },
     "native_operator_checks": {
@@ -613,14 +652,15 @@
       }
     },
     "performance": {
-      "status": "fp16_benchmark_running",
+      "status": "complete",
       "controller_pid": 15760,
       "total_requests": 1800,
       "current": "fp16",
       "requests_per_case": 200,
       "completed_profiles": [
         "awq",
-        "gptq"
+        "gptq",
+        "fp16"
       ]
     },
     "source_sha256": {
