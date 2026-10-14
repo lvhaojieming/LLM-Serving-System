@@ -258,11 +258,12 @@ def schedule_requests(config, lane, cpu_group, tokenizer):
     import torch.distributed as dist
     admission = queue.Queue(maxsize=16)
     server = None
-    lifecycle = {'draining': False}
+    lifecycle = {'draining': False, 'completed': 0}
     if lane == 0 and config['execution'].get('mode') == 'http':
         import asyncio
         import uvicorn
         from fastapi import FastAPI, HTTPException
+        from fastapi.responses import StreamingResponse, Response
         app = FastAPI()
 
         @app.get('/health')
@@ -273,6 +274,68 @@ def schedule_requests(config, lane, cpu_group, tokenizer):
         @app.get('/v1/models')
         async def models():
             return dict(object='list', data=[dict(id='Qwen3-14B', object='model')])
+
+        @app.get('/metrics')
+        async def metrics():
+            return Response(f"heteroserve_pp_queued_requests {admission.qsize()}\n"
+                            f"heteroserve_pp_completed_requests_total {lifecycle['completed']}\n",
+                            media_type='text/plain')
+
+        @app.post('/v1/completions')
+        async def completions(body: dict):
+            if lifecycle['draining']:
+                raise HTTPException(503, 'PP service is draining')
+            if body.get('model', 'Qwen3-14B') != 'Qwen3-14B':
+                raise HTTPException(400, 'Unknown model')
+            if body.get('temperature', 0) != 0 or body.get('n', 1) != 1:
+                raise HTTPException(400, 'Only one greedy completion is supported')
+            if body.get('logprobs') is not None or body.get('stop') is not None:
+                raise HTTPException(400, 'logprobs and custom stop strings are unsupported')
+            prompt = body.get('prompt')
+            if not isinstance(prompt, str):
+                raise HTTPException(400, 'A single text prompt is required')
+            maximum = body.get('max_tokens', 32)
+            if type(maximum) is not int or not 1 <= maximum <= 128:
+                raise HTTPException(400, 'max_tokens must be between 1 and 128')
+            ids = tokenizer.encode(prompt, add_special_tokens=False)
+            if not ids or len(ids) + maximum > config['execution']['max_model_len']:
+                raise HTTPException(400, 'Empty or excessive context')
+            future = concurrent.futures.Future()
+            future.token_events = queue.Queue()
+            item = dict(id=str(uuid.uuid4()), max_tokens=maximum, prompt_token_ids=ids,
+                        prompt=prompt, ignore_eos=bool(body.get('ignore_eos', False)))
+            try:
+                admission.put_nowait((item, future))
+            except queue.Full:
+                raise HTTPException(429, 'PP admission queue is full')
+            if not body.get('stream', False):
+                result = await asyncio.wrap_future(future)
+                lifecycle['completed'] += 1
+                return dict(id='cmpl-'+item['id'], object='text_completion', model='Qwen3-14B',
+                    choices=[dict(index=0, text=result['text'],
+                                  finish_reason='stop' if result['stopped_on_eos'] else 'length')],
+                    usage=dict(prompt_tokens=len(ids), completion_tokens=len(result['generated_token_ids']),
+                               total_tokens=len(ids)+len(result['generated_token_ids'])))
+
+            async def events():
+                try:
+                    while True:
+                        event = await asyncio.to_thread(future.token_events.get)
+                        if event is None:
+                            break
+                        yield 'data: '+json.dumps(dict(id='cmpl-'+item['id'], object='text_completion',
+                            created=int(time.time()), model='Qwen3-14B', choices=[event]), ensure_ascii=False)+'\n\n'
+                    result = await asyncio.wrap_future(future)
+                    lifecycle['completed'] += 1
+                    if body.get('stream_options', {}).get('include_usage', False):
+                        yield 'data: '+json.dumps(dict(id='cmpl-'+item['id'], choices=[],
+                            usage=dict(prompt_tokens=len(ids), completion_tokens=len(result['generated_token_ids']),
+                                       total_tokens=len(ids)+len(result['generated_token_ids']))))+'\n\n'
+                    yield 'data: [DONE]\n\n'
+                finally:
+                    if not future.done():
+                        future.cancel()
+            return StreamingResponse(events(), media_type='text/event-stream')
 
         @app.post('/v1/chat/completions')
         async def chat(body: dict):
@@ -302,6 +365,7 @@ def schedule_requests(config, lane, cpu_group, tokenizer):
             except queue.Full:
                 raise HTTPException(429, 'PP admission queue is full')
             result = await asyncio.wrap_future(future)
+            lifecycle['completed'] += 1
             return dict(id='chatcmpl-'+item['id'], object='chat.completion', created=int(time.time()),
                         model='Qwen3-14B', choices=[dict(index=0, message=dict(role='assistant', content=result['text']),
                         finish_reason='stop' if result['stopped_on_eos'] else 'length')],
@@ -387,6 +451,7 @@ def execute(config, stage, lane):
                 if len(ids) + item['max_tokens'] > config['execution']['max_model_len']:
                     raise ValueError('Request exceeds configured context bound')
                 output, durations = [], []
+                emitted_text = ''
                 for step in range(item['max_tokens']):
                     positions = list(range(len(ids))) if step == 0 else [len(ids) + step - 1]
                     state.advance(request_id, positions)
@@ -401,7 +466,20 @@ def execute(config, stage, lane):
                         raise RuntimeError('Stale PP token feedback')
                     output.append(response['token'])
                     durations.append(time.perf_counter() - start)
-                    if output[-1] in {tokenizer.eos_token_id, 151645}:
+                    stop = (not item.get('ignore_eos', False)
+                            and output[-1] in {tokenizer.eos_token_id, 151645})
+                    if future is not None and hasattr(future, 'token_events'):
+                        decoded = tokenizer.decode(output, skip_special_tokens=True)
+                        if decoded.endswith('\ufffd') and not stop and step + 1 < item['max_tokens']:
+                            delta = ''
+                        elif decoded.startswith(emitted_text):
+                            delta = decoded[len(emitted_text):]
+                            emitted_text = decoded
+                        else:
+                            raise RuntimeError('Incremental decoder changed an emitted text prefix')
+                        future.token_events.put(dict(index=0, text=delta,
+                            finish_reason='stop' if stop else ('length' if step+1==item['max_tokens'] else None)))
+                    if stop:
                         break
                 channel.send(dict(op='release', request_id=request_id))
                 response, _ = channel.receive(device)
@@ -411,7 +489,7 @@ def execute(config, stage, lane):
                 row = dict(id=request_id, prompt=item['prompt'], prompt_token_ids=ids,
                            generated_token_ids=output, text=tokenizer.decode(output, skip_special_tokens=True),
                            step_seconds=durations, caches_after_release=len(state.caches),
-                           stopped_on_eos=output[-1] in {tokenizer.eos_token_id, 151645})
+                           stopped_on_eos=not item.get('ignore_eos', False) and output[-1] in {tokenizer.eos_token_id, 151645})
                 if config['execution'].get('mode') != 'http':
                     rows.append(row)
                 else:
@@ -421,6 +499,8 @@ def execute(config, stage, lane):
                         sink.write(json.dumps(row, ensure_ascii=False)+'\n')
                 if future is not None and not future.cancelled():
                     future.set_result(row)
+                    if hasattr(future, 'token_events'):
+                        future.token_events.put(None)
                 print(json.dumps(dict(event='request_complete', **row), ensure_ascii=False), flush=True)
             channel.send(dict(op='stop'))
     channel.connection.close()

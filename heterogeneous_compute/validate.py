@@ -31,7 +31,7 @@ for item in items:
 invalid = []
 for change in [{'stream':True}, {'temperature':0.5}, {'max_tokens':0},
                {'max_tokens':129}, {'model':'wrong'},
-               {'messages':[{'role':'user','content':'这是一段验证上下文限制的文本。'*200}]}]:
+               {'messages':[{'role':'user','content':'这是一段验证上下文限制的文本。'*600}]}]:
     body = dict(model='Qwen3-14B', messages=[dict(role='user',content='hi')],
                 temperature=0, max_tokens=8)
     body.update(change)

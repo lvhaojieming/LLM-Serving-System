@@ -81,7 +81,7 @@
     "model_path": "/models/Qwen3-14B",
     "tp_port": 29661,
     "pp_port": 29662,
-    "max_model_len": 256,
+    "max_model_len": 2048,
     "result_dir": "/workspace/artifacts/baselines/cross-vendor-pp/adapted",
     "requests": [
       {

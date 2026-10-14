@@ -38,7 +38,8 @@ are validated. Peer disconnects fail the operation; automatic rank recovery
 is not implemented. A serving idle wait does not expire the PP connection.
 
 No continuous batching, overlapped pipeline microbatches, graph execution,
-paged attention, quantization or SSE streaming is implemented here. This
+paged attention or quantization is implemented here. The raw completions API
+now streams one SSE event per generated token for official client timing. This
 correctness-first path is not a throughput baseline and must not be mixed with
 the earlier native vLLM performance measurements.
 
@@ -63,7 +64,7 @@ There are no CPU/RAM/PID limits imposed by this manager.
 API: `http://192.168.162.23:18230/v1/chat/completions`, `/v1/models`, `/health`.
 It binds the cluster LAN. The 172.22 external port mapping has not been tested.
 Supported path: text chat, `model=Qwen3-14B`, `temperature=0`, `stream=false`,
-`max_tokens` 1..128; total context bounded by 256 tokens. Thinking is disabled.
+`max_tokens` 1..128; total context bounded by 2048 tokens. Thinking is disabled.
 The queue holds up to 16 pending requests; full queue returns 429 and draining
 returns 503. A canceled queued request is skipped; already-executing work
 finishes and releases its KV cache. No native throughput claim is made.
@@ -108,3 +109,36 @@ with the final verification report. Existing uncommitted project work is preserv
 完整原始结果保存在被 Git 忽略的 `artifacts/`，必要摘要位于 `results/`。
 单元验证：`python -m unittest discover -s heterogeneous_compute/tests -v`。
 管理器识别整理前的旧执行进程，避免误启动第二套；排空后再启动会使用新目录。
+
+## Official vLLM streaming benchmark
+
+This executor is the cross-vendor reference baseline. The measurement client
+is the unmodified installed `vllm bench serve` v0.23.0 on .58, the same version
+used for native-vendor results. `/v1/completions` accepts a raw text prompt,
+`stream=true`, greedy `temperature=0`, `ignore_eos=true`, and usage summaries.
+It emits exactly one choices event per generated token, then a separate usage
+summary with empty choices and `[DONE]`. It does not wait for full generation
+before emitting the first token. `/v1/chat/completions` remains non-streaming.
+
+Run inside the existing .58 `heteroserve-iluvatar` client container:
+
+```bash
+bash /workspace/heterogeneous_compute/platforms/iluvatar/benchmark.sh \
+ /workspace/heterogeneous_compute/configs/cross_vendor_benchmark.env
+```
+
+The config sets 200 ShareGPT requests per case, 3 warmups, 64 output tokens,
+EOS ignored, seed 20261010, concurrency 1/4/8, unlimited offered request rate,
+and percentiles 50/95/99 for TTFT/TPOT/ITL/E2EL. Cases execute sequentially.
+The dataset and tokenizer are reused from the earlier native baseline; no
+additional copies or benchmark environments are created. Each result includes
+per-request success, TTFT, ITL and generated output from the official client.
+
+TTFT is measured by the client from request start to the first token event,
+including queue, prefill and network. TPOT is the official per-request mean
+post-first-token latency divided by output length minus one. ITL percentiles
+pool the observed token gaps. Output throughput is generated tokens divided
+by measured case duration for the whole four-device PP instance, not per GPU.
+Reference attention, CPU staging and serialized scheduling remain part of the
+baseline. Continuous batching/pipeline overlap is still absent; a higher
+client concurrency does not imply simultaneous model execution.
