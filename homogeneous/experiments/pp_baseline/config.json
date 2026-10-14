@@ -1,0 +1,58 @@
+{
+  "model": "Qwen3-14B",
+  "model_path": "/models/Qwen3-14B",
+  "dtype": "bfloat16",
+  "tp": 2,
+  "pp": 2,
+  "resource_limits_enabled": false,
+  "benchmark": {"concurrencies": [1, 4, 8], "num_prompts": 200, "num_warmups": 3, "output_len": 64, "seed": 20261010, "temperature": 0},
+  "client": {"ssh_alias": "iluvatar150-01", "container": "heteroserve-iluvatar"},
+  "vendors": {
+    "ascend": {
+      "image": "quay.io/ascend/vllm-ascend:v0.11.0-a3",
+      "resource": "NPU", "ray_port": 32000, "api_port": 18323,
+      "engine_args": ["--block-size", "128"],
+      "env": {"VLLM_USE_V1": "1", "HCCL_HOST_SOCKET_PORT_RANGE": "61000-61031", "HCCL_NPU_SOCKET_PORT_RANGE": "61100-61131", "HCCL_IF_BASE_PORT": "61200"},
+      "nodes": [
+        {"ssh_alias": "ascend910c-01", "host": "192.168.162.23", "ssh_port": 22, "host_key_alias": "172.22.162.23", "container": "heteroserve-ascend-pp", "reuse": false, "devices": [2, 3], "interface": "enp196s0f0"},
+        {"ssh_alias": "ascend910c-02", "host": "192.168.162.24", "ssh_port": 22, "host_key_alias": "172.22.162.24", "container": "heteroserve-ascend-pp", "reuse": false, "devices": [2, 3], "interface": "enp196s0f0"}
+      ]
+    },
+    "musa": {
+      "image": "registry.mthreads.com/public/sqt-vllm-train-musa-bench:4.3.5_kuae2.1_hygon_ubuntu",
+      "resource": "GPU", "ray_port": 32200, "api_port": 18397,
+      "engine_args": ["--block-size", "32"],
+      "env": {"VLLM_USE_V1": "0", "NCCL_IB_DISABLE": "1", "MCCL_IB_DISABLE": "1", "MCCL_NET": "Socket", "MCCL_DEBUG": "WARN"},
+      "nodes": [
+        {"ssh_alias": "s5000-01", "host": "192.168.162.97", "ssh_port": 22, "host_key_alias": "172.22.162.97", "container": "heteroserve-musa", "reuse": true, "devices": [2, 3], "interface": "ens18f0"},
+        {"ssh_alias": "s5000-02", "host": "192.168.162.96", "ssh_port": 22, "host_key_alias": "172.22.162.96", "container": "heteroserve-musa-pp", "reuse": false, "devices": [0, 1], "interface": "ens21f0", "driver_libraries": [{"source": "/lib/x86_64-linux-gnu/libmusa.so.4.3.8", "target": "/lib/x86_64-linux-gnu/libmusa.so.4.3.8", "link": "/lib/x86_64-linux-gnu/libmusa.so.1"}]}
+      ]
+    },
+    "hygon": {
+      "image": "pypi.sourcefind.cn/jenkins/model_test_env/vllm:0.25.1-latest",
+      "executor": "mp",
+      "resource": "GPU", "ray_port": 32400, "api_port": 18352,
+      "engine_args": [],
+      "env": {"NCCL_IB_DISABLE": "1", "NCCL_CUMEM_ENABLE": "0", "NCCL_NET": "Socket", "NCCL_DEBUG": "WARN"},
+      "nodes": [
+        {"ssh_alias": "bw1100-02", "host": "192.168.162.252", "ssh_port": 22, "host_key_alias": "172.22.162.252", "container": "heteroserve-hygon-pp", "reuse": false, "devices": [2, 3], "interface": "ens14f0"},
+        {"ssh_alias": "bw1100-01", "host": "192.168.162.251", "ssh_port": 22, "host_key_alias": "172.22.162.251", "container": "heteroserve-hygon-pp", "reuse": false, "devices": [0, 1], "interface": "ens14f0"}
+      ]
+    },
+    "iluvatar": {
+      "image": "registry.iluvatar.com.cn:10443/vllm_plugin/corex_vllm_plugin:0.23.0-corex-4.5.0.20260619-ubuntu24.04-py3.12-x86_64-v1",
+      "resource": "GPU", "ray_port": 32600, "api_port": 18358,
+      "engine_args": [],
+      "env": {"NCCL_IB_DISABLE": "1", "NCCL_CUMEM_ENABLE": "0", "VLLM_NCCL_SO_PATH": "/usr/local/corex-4.5.0.20260619/lib64/libixsysnccl.so"},
+      "nodes": [
+        {"ssh_alias": "iluvatar150-01", "host": "192.168.162.58", "ssh_port": 14735, "host_key_alias": "[172.22.162.58]:14735", "container": "heteroserve-iluvatar", "reuse": true, "devices": [6, 7], "interface": "enp147s0f0", "interface_primary_ip": "192.168.0.12"},
+        {"ssh_alias": "iluvatar150-02", "host": "192.168.162.60", "ssh_port": 14735, "host_key_alias": "[172.22.162.60]:14735", "container": "heteroserve-iluvatar-pp", "reuse": false, "devices": [0, 1], "interface": "ens1f0np0", "peer_routes": [{"destination": "192.168.0.12", "gateway": "192.168.162.58"}]}
+      ]
+    }
+  },
+  "unavailable": {
+    "cambricon": "MLU590 .28/.29 have weights but no user-owned compatible vLLM environment",
+    "metax": "Only one C550 node is listed; a same-vendor two-node PP2 test requires another node",
+    "iluvatar200": "BI-V200 .13 is not paired with BI-V150 for the identical-device baseline"
+  }
+}

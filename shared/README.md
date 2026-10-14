@@ -1,5 +1,11 @@
 # 共用模型下载与分发
 
+`transfer_image.py --config <配置>` 直接将已缓存 Docker 镜像通过固定主机密钥的
+SSH 流传到对端 docker load，不落地镜像 tar；核对 image ID 后清理本次临时
+授权和密钥。它只确认传输与镜像身份，不能替代容器运行、依赖和模型验收。
+同厂商 TP/PP 的准备入口复用此工具，详见
+`homogeneous/experiments/pp_baseline/README.md`。
+
 `download_model.py` 复用节点已有 Python/curl，从 ModelScope 的不可变 revision 读取文件清单与 SHA256。可用 `--mirror hf-mirror` 优先下载国内镜像的 safetensors，失败时使用官方 ModelScope；两种来源均必须通过官方清单的大小与哈希检查。元数据始终从固定版本获取。支持已有 Python 3.7 环境、断点续传及多文件并发，不安装新环境。
 
 完成权重结构验收后写 `download_manifest.json`、`SHA256SUMS`、`DOWNLOAD_COMPLETE`。下载日志和报告放在 `artifacts/downloads/`，模型留在用户模型目录。

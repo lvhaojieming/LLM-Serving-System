@@ -1,0 +1,104 @@
+{
+  "status": "complete",
+  "started_at": "2026-10-14T07:02:23.542975+00:00",
+  "vendor": "iluvatar",
+  "tp": 2,
+  "pp": 2,
+  "total_devices": 4,
+  "precision": "BF16",
+  "execution": "native vLLM Ray executor; eager, prefix cache off",
+  "client_vllm": "0.23.0",
+  "config_sha256": "11672dd04c064d0806bbab29386bb8755375f295ff54379512a88094932db0ec",
+  "endpoint": "http://192.168.162.58:18358",
+  "dataset_sha256": "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4",
+  "benchmark_wrapper_sha256": "c9d91e0de7468718b0344401779e865f214ed23d4637a012237ebd79f4f14f04",
+  "validation": "all requests passed; fixed outputs; identical case input lengths; throughput recomputed",
+  "cases": {
+    "1": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 516.616211345885,
+      "request_throughput": 0.3871345799988765,
+      "output_throughput": 24.776613119928097,
+      "total_token_throughput": 126.33943450973337,
+      "mean_ttft_ms": 144.22698966693133,
+      "p95_ttft_ms": 356.62079758476466,
+      "p99_ttft_ms": 382.187102981843,
+      "mean_tpot_ms": 38.70813656302672,
+      "p95_tpot_ms": 39.188253421646856,
+      "p99_tpot_ms": 39.93838121818879
+    },
+    "4": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 259.73802029294893,
+      "request_throughput": 0.7700066388987926,
+      "output_throughput": 49.28042488952273,
+      "total_token_throughput": 251.28781657142648,
+      "mean_ttft_ms": 383.74406789196655,
+      "p95_ttft_ms": 798.3893600525331,
+      "p99_ttft_ms": 864.7803058056141,
+      "mean_tpot_ms": 76.35391850734041,
+      "p95_tpot_ms": 81.92552191811421,
+      "p99_tpot_ms": 83.74206893707787
+    },
+    "8": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 142.03442516596988,
+      "request_throughput": 1.4081093352283875,
+      "output_throughput": 90.1189974546168,
+      "total_token_throughput": 459.52944100510814,
+      "mean_ttft_ms": 751.3243057159707,
+      "p95_ttft_ms": 1301.9611741183326,
+      "p99_ttft_ms": 1655.8799030724913,
+      "mean_tpot_ms": 78.23876772593293,
+      "p95_tpot_ms": 88.91228662825944,
+      "p99_tpot_ms": 94.62053493707485
+    }
+  },
+  "completed_at": "2026-10-14T07:19:08.725459+00:00",
+  "deployment": {
+    "vendor": "iluvatar",
+    "image": "registry.iluvatar.com.cn:10443/vllm_plugin/corex_vllm_plugin:0.23.0-corex-4.5.0.20260619-ubuntu24.04-py3.12-x86_64-v1",
+    "image_id": "sha256:b01fe538df482b10418548d9d43ac15a348e2e30c218c9d75eb7c12ae195dbc4",
+    "tp": 2,
+    "pp": 2,
+    "config_sha256": "eacfef37ec08918f4ddb46628ad06d87980446d8a2db1321be8bea69e800e7d8",
+    "nodes": [
+      {
+        "ssh_alias": "iluvatar150-01",
+        "host": "192.168.162.58",
+        "ssh_port": 14735,
+        "host_key_alias": "[172.22.162.58]:14735",
+        "container": "heteroserve-iluvatar",
+        "reuse": true,
+        "devices": [
+          6,
+          7
+        ],
+        "interface": "enp147s0f0",
+        "container_id": "3b1a689e8564e59c1065dc08d63c5b4ce2cf1ac6465bf306d910ae0e5e1ab710"
+      },
+      {
+        "ssh_alias": "iluvatar150-02",
+        "host": "192.168.162.60",
+        "ssh_port": 14735,
+        "host_key_alias": "[172.22.162.60]:14735",
+        "container": "heteroserve-iluvatar-pp",
+        "reuse": false,
+        "devices": [
+          0,
+          1
+        ],
+        "interface": "ens1f0np0",
+        "container_id": "a5eb6100dd54ad96957e07c13e59a06d53d4e6e4647c454a6a4ce85bb76986af"
+      }
+    ]
+  },
+  "limitations": [
+    "Native vLLM two-node TP2/PP2; cross-vendor reference executor differs",
+    "One round, 200 requests per case; not maximum-capacity or isolated-chip measurement",
+    "Gloo peer primary address uses retained /32 route; same peer, same LAN NIC"
+  ]
+}

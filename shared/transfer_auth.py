@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 
 task_name = os.environ.get('MOQE_TRANSFER_TASK', 'moqe-model-transfer')
-assert task_name in {'moqe-model-transfer', 'moqe-image-transfer', 'moqe-qwen3-8b-transfer', 'moqe-qwen3-32b-transfer', 'moqe-community-gptq-transfer'}
+assert task_name in {'moqe-model-transfer', 'moqe-image-transfer', 'moqe-qwen3-8b-transfer', 'moqe-qwen3-32b-transfer', 'moqe-community-gptq-transfer', 'moqe-native-pp-image'}
 source_ip = os.environ.get('MOQE_TRANSFER_SOURCE', '192.168.162.23')
 import ipaddress
 ipaddress.ip_address(source_ip)
