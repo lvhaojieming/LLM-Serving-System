@@ -1,0 +1,332 @@
+{
+  "status": "complete",
+  "started_at": "2026-10-14T07:19:07.154713+00:00",
+  "vendor": "musa",
+  "tp": 2,
+  "pp": 2,
+  "total_devices": 4,
+  "precision": "BF16",
+  "execution": "native vLLM Ray executor; eager, prefix cache off",
+  "client_vllm": "0.23.0",
+  "config_sha256": "5b4fc17092ec74961ab6d0ecba3131fc3795bac5946326e5155f9956a062a0a5",
+  "endpoint": "http://192.168.162.97:18397",
+  "dataset_sha256": "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4",
+  "benchmark_wrapper_sha256": "c9d91e0de7468718b0344401779e865f214ed23d4637a012237ebd79f4f14f04",
+  "validation": "all requests passed; fixed outputs; identical case input lengths; throughput recomputed",
+  "cases": {
+    "1": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 2687.040508588776,
+      "request_throughput": 0.07443133043983742,
+      "output_throughput": 4.763605148149595,
+      "total_token_throughput": 24.290292532388744,
+      "mean_ttft_ms": 342.22200501477346,
+      "p95_ttft_ms": 657.8994066454468,
+      "p99_ttft_ms": 801.7014333698897,
+      "mean_tpot_ms": 207.82116681525835,
+      "p95_tpot_ms": 326.59222207638237,
+      "p99_tpot_ms": 367.780226030505
+    },
+    "4": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 134.30110945086926,
+      "request_throughput": 1.489190974056436,
+      "output_throughput": 95.3082223396119,
+      "total_token_throughput": 485.99002842844754,
+      "mean_ttft_ms": 273.0727933673188,
+      "p95_ttft_ms": 559.6473434008655,
+      "p99_ttft_ms": 713.7218291917816,
+      "mean_tpot_ms": 38.258037937339395,
+      "p95_tpot_ms": 42.79438289296295,
+      "p99_tpot_ms": 43.81265252451634
+    },
+    "8": {
+      "completed": 200,
+      "failed": 0,
+      "duration": 75.4510262850672,
+      "request_throughput": 2.6507260384287545,
+      "output_throughput": 169.6464664594403,
+      "total_token_throughput": 865.0511890110319,
+      "mean_ttft_ms": 443.9234827365726,
+      "p95_ttft_ms": 833.7870153132826,
+      "p99_ttft_ms": 994.4162885658427,
+      "mean_tpot_ms": 40.84580018539869,
+      "p95_tpot_ms": 46.34828635506213,
+      "p99_tpot_ms": 46.997968842171915
+    }
+  },
+  "completed_at": "2026-10-14T08:14:14.894956+00:00",
+  "artifact_integrity_verified": true,
+  "deployment": {
+    "vendor": "musa",
+    "image": "registry.mthreads.com/public/sqt-vllm-train-musa-bench:4.3.5_kuae2.1_hygon_ubuntu",
+    "image_id": "sha256:34cb8777a848bc0689118801fc720c46906b45cfab6dba95d7010601ba60b1c1",
+    "tp": 2,
+    "pp": 2,
+    "config_sha256": "5b4fc17092ec74961ab6d0ecba3131fc3795bac5946326e5155f9956a062a0a5",
+    "nodes": [
+      {
+        "ssh_alias": "s5000-01",
+        "host": "192.168.162.97",
+        "ssh_port": 22,
+        "host_key_alias": "172.22.162.97",
+        "container": "heteroserve-musa",
+        "reuse": true,
+        "devices": [
+          2,
+          3
+        ],
+        "interface": "ens18f0",
+        "container_id": "a725763f7114c94a7f113a162f27d421db6b611ed008e4690c36261114de1032",
+        "driver_hashes": []
+      },
+      {
+        "ssh_alias": "s5000-02",
+        "host": "192.168.162.96",
+        "ssh_port": 22,
+        "host_key_alias": "172.22.162.96",
+        "container": "heteroserve-musa-pp",
+        "reuse": false,
+        "devices": [
+          0,
+          1
+        ],
+        "interface": "ens21f0",
+        "driver_libraries": [
+          {
+            "source": "/lib/x86_64-linux-gnu/libmusa.so.4.3.8",
+            "target": "/lib/x86_64-linux-gnu/libmusa.so.4.3.8",
+            "link": "/lib/x86_64-linux-gnu/libmusa.so.1"
+          }
+        ],
+        "container_id": "8bdb98d38602655af5d84e0424a99c61a9aaf0413a33546283ec9eb979c38a0c",
+        "driver_hashes": [
+          {
+            "source": "/lib/x86_64-linux-gnu/libmusa.so.4.3.8",
+            "target": "/lib/x86_64-linux-gnu/libmusa.so.4.3.8",
+            "link": "/lib/x86_64-linux-gnu/libmusa.so.1",
+            "sha256": "8eee0afc04c5d07a905e16fb986be3336eff2bb99c98b005498abfaaf7ba31bb"
+          }
+        ]
+      }
+    ]
+  },
+  "source_config": {
+    "model": "Qwen3-14B",
+    "model_path": "/models/Qwen3-14B",
+    "dtype": "bfloat16",
+    "tp": 2,
+    "pp": 2,
+    "resource_limits_enabled": false,
+    "benchmark": {
+      "concurrencies": [
+        1,
+        4,
+        8
+      ],
+      "num_prompts": 200,
+      "num_warmups": 3,
+      "output_len": 64,
+      "seed": 20261010,
+      "temperature": 0
+    },
+    "client": {
+      "ssh_alias": "iluvatar150-01",
+      "container": "heteroserve-iluvatar"
+    },
+    "vendors": {
+      "ascend": {
+        "image": "quay.io/ascend/vllm-ascend:v0.11.0-a3",
+        "resource": "NPU",
+        "ray_port": 32000,
+        "api_port": 18323,
+        "engine_args": [
+          "--block-size",
+          "128"
+        ],
+        "env": {
+          "VLLM_USE_V1": "1",
+          "HCCL_HOST_SOCKET_PORT_RANGE": "61000-61031",
+          "HCCL_NPU_SOCKET_PORT_RANGE": "61100-61131",
+          "HCCL_IF_BASE_PORT": "61200"
+        },
+        "nodes": [
+          {
+            "ssh_alias": "ascend910c-01",
+            "host": "192.168.162.23",
+            "ssh_port": 22,
+            "host_key_alias": "172.22.162.23",
+            "container": "heteroserve-ascend-pp",
+            "reuse": false,
+            "devices": [
+              2,
+              3
+            ],
+            "interface": "enp196s0f0"
+          },
+          {
+            "ssh_alias": "ascend910c-02",
+            "host": "192.168.162.24",
+            "ssh_port": 22,
+            "host_key_alias": "172.22.162.24",
+            "container": "heteroserve-ascend-pp",
+            "reuse": false,
+            "devices": [
+              2,
+              3
+            ],
+            "interface": "enp196s0f0"
+          }
+        ]
+      },
+      "musa": {
+        "image": "registry.mthreads.com/public/sqt-vllm-train-musa-bench:4.3.5_kuae2.1_hygon_ubuntu",
+        "resource": "GPU",
+        "ray_port": 32200,
+        "api_port": 18397,
+        "engine_args": [
+          "--block-size",
+          "32"
+        ],
+        "env": {
+          "VLLM_USE_V1": "0",
+          "NCCL_IB_DISABLE": "1",
+          "MCCL_IB_DISABLE": "1",
+          "MCCL_NET": "Socket",
+          "MCCL_DEBUG": "WARN"
+        },
+        "nodes": [
+          {
+            "ssh_alias": "s5000-01",
+            "host": "192.168.162.97",
+            "ssh_port": 22,
+            "host_key_alias": "172.22.162.97",
+            "container": "heteroserve-musa",
+            "reuse": true,
+            "devices": [
+              2,
+              3
+            ],
+            "interface": "ens18f0"
+          },
+          {
+            "ssh_alias": "s5000-02",
+            "host": "192.168.162.96",
+            "ssh_port": 22,
+            "host_key_alias": "172.22.162.96",
+            "container": "heteroserve-musa-pp",
+            "reuse": false,
+            "devices": [
+              0,
+              1
+            ],
+            "interface": "ens21f0",
+            "driver_libraries": [
+              {
+                "source": "/lib/x86_64-linux-gnu/libmusa.so.4.3.8",
+                "target": "/lib/x86_64-linux-gnu/libmusa.so.4.3.8",
+                "link": "/lib/x86_64-linux-gnu/libmusa.so.1"
+              }
+            ]
+          }
+        ]
+      },
+      "hygon": {
+        "image": "pypi.sourcefind.cn/jenkins/model_test_env/vllm:0.25.1-latest",
+        "resource": "GPU",
+        "ray_port": 32400,
+        "api_port": 18352,
+        "engine_args": [],
+        "env": {
+          "NCCL_IB_DISABLE": "1",
+          "NCCL_CUMEM_ENABLE": "0",
+          "NCCL_NET": "Socket",
+          "NCCL_DEBUG": "WARN"
+        },
+        "nodes": [
+          {
+            "ssh_alias": "bw1100-02",
+            "host": "192.168.162.252",
+            "ssh_port": 22,
+            "host_key_alias": "172.22.162.252",
+            "container": "heteroserve-hygon-pp",
+            "reuse": false,
+            "devices": [
+              2,
+              3
+            ],
+            "interface": "ens14f0"
+          },
+          {
+            "ssh_alias": "bw1100-01",
+            "host": "192.168.162.251",
+            "ssh_port": 22,
+            "host_key_alias": "172.22.162.251",
+            "container": "heteroserve-hygon-pp",
+            "reuse": false,
+            "devices": [
+              0,
+              1
+            ],
+            "interface": "ens14f0"
+          }
+        ]
+      },
+      "iluvatar": {
+        "image": "registry.iluvatar.com.cn:10443/vllm_plugin/corex_vllm_plugin:0.23.0-corex-4.5.0.20260619-ubuntu24.04-py3.12-x86_64-v1",
+        "resource": "GPU",
+        "ray_port": 32600,
+        "api_port": 18358,
+        "engine_args": [],
+        "env": {
+          "NCCL_IB_DISABLE": "1",
+          "NCCL_CUMEM_ENABLE": "0",
+          "VLLM_NCCL_SO_PATH": "/usr/local/corex-4.5.0.20260619/lib64/libixsysnccl.so"
+        },
+        "nodes": [
+          {
+            "ssh_alias": "iluvatar150-01",
+            "host": "192.168.162.58",
+            "ssh_port": 14735,
+            "host_key_alias": "[172.22.162.58]:14735",
+            "container": "heteroserve-iluvatar",
+            "reuse": true,
+            "devices": [
+              6,
+              7
+            ],
+            "interface": "enp147s0f0",
+            "interface_primary_ip": "192.168.0.12"
+          },
+          {
+            "ssh_alias": "iluvatar150-02",
+            "host": "192.168.162.60",
+            "ssh_port": 14735,
+            "host_key_alias": "[172.22.162.60]:14735",
+            "container": "heteroserve-iluvatar-pp",
+            "reuse": false,
+            "devices": [
+              0,
+              1
+            ],
+            "interface": "ens1f0np0",
+            "peer_routes": [
+              {
+                "destination": "192.168.0.12",
+                "gateway": "192.168.162.58"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "unavailable": {
+      "cambricon": "MLU590 .28/.29 have weights but no user-owned compatible vLLM environment",
+      "metax": "Only one C550 node is listed; a same-vendor two-node PP2 test requires another node",
+      "iluvatar200": "BI-V200 .13 is not paired with BI-V150 for the identical-device baseline"
+    }
+  },
+  "interpretation": "600/600 requests succeeded and artifact integrity checks passed. Concurrency-1 throughput is much lower than c4/c8; cause not isolated, do not treat this as a clean hardware ranking."
+}
