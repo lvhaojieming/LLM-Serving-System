@@ -417,20 +417,19 @@
       "result_dir": "artifacts/baselines/cross-vendor-pp/performance-batched",
       "requests_per_case": 200,
       "concurrencies": [
-        1,
-        4,
-        8
+        4
       ],
       "output_tokens": 64,
       "seed": 20261010,
-      "launcher_pid": 41901,
+      "launcher_pid": 42500,
       "startup_failure_fixed": "CRLF normalized; no official request case occurred in failed launcher; .gitattributes now enforces shell/config LF",
-      "current_case": "c1",
+      "current_case": "c4",
+      "interrupted_case": "new c1 stopped on user c4-only steering; no complete c1 result",
       "warmups_completed": 3,
-      "observed_completed": 3,
+      "observed_completed": 11,
       "estimated_case_remaining_minutes": [
-        30,
-        45
+        15,
+        25
       ]
     },
     "cleanup": "No new containers/environments/project copies. Only previous owned executor ranks drained; existing native services and W4 experiment preserved. Source edits consolidated into existing modules; old valid baseline results retained."

@@ -208,7 +208,8 @@ bash /workspace/heterogeneous_compute/platforms/iluvatar/benchmark.sh \
 ```
 
 The config sets 200 ShareGPT requests per case, 3 warmups, 64 output tokens,
-EOS ignored, seed 20261010, concurrency 1/4/8, unlimited offered request rate,
+EOS ignored, seed 20261010, currently concurrency 4 only on user request
+(retained earlier runs used 1/4/8), unlimited offered request rate,
 and percentiles 50/95/99 for TTFT/TPOT/ITL/E2EL. Cases execute sequentially.
 The dataset and tokenizer are reused from the earlier native baseline; no
 additional copies or benchmark environments are created. Each result includes
