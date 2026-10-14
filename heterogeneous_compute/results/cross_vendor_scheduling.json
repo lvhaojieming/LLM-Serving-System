@@ -1,0 +1,119 @@
+{
+  "checked_at": "2026-10-14T08:47:41.402592+00:00",
+  "model": "Qwen3-14B BF16",
+  "tp": 2,
+  "pp": 2,
+  "devices": 4,
+  "stages": [
+    "Ascend .23",
+    "MUSA .97"
+  ],
+  "scope": "Custom vLLM-component executor: continuous admission, packed microbatches, CPU-staged TCP PP, native local TP. Not native vLLM Engine.",
+  "functional_passed": true,
+  "batch_invariance_passed": false,
+  "native_text_matched_cases": 6,
+  "native_text_cases": 7,
+  "unmatched_case_ids": [
+    "explain"
+  ],
+  "unit_tests": {
+    "passed": 10,
+    "uses_existing_torch": true
+  },
+  "continuous": {
+    "passed": true,
+    "requests": 12,
+    "tp_lane_tokens_match": true,
+    "token_prefixes_match": false,
+    "native_64token_text_match": true,
+    "overlap": [
+      {
+        "lane": 0,
+        "clock_uncertainty_ms": 0.05655735731124878,
+        "overlapping_windows": 167,
+        "conservative_max_overlap_ms": 100.21257866173983,
+        "max_packed_batch_size": 4,
+        "clock_assumption": "Stable monotonic offset during short acceptance; RTT uncertainty, clock drift not measured"
+      },
+      {
+        "lane": 1,
+        "clock_uncertainty_ms": 0.056551769375801086,
+        "overlapping_windows": 167,
+        "conservative_max_overlap_ms": 98.11617899686098,
+        "max_packed_batch_size": 4,
+        "clock_assumption": "Stable monotonic offset during short acceptance; RTT uncertainty, clock drift not measured"
+      }
+    ],
+    "scope": "Stage execution window overlap, including dispatch and native TP; not a GPU kernel profiler",
+    "refilled_before_all_requests_finished": true,
+    "max_observed_active": 8,
+    "max_observed_queued": 4,
+    "chunked_prefill_passed": true,
+    "chunked_prompt_tokens": 827,
+    "cancellation_passed": true,
+    "canceled_generated_tokens": 1
+  },
+  "idle_resume": {
+    "passed": true,
+    "requests": 7,
+    "tp_lane_tokens_match": true,
+    "active_after": 0,
+    "kv_owners_after": 0
+  },
+  "config": "heterogeneous_compute/configs/ascend_musa.json",
+  "source_sha256": {
+    "heterogeneous_compute/pipeline_execution.py": "6497b4d226524f20d94cf35191bb0bb930a48b92caed59ff06607515e109ea57",
+    "heterogeneous_compute/scheduling.py": "0aace8c9dcec6a886d867e1afbbcacfc2a66949b883625620c4b52b22d1e217d"
+  },
+  "nodes": [
+    {
+      "ssh_alias": "ascend910c-01",
+      "container_id": "625ac9d102f508dfce62b401a0e77552b2d512f68bed6581f8d431fecb3e3c8b",
+      "image_id": "sha256:70867a256476880c4312ae5dc29b4343b06ae43f99886e15b2b78f5d2429c235",
+      "versions": {
+        "torch": "2.7.1+cpu",
+        "transformers": "4.57.1",
+        "vllm": "0.11.0+empty"
+      }
+    },
+    {
+      "ssh_alias": "s5000-01",
+      "container_id": "a725763f7114c94a7f113a162f27d421db6b611ed008e4690c36261114de1032",
+      "image_id": "sha256:34cb8777a848bc0689118801fc720c46906b45cfab6dba95d7010601ba60b1c1",
+      "versions": {
+        "transformers": "4.52.4",
+        "vllm": "0.9.3.dev0+ga5dd03c1e.d20260309.empty",
+        "torch": "2.5.0"
+      }
+    }
+  ],
+  "numerical_limitation": "Long greedy output differs with batch size; same prompt across different output budgets is not token-prefix invariant. Cause not fully isolated. Not a general model-quality acceptance.",
+  "transport_diagnostics": "MCCL timed out when resuming a second wave. Current tested setting uses Socket, disables P2P and SHM, and fences native TP collectives on MUSA. Original services, drivers and containers preserved.",
+  "performance": {
+    "status": "running_startup_verified",
+    "client": "Official vLLM bench serve v0.23.0 on existing .58 container",
+    "concurrencies": [
+      1,
+      4,
+      8
+    ],
+    "requests_per_case": 200,
+    "output_tokens": 64,
+    "num_warmups": 3,
+    "seed": 20261010,
+    "temperature": 0,
+    "ignore_eos": true,
+    "result_dir": "artifacts/baselines/cross-vendor-pp/performance-continuous",
+    "serial_control": "heterogeneous_compute/results/cross_vendor_performance.json",
+    "verified_at": "2026-10-14T08:49:31.315869+00:00",
+    "warmups_completed": 3,
+    "first_case_completed_requests_at_check": 5,
+    "estimated_remaining_minutes": [
+      60,
+      90
+    ],
+    "scope": "Startup only; no final TTFT/TPOT/throughput claims yet. Do not poll after normal startup."
+  },
+  "raw_evidence": "artifacts/baselines/cross-vendor-pp/scheduled",
+  "cleanup": "No project copies or new environments/containers. Temporary local scripts were not created. Diagnostic runs retained in the task artifact directory for numerical/MCCL diagnosis; no unrelated resources deleted."
+}

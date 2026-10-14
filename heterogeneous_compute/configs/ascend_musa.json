@@ -4,7 +4,7 @@
   "tp": 2,
   "pp": 2,
   "resource_limits_enabled": false,
-  "status": "functional_acceptance_passed",
+  "status": "functional_acceptance_passed_batch_invariance_pending",
   "model_inference_verified": true,
   "master": "192.168.162.23",
   "port": 29650,
@@ -59,8 +59,14 @@
       "env": {
         "GLOO_SOCKET_IFNAME": "ens18f0",
         "VLLM_USE_V1": "0",
-        "OMP_NUM_THREADS": "2"
-      }
+        "OMP_NUM_THREADS": "2",
+        "MCCL_IB_DISABLE": "1",
+        "MCCL_NET": "Socket",
+        "MCCL_DEBUG": "WARN",
+        "MCCL_P2P_DISABLE": "1",
+        "MCCL_SHM_DISABLE": "1"
+      },
+      "tp_synchronize_collectives": true
     }
   ],
   "layer_interval": "start inclusive, end exclusive; actual vLLM PP layer allocation",
@@ -76,13 +82,13 @@
   ],
   "probe": "heterogeneous_compute/probes/communication_probe.py",
   "results": "artifacts/baselines/cross-vendor-pp/isolated-ports",
-  "next_requirement": "Production performance requires native attention metadata/kernel integration, continuous batching and pipeline overlap; broader numerical/quality evaluation pending",
+  "next_requirement": "Batch-size numerical invariance and broader quality validation pending; native attention, graphs and performance tuning remain separate",
   "execution": {
     "model_path": "/models/Qwen3-14B",
     "tp_port": 29661,
     "pp_port": 29662,
     "max_model_len": 2048,
-    "result_dir": "/workspace/artifacts/baselines/cross-vendor-pp/adapted",
+    "result_dir": "/workspace/artifacts/baselines/cross-vendor-pp/scheduled",
     "requests": [
       {
         "id": "math-first",
@@ -122,7 +128,13 @@
     ],
     "mode": "http",
     "api_port": 18230,
-    "scope": "vLLM model components with custom native local TP groups, CPU-staged PP, reference attention and serialized FIFO scheduler"
+    "scope": "vLLM model components, native local TP, CPU-staged PP, reference packed attention, continuous admission and two in-flight microbatches",
+    "scheduler": "continuous",
+    "max_active_requests": 8,
+    "microbatch_size": 4,
+    "max_inflight_batches": 2,
+    "max_batch_tokens": 1024,
+    "prefill_chunk_tokens": 512
   },
   "validation": {
     "references": {

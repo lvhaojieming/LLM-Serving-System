@@ -28,22 +28,39 @@ Engine/AsyncLLMEngine or a vendor-supported cross-vendor deployment.
 The common reference attention keeps KV locally, applies causal masking and
 GQA, accumulates attention scores/softmax/weighted values in FP32 and returns
 BF16 activations. The output projection uses BF16 weights/activations before
-converting logits to FP32, matching native output rounding. RMSNorm, RoPE and
+converting logits to FP32, retaining the serial control's precision policy. RMSNorm, RoPE and
 activations use vLLM reference methods; TP linear modules remain reused.
 
-Rank zero admits requests into one bounded FIFO and broadcasts scheduling to
-its local TP peer. Only one request executes at a time; pending HTTP requests
-queue. Stage ownership and contiguous token positions are checked, tokens
-return from the final stage on each lane, and cache release must be acknowledged
-before switching requests. Protocol version, payload size and tensor shapes
-are validated. Peer disconnects fail the operation; automatic rank recovery
-is not implemented. A serving idle wait does not expire the PP connection.
+Rank zero owns bounded admission and broadcasts each scheduling operation to its
+local TP peer. `execution.scheduler=continuous` admits up to 8 requests, packs
+up to 4 distinct requests / 1024 tokens into one model forward and allows two
+independent microbatches in flight. Each request has at most one chunk/token in
+flight. Stage zero executes the next microbatch while stage one processes the
+previous one; feedback has its own CPU receive thread, so SSE token emission does
+not wait for the next stage-zero forward to finish. Shorter requests release their
+KV and admission slots without waiting for longer requests; queued work refills
+available slots. When the pipeline is empty, ready work is split between two
+microbatches (four clients become 2+2) instead of packing every request into one
+batch and leaving the first stage waiting. The serial control remains available
+through `scheduler=serial`.
 
-No continuous batching, overlapped pipeline microbatches, graph execution,
-paged attention or quantization is implemented here. The raw completions API
-now streams one SSE event per generated token for official client timing. This
-correctness-first path is not a throughput baseline and must not be mixed with
-the earlier native vLLM performance measurements.
+KV is owned per request and per layer. Packed linears and RoPE use individual token
+positions, attention never crosses request boundaries, and decode attention uses
+batched FP32 scores with padding masks for different sequence lengths. Prefill is
+chunked at 512 tokens so long prompts can share execution with decode requests.
+The reference BF16 LM head is applied per sampled row to retain the original
+output-rounding path. A local KV owner is removed only after the peer acknowledges
+release. Cancellations are broadcast to both TP lanes; peer failures wake HTTP
+waiters with errors. Automatic rank recovery is not implemented.
+
+The JSON tensor protocol is version 2 for continuous scheduling, version 1 for the
+serial control; mixed versions fail immediately. Clock calibration and per-lane
+execution windows are retained to verify overlap between distinct microbatches.
+RTT bounds the initial offset; the short acceptance assumes stable monotonic
+clock rates and does not measure clock drift. The overlap includes dispatch and native TP operations; it is not a GPU kernel
+profiler or a hardware utilization measurement. No graph execution, paged attention
+or quantization is added by this change. This remains a custom vLLM-component
+reference executor, not the native vLLM Engine scheduler.
 
 ## Manage
 
@@ -56,7 +73,7 @@ python heterogeneous_compute/manage.py stop --ssh-config '<cluster_ssh_config>'
 ```
 
 The default config is `heterogeneous_compute/configs/ascend_musa.json`; change parameters
-there. Start transfers only this module and config, then starts four Python
+there. Start transfers the executor, scheduler module and config, then starts four Python
 processes inside existing containers. Existing pipeline processes block a
 duplicate start. Stop sends SIGTERM only to the scheduler head, drains pending
 work and terminates both stages through the protocol. It does not stop native
@@ -68,14 +85,14 @@ It binds the cluster LAN. The 172.22 external port mapping has not been tested.
 Supported path: text chat, `model=Qwen3-14B`, `temperature=0`, `stream=false`,
 `max_tokens` 1..128; total context bounded by 2048 tokens. Thinking is disabled.
 The queue holds up to 16 pending requests; full queue returns 429 and draining
-returns 503. A canceled queued request is skipped; already-executing work
-finishes and releases its KV cache. No native throughput claim is made.
+returns 503. A canceled queued request is skipped; active requests
+finish their in-flight microbatch and release their KV cache. No native throughput claim is made.
 
 ```json
 {"model":"Qwen3-14B","messages":[{"role":"user","content":"2+3等于多少？只输出数字。"}],"temperature":0,"max_tokens":8,"stream":false}
 ```
 
-## Validation and retained evidence
+## Earlier serial control validation and retained evidence
 
 - Native HCCL/MCCL TP2 and device->CPU->TCP->CPU->device transport passed.
 - All 40 real layers loaded; missing-weight check passed on every rank.
@@ -104,10 +121,37 @@ queued client timings are diagnostics and must not be reported as TTFT/TPOT
 benchmark results. Source/config SHA256 and dependency snapshots are retained
 with the final verification report. Existing uncommitted project work is preserved.
 
+## 连续调度验收及当前限制
+
+连续调度复用已有容器、实际模型权重、TP 分片和 PP 传输。验收分别报告
+`functional_passed` 和 `batch_invariance_passed`；只有两者同时满足才将
+总 `passed` 标为 true。严格验收失败不会伪装成全部通过。
+
+已观察到批大小相关的长回答差异：原来的七条对照请求中六条文本一致，
+长解释在批处理时出现 token 分歧，单请求执行可匹配原基线。逐行 LM head
+未消除这个差异；它仅保留原参考执行器的头部矩阵形状。不同批大小的
+逐 token 一致性与更广泛的质量评估仍未通过。vLLM 官方也为独立于批大小
+的确定性提供专门的 [batch invariance 支持](https://docs.vllm.ai/en/stable/features/batch_invariance/)，
+这里没有安装或宣称适配这些内核，也不能仅凭文档认定本次差异的确切来源。
+
+摩尔原生 TP 曾在恢复下一轮请求时发生 MCCL 超时，保留了诊断。当前此执行器
+使用配置驱动的 Socket / 禁用 P2P、SHM，并在本地 TP collective 后同步设备；
+这些设置仅作用于本次执行进程，不修改驱动、原生服务或容器。它们影响性能，
+正式 benchmark 必须随结果保留这些配置。质量一致性和性能均独立于功能验收。
+
+实际验收结果保存在 [调度结果摘要](results/cross_vendor_scheduling.json)：
+10 项单元验证通过；12 条不同输出长度的流式请求、补位、双 TP lane token、
+827-token 长提示词分块、客户端断开后释放 KV、空闲后再次并发请求均通过。
+记录到两个阶段不同微批次的执行窗口重叠；短验收使用 RTT 校准的时钟偏移。
+七条原生文本对照为 6/7，批大小的逐 token 一致性未通过；因此严格总验收
+`passed=false`，功能项 `functional_passed=true`。正式速度结果须等待官方压测完成。
+
 ## 独立验收入口
 
 从仓库根目录执行 `python heterogeneous_compute/validate.py --ssh-config <cluster_ssh_config>`。
 它同时提交配置中的七条请求，并与两个原生服务对照，校验六类非法请求；
+连续调度还验证 12 条不同输出长度的流式请求、请求补位、双 TP lane 输出、
+KV 释放及两个阶段不同微批次的执行窗口重叠。原生输出一致性单独报告；
 完整原始结果保存在被 Git 忽略的 `artifacts/`，必要摘要位于 `results/`。
 单元验证：`python -m unittest discover -s heterogeneous_compute/tests -v`。
 管理器识别整理前的旧执行进程，避免误启动第二套；排空后再启动会使用新目录。
@@ -141,6 +185,8 @@ including queue, prefill and network. TPOT is the official per-request mean
 post-first-token latency divided by output length minus one. ITL percentiles
 pool the observed token gaps. Output throughput is generated tokens divided
 by measured case duration for the whole four-device PP instance, not per GPU.
-Reference attention, CPU staging and serialized scheduling remain part of the
-baseline. Continuous batching/pipeline overlap is still absent; a higher
-client concurrency does not imply simultaneous model execution.
+The retained `results/cross_vendor_performance.json` measures the earlier serial
+control. The current configuration writes new results to
+`artifacts/baselines/cross-vendor-pp/performance-continuous/` and preserves the old
+measurements. Reference attention and CPU staging remain part of both paths.
+Only completed official benchmark results establish throughput or latency changes.

@@ -1,7 +1,7 @@
 """Experimental Qwen3 heterogeneous PP executor using vLLM TP model layers.
 
-Reference eager attention and a serialized scheduler deliberately precede any
-performance claims. No vendor engine files are modified. Tensor transport is
+Both serialized and continuously batched schedules reuse eager attention.
+No vendor engine files are modified. Tensor transport is
 framed JSON plus raw BF16, never Python pickle or whole-model HTTP chaining.
 """
 import argparse
@@ -15,7 +15,12 @@ import concurrent.futures
 import threading
 import uuid
 import signal
+import select
 from pathlib import Path
+if __package__:
+    from .scheduling import RequestState, BatchState, ContinuousScheduler
+else:
+    from scheduling import RequestState, BatchState, ContinuousScheduler
 
 
 class TensorChannel:
@@ -23,8 +28,9 @@ class TensorChannel:
     MAX_HEADER = 65536
     MAX_PAYLOAD = 64 * 1024 * 1024
 
-    def __init__(self, connection):
+    def __init__(self, connection, version=1):
         self.connection = connection
+        self.VERSION = version
         connection.settimeout(180)
         connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
@@ -57,11 +63,9 @@ class TensorChannel:
 
     def receive(self, device, allow_idle=False):
         if allow_idle:
-            self.connection.settimeout(None)
-        try:
-            length, = struct.unpack('!I', self.read(4))
-        finally:
-            self.connection.settimeout(180)
+            # Keep the send/partial-packet timeout bounded on this duplex socket.
+            select.select([self.connection], [], [])
+        length, = struct.unpack('!I', self.read(4))
         if not 0 < length <= self.MAX_HEADER:
             raise ValueError('Invalid PP header length')
         header = json.loads(self.read(length))
@@ -81,41 +85,19 @@ class TensorChannel:
         return header['metadata'], tensors
 
 
-class RequestState:
-    """One active request per rank; sequence guards reject stale KV reuse."""
-    def __init__(self):
-        self.request_id = None
-        self.position = 0
-        self.caches = {}
-
-    def advance(self, request_id, positions):
-        if not positions:
-            raise ValueError('Empty token positions')
-        if self.request_id is None:
-            if not positions or positions[0] != 0:
-                raise ValueError('New request must start at position zero')
-            self.request_id = request_id
-        if request_id != self.request_id:
-            raise ValueError('Release active request before switching KV ownership')
-        if positions != list(range(self.position, self.position + len(positions))):
-            raise ValueError('Non-contiguous or stale PP token positions')
-        self.position += len(positions)
-
-    def release(self, request_id):
-        if self.request_id != request_id:
-            raise ValueError('Release does not own active KV cache')
-        self.caches.clear()
-        self.request_id = None
-        self.position = 0
-
-
 class ParallelGroup:
     """vLLM group interface: native TP stays local, PP is transport-managed."""
-    def __init__(self, rank, size, device, native=True):
+    def __init__(self, rank, size, device, native=True, synchronize_collectives=False):
         self.rank_in_group = rank
         self.world_size = size
         self.device = device
         self.native = native
+        self.synchronize_collectives = synchronize_collectives
+
+    def synchronize(self):
+        if self.synchronize_collectives:
+            import torch
+            getattr(torch, self.device.type).synchronize()
 
     @property
     def is_first_rank(self):
@@ -128,6 +110,7 @@ class ParallelGroup:
     def all_reduce(self, tensor):
         import torch.distributed as dist
         dist.all_reduce(tensor)
+        self.synchronize()
         return tensor
 
     def all_gather(self, tensor, dim=-1):
@@ -135,7 +118,51 @@ class ParallelGroup:
         import torch.distributed as dist
         pieces = [torch.empty_like(tensor) for _ in range(self.world_size)]
         dist.all_gather(pieces, tensor)
+        self.synchronize()
         return torch.cat(pieces, dim=dim)
+
+
+def packed_attention(q, k, v, attention, state, index):
+    """Packed projections, separate KV owners; fuse independent decode rows."""
+    import torch
+    n, d = q.shape[0], attention.head_dim
+    if n != sum(s['length'] for s in state.segments):
+        raise ValueError('Packed attention rows disagree with scheduler layout')
+    queries = q.reshape(n, attention.num_heads, d).transpose(0, 1)
+    keys = k.reshape(n, attention.num_kv_heads, d).transpose(0, 1)
+    values = v.reshape(n, attention.num_kv_heads, d).transpose(0, 1)
+    ratio = attention.num_heads // attention.num_kv_heads
+    pieces = []
+    for segment in state.segments:
+        start, count = segment['start'], segment['length']
+        owner = segment['owner']
+        previous = owner.caches.get(index)
+        past = 0 if previous is None else previous[0].shape[1]
+        if past != segment['past']:
+            raise ValueError('KV length disagrees with request token positions')
+        kk, vv = keys[:, start:start+count], values[:, start:start+count]
+        if previous is not None:
+            kk, vv = torch.cat((previous[0], kk), 1), torch.cat((previous[1], vv), 1)
+        owner.caches[index] = (kk, vv)
+        pieces.append((queries[:, start:start+count], kk.repeat_interleave(ratio, 0),
+                       vv.repeat_interleave(ratio, 0), past))
+    if len(pieces) > 1 and all(s['length'] == 1 for s in state.segments):
+        maximum = max(kk.shape[1] for _,kk,_,_ in pieces)
+        lengths = torch.tensor([kk.shape[1] for _,kk,_,_ in pieces], device=q.device)
+        qq = torch.stack([p[0] for p in pieces])
+        kk = torch.stack([torch.nn.functional.pad(p[1], (0, 0, 0, maximum-p[1].shape[1])) for p in pieces])
+        vv = torch.stack([torch.nn.functional.pad(p[2], (0, 0, 0, maximum-p[2].shape[1])) for p in pieces])
+        scores = torch.matmul(qq.float(), kk.float().transpose(-1, -2)) * attention.scaling
+        mask = torch.arange(maximum, device=q.device)[None, :] >= lengths[:, None]
+        scores.masked_fill_(mask[:, None, None, :], float('-inf'))
+        return torch.matmul(scores.softmax(-1), vv.float()).to(q.dtype).reshape(n, -1)
+    outputs = []
+    for qq,kk,vv,past in pieces:
+        scores = torch.matmul(qq.float(), kk.float().transpose(1, 2)) * attention.scaling
+        mask = torch.arange(kk.shape[1], device=q.device)[None, :] > (past+torch.arange(qq.shape[1], device=q.device)[:, None])
+        scores.masked_fill_(mask[None, :, :], float('-inf'))
+        outputs.append(torch.matmul(scores.softmax(-1), vv.float()).to(q.dtype).transpose(0, 1).reshape(qq.shape[1], -1))
+    return torch.cat(outputs, dim=0)
 
 
 def load_stage(config, stage, lane):
@@ -157,7 +184,8 @@ def load_stage(config, stage, lane):
     cpu_group = dist.new_group([0, 1], backend='gloo',
                                timeout=datetime.timedelta(days=365))
     from vllm.distributed import parallel_state
-    parallel_state._TP = ParallelGroup(lane, 2, device)
+    parallel_state._TP = ParallelGroup(lane, 2, device,
+                                      synchronize_collectives=spec.get('tp_synchronize_collectives', False))
     parallel_state._PP = ParallelGroup(stage, 2, device, native=False)
     from vllm.engine.arg_utils import EngineArgs
     from vllm.config import set_current_vllm_config
@@ -196,30 +224,13 @@ def load_stage(config, stage, lane):
         if (hasattr(module, 'forward_native')
                 and type(module).forward_native is not CustomOp.forward_native):
             module.forward = module.forward_native
-    state = RequestState()
+    state = BatchState(config['execution'].get('max_active_requests', 8))
     for index in range(start, end):
         attention = model.model.layers[index].self_attn
 
         def bind(attention, index):
             def forward(q, k, v, **kwargs):
-                n, d = q.shape[0], attention.head_dim
-                queries = q.reshape(n, attention.num_heads, d).transpose(0, 1)
-                keys = k.reshape(n, attention.num_kv_heads, d).transpose(0, 1)
-                values = v.reshape(n, attention.num_kv_heads, d).transpose(0, 1)
-                previous = state.caches.get(index)
-                past = 0 if previous is None else previous[0].shape[1]
-                if previous is not None:
-                    keys = torch.cat((previous[0], keys), dim=1)
-                    values = torch.cat((previous[1], values), dim=1)
-                state.caches[index] = (keys, values)
-                ratio = attention.num_heads // attention.num_kv_heads
-                keys = keys.repeat_interleave(ratio, dim=0)
-                values = values.repeat_interleave(ratio, dim=0)
-                scores = torch.matmul(queries.float(), keys.float().transpose(1, 2)) * attention.scaling
-                mask = torch.arange(keys.shape[1], device=device)[None, :] > (past + torch.arange(n, device=device)[:, None])
-                scores = scores.masked_fill(mask[None, :, :], float('-inf'))
-                output = torch.matmul(scores.softmax(-1), values.float()).to(q.dtype)
-                return output.transpose(0, 1).contiguous().reshape(n, -1)
+                return packed_attention(q, k, v, attention, state, index)
             return forward
         attention.attn.forward = bind(attention, index)
     model.eval()
@@ -250,15 +261,17 @@ def open_channel(config, stage, lane):
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(1)
-    return TensorChannel(connection)
+    version = 2 if config['execution'].get('scheduler') == 'continuous' else 1
+    return TensorChannel(connection, version)
 
 
-def schedule_requests(config, lane, cpu_group, tokenizer):
-    """Rank zero owns FIFO admission; every TP lane executes one command."""
-    import torch.distributed as dist
+def create_admission(config, lane, tokenizer):
+    """Shared HTTP admission for both scheduling policies."""
     admission = queue.Queue(maxsize=16)
     server = None
-    lifecycle = {'draining': False, 'completed': 0}
+    lifecycle = {'draining': False, 'completed': 0, 'active_requests': 0,
+                 'inflight_batches': 0, 'kv_owners': 0, 'max_batch_size': 0,
+                 'max_inflight_batches': 0, 'admitted_requests': 0}
     if lane == 0 and config['execution'].get('mode') == 'http':
         import asyncio
         import uvicorn
@@ -269,7 +282,7 @@ def schedule_requests(config, lane, cpu_group, tokenizer):
         @app.get('/health')
         async def health():
             return dict(ready=not lifecycle['draining'], tp=2, pp=2, queue=admission.qsize(),
-                        execution='serialized_reference_attention')
+                        execution=config['execution'].get('scheduler', 'serial'), **lifecycle)
 
         @app.get('/v1/models')
         async def models():
@@ -277,8 +290,8 @@ def schedule_requests(config, lane, cpu_group, tokenizer):
 
         @app.get('/metrics')
         async def metrics():
-            return Response(f"heteroserve_pp_queued_requests {admission.qsize()}\n"
-                            f"heteroserve_pp_completed_requests_total {lifecycle['completed']}\n",
+            return Response(f"heteroserve_pp_queued_requests {admission.qsize()}\n"+
+                            ''.join(f'heteroserve_pp_{key} {int(value)}\n' for key,value in lifecycle.items()),
                             media_type='text/plain')
 
         @app.post('/v1/completions')
@@ -378,6 +391,13 @@ def schedule_requests(config, lane, cpu_group, tokenizer):
             lifecycle['draining'] = True
         signal.signal(signal.SIGTERM, drain)
         print(json.dumps(dict(event='http_ready', host=config['master'], port=config['execution']['api_port'])), flush=True)
+    return admission, lifecycle, server
+
+
+def schedule_requests(config, lane, cpu_group, tokenizer):
+    """Serialized control: rank zero admits one complete request at a time."""
+    import torch.distributed as dist
+    admission, lifecycle, server = create_admission(config, lane, tokenizer)
     index = 0
     try:
         while True:
@@ -408,7 +428,21 @@ def schedule_requests(config, lane, cpu_group, tokenizer):
             server.should_exit = True
 
 
-def execute(config, stage, lane):
+def finish_future(future, row):
+    if future is None:
+        return
+    try:
+        future.set_result(row)
+    except concurrent.futures.InvalidStateError:
+        if not future.cancelled():
+            raise
+    finally:
+        # A canceled stream may leave a to_thread(queue.get) waiter behind.
+        if hasattr(future, 'token_events'):
+            future.token_events.put(None)
+
+
+def execute_serial(config, stage, lane):
     import torch
     model, state, device, cpu_group = load_stage(config, stage, lane)
     channel = open_channel(config, stage, lane)
@@ -497,10 +531,7 @@ def execute(config, stage, lane):
                     directory.mkdir(parents=True, exist_ok=True)
                     with (directory/f'stage0-lane{lane}.jsonl').open('a') as sink:
                         sink.write(json.dumps(row, ensure_ascii=False)+'\n')
-                if future is not None and not future.cancelled():
-                    future.set_result(row)
-                    if hasattr(future, 'token_events'):
-                        future.token_events.put(None)
+                finish_future(future, row)
                 print(json.dumps(dict(event='request_complete', **row), ensure_ascii=False), flush=True)
             channel.send(dict(op='stop'))
     channel.connection.close()
@@ -509,6 +540,333 @@ def execute(config, stage, lane):
     (out/f'stage{stage}-lane{lane}.json').write_text(json.dumps(dict(stage=stage, lane=lane,
         scope='vLLM model layers, native TP, reference attention, CPU-staged PP, serialized requests',
         requests=rows, caches_after_release=len(state.caches)), ensure_ascii=False, indent=2))
+
+
+class ExecutionTrace:
+    def __init__(self, config, stage, lane):
+        directory = Path(config['execution']['result_dir'])
+        directory.mkdir(parents=True, exist_ok=True)
+        self.path = directory/f'timeline-stage{stage}-lane{lane}.jsonl'
+        self.lock = threading.Lock()
+
+    def write(self, **event):
+        with self.lock, self.path.open('a') as sink:
+            sink.write(json.dumps(event)+'\n')
+
+
+def calibrate_channel(channel, stage, trace):
+    """Bound clock offset using minimum RTT; timelines are execution windows."""
+    if stage == 0:
+        estimates = []
+        for sequence in range(8):
+            start = time.perf_counter()
+            channel.send(dict(op='clock_ping', sequence=sequence))
+            response, _ = channel.receive('cpu')
+            end = time.perf_counter()
+            if response.get('op') != 'clock_pong' or response.get('sequence') != sequence:
+                raise ValueError('Invalid PP clock handshake')
+            estimates.append(dict(offset=response['remote_time']-(start+end)/2,
+                                  uncertainty=(end-start)/2))
+        calibration = min(estimates, key=lambda x:x['uncertainty'])
+        channel.send(dict(op='clock_calibrated', **calibration))
+    else:
+        for sequence in range(8):
+            command, _ = channel.receive('cpu')
+            if command != dict(op='clock_ping', sequence=sequence):
+                raise ValueError('Invalid PP clock handshake')
+            channel.send(dict(op='clock_pong', sequence=sequence, remote_time=time.perf_counter()))
+        calibration, _ = channel.receive('cpu')
+        if calibration.pop('op') != 'clock_calibrated':
+            raise ValueError('Invalid PP clock calibration')
+    trace.write(event='clock_calibration', **calibration)
+    return calibration
+
+
+class FeedbackReceiver:
+    """CPU feedback and SSE emission can run while the main thread executes TP."""
+    def __init__(self, channel, tokenizer, eos_ids, trace):
+        self.channel, self.tokenizer, self.eos_ids, self.trace = channel, tokenizer, eos_ids, trace
+        self.queue = queue.Queue()
+        self.lock = threading.Lock()
+        self.pending, self.requests = {}, {}
+        self.closing = False
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def register(self, item, future):
+        with self.lock:
+            self.requests[item['id']] = dict(item=item, future=future, output=[], text='')
+
+    def expect(self, packet):
+        with self.lock:
+            if packet['batch_id'] in self.pending:
+                raise ValueError('Duplicate dispatched microbatch')
+            self.pending[packet['batch_id']] = packet['segments']
+
+    def emit(self, response):
+        with self.lock:
+            segments = self.pending.pop(response['batch_id'])
+            samples = response['samples']
+            if set(samples) != {s['request_id'] for s in segments}:
+                raise ValueError('Feedback does not match dispatched requests')
+            for segment in segments:
+                identifier, token = segment['request_id'], samples[segment['request_id']]
+                entry = self.requests[identifier]
+                if (segment['step'] != len(entry['output']) or
+                    (segment['sample_token'] and type(token) is not int) or
+                    (not segment['sample_token'] and token is not None)):
+                    raise ValueError('Stale or invalid token feedback')
+                if token is None:
+                    continue
+                entry['output'].append(token)
+                future, item = entry['future'], entry['item']
+                if future is None or future.cancelled() or not hasattr(future, 'token_events'):
+                    continue
+                stop = not item.get('ignore_eos', False) and token in self.eos_ids
+                finished = stop or len(entry['output']) == item['max_tokens']
+                decoded = self.tokenizer.decode(entry['output'], skip_special_tokens=True)
+                if decoded.endswith('\ufffd') and not finished:
+                    delta = ''
+                elif decoded.startswith(entry['text']):
+                    delta, entry['text'] = decoded[len(entry['text']):], decoded
+                else:
+                    raise RuntimeError('Incremental decoder changed an emitted text prefix')
+                future.token_events.put(dict(index=0, text=delta,
+                    finish_reason=('stop' if stop else 'length') if finished else None))
+
+    def run(self):
+        try:
+            while not self.closing:
+                response, tensors = self.channel.receive('cpu', allow_idle=True)
+                if tensors or response.get('op') not in {'completed_batch', 'released'}:
+                    raise ValueError('Invalid PP feedback')
+                if response['op'] == 'completed_batch':
+                    self.emit(response)
+                    self.trace.write(event='peer_execution', **response)
+                self.queue.put(response)
+        except Exception as error:
+            if not self.closing:
+                self.queue.put(error)
+
+    def forget(self, identifier):
+        with self.lock:
+            return self.requests.pop(identifier)
+
+    def close(self):
+        self.closing = True
+        try:
+            self.channel.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.thread.join(timeout=5)
+
+
+def execute_continuous(config, stage, lane):
+    import torch
+    import torch.distributed as dist
+    from vllm.sequence import IntermediateTensors
+    model, state, device, cpu_group = load_stage(config, stage, lane)
+    channel = open_channel(config, stage, lane)
+    trace = ExecutionTrace(config, stage, lane)
+    calibrate_channel(channel, stage, trace)
+    accelerator = getattr(torch, config['stages'][stage]['device'])
+    directory = Path(config['execution']['result_dir'])
+    receiver, server = None, None
+    try:
+        with torch.inference_mode():
+            if stage == 1:
+                expected_batch = 0
+                while True:
+                    packet, tensors = channel.receive(device, allow_idle=True)
+                    if packet['op'] == 'stop':
+                        if state.requests:
+                            raise ValueError('Cannot stop with live KV owners')
+                        break
+                    if packet['op'] == 'release':
+                        state.release(packet['request_id'])
+                        trace.write(event='release', request_id=packet['request_id'], kv_owners=len(state.requests))
+                        channel.send(dict(op='released', request_id=packet['request_id']))
+                        continue
+                    if packet['op'] != 'forward_batch' or packet['batch_id'] != expected_batch:
+                        raise ValueError('Invalid or out-of-order PP microbatch')
+                    expected_batch += 1
+                    segments = packet['segments']
+                    positions = [p for s in segments for p in s['positions']]
+                    expected = (len(positions), model.config.hidden_size)
+                    if set(tensors) != {'hidden_states', 'residual'} or any(tuple(t.shape) != expected for t in tensors.values()):
+                        raise ValueError('PP activations disagree with packed positions')
+                    state.install(segments)
+                    started = time.perf_counter()
+                    hidden = model(None, torch.tensor(positions, dtype=torch.int64, device=device), IntermediateTensors(tensors))
+                    offset, sample_rows, owners = 0, [], []
+                    samples = {s['request_id']:None for s in segments}
+                    for segment in segments:
+                        offset += len(segment['positions'])
+                        if segment['sample_token']:
+                            sample_rows.append(offset-1)
+                            owners.append(segment['request_id'])
+                    if sample_rows:
+                        # Keep the serial control's BF16 head shape; decoder math is batched.
+                        logits = torch.cat([torch.nn.functional.linear(hidden[row:row+1], model.lm_head.weight)
+                                            for row in sample_rows], dim=0).float()
+                        from vllm.distributed import get_tp_group
+                        logits = get_tp_group().all_gather(logits)[:, :model.config.vocab_size]
+                        samples.update(zip(owners, logits.argmax(-1).tolist()))
+                    accelerator.synchronize()
+                    ended = time.perf_counter()
+                    trace.write(event='execution', batch_id=packet['batch_id'], start=started, end=ended,
+                                batch_size=len(segments), tokens=len(positions))
+                    channel.send(dict(op='completed_batch', batch_id=packet['batch_id'], samples=samples,
+                                      start=started, end=ended))
+            else:
+                from transformers import AutoTokenizer
+                tokenizer = AutoTokenizer.from_pretrained(config['execution']['model_path'], local_files_only=True)
+                eos_ids = {tokenizer.eos_token_id, 151645}
+                settings = config['execution']
+                scheduler = ContinuousScheduler(max_active=settings.get('max_active_requests', 8),
+                    microbatch_size=settings.get('microbatch_size', 4), max_inflight=settings.get('max_inflight_batches', 2),
+                    max_batch_tokens=settings.get('max_batch_tokens', 1024), prefill_chunk_tokens=settings.get('prefill_chunk_tokens', 512))
+                admission, lifecycle, server = create_admission(config, lane, tokenizer)
+                if lane == 0 and settings.get('mode') != 'http':
+                    for original in settings['requests']:
+                        item = dict(original)
+                        item.setdefault('prompt_token_ids', tokenizer.apply_chat_template([dict(role='user', content=item['prompt'])],
+                            tokenize=True, add_generation_prompt=True, enable_thinking=False))
+                        admission.put_nowait((item, None))
+                    lifecycle['draining'] = True
+                receiver = FeedbackReceiver(channel, tokenizer, eos_ids, trace)
+                receiver.thread.start()
+                starts, rows = {}, []
+                while True:
+                    command, future = None, None
+                    if lane == 0:
+                        while command is None:
+                            try:
+                                feedback = receiver.queue.get_nowait()
+                            except queue.Empty:
+                                feedback = None
+                            if feedback is not None:
+                                command = dict(op='feedback', response=feedback) if not isinstance(feedback, Exception) else dict(op='failure', error=str(feedback))
+                            elif len(scheduler.active) < scheduler.max_active and not admission.empty():
+                                item, future = admission.get_nowait()
+                                if future is not None and future.cancelled():
+                                    continue
+                                command = dict(op='admit', item=item)
+                            else:
+                                command = scheduler.plan()
+                                if command is None and lifecycle['draining'] and admission.empty() and not scheduler.active:
+                                    command = dict(op='stop')
+                                elif command is None:
+                                    try:
+                                        feedback = receiver.queue.get(timeout=0.05)
+                                        command = dict(op='feedback', response=feedback) if not isinstance(feedback, Exception) else dict(op='failure', error=str(feedback))
+                                    except queue.Empty:
+                                        pass
+                    if lane == 0 and command['op'] == 'feedback':
+                        command['canceled'] = [identifier for identifier,request in scheduler.active.items()
+                                               if request.future is not None and request.future.cancelled()]
+                    broadcast = [command]
+                    dist.broadcast_object_list(broadcast, src=0, group=cpu_group)
+                    command = broadcast[0]
+                    operation = command['op']
+                    if operation == 'failure':
+                        raise RuntimeError(command['error'])
+                    if operation == 'admit':
+                        item = command['item']
+                        if len(item['prompt_token_ids'])+item['max_tokens'] > settings['max_model_len']:
+                            raise ValueError('Request exceeds configured context bound')
+                        if not scheduler.admit(item, future):
+                            raise RuntimeError('Scheduler admission overflow')
+                        receiver.register(item, future)
+                    elif operation == 'forward_batch':
+                        if lane != 0 and scheduler.plan() != command:
+                            raise RuntimeError('TP lanes disagree on scheduling')
+                        state.install(command['segments'])
+                        receiver.expect(command)
+                        positions = [p for s in command['segments'] for p in s['positions']]
+                        tokens = [t for s in command['segments'] for t in s['input_token_ids']]
+                        started = time.perf_counter()
+                        starts[command['batch_id']] = started
+                        intermediate = model(torch.tensor(tokens, dtype=torch.int64, device=device),
+                                             torch.tensor(positions, dtype=torch.int64, device=device))
+                        accelerator.synchronize()
+                        ended = time.perf_counter()
+                        trace.write(event='execution', batch_id=command['batch_id'], start=started, end=ended,
+                                    batch_size=len(command['segments']), tokens=len(positions))
+                        channel.send(command, dict(hidden_states=intermediate['hidden_states'], residual=intermediate['residual']))
+                    elif operation == 'feedback':
+                        response = command['response']
+                        if lane != 0:
+                            own = receiver.queue.get(timeout=180)
+                            if isinstance(own, Exception):
+                                raise own
+                            # Compare ownership and tokens; clocks and duration differ by lane.
+                            if {k:v for k,v in own.items() if k not in {'start','end'}} != {k:v for k,v in response.items() if k not in {'start','end'}}:
+                                raise RuntimeError('TP lanes disagree on feedback')
+                            response = own
+                        if response['op'] == 'completed_batch':
+                            elapsed = time.perf_counter()-starts.pop(response['batch_id'])
+                            finished = scheduler.complete(response['batch_id'], response['samples'], elapsed, eos_ids,
+                                                          canceled_ids=command['canceled'])
+                            for identifier in finished:
+                                channel.send(dict(op='release', request_id=identifier))
+                        else:
+                            identifier = response['request_id']
+                            state.release(identifier)
+                            request = scheduler.released(identifier)
+                            emitted = receiver.forget(identifier)
+                            if emitted['output'] != request.output:
+                                raise RuntimeError('Emitted tokens disagree with scheduled tokens')
+                            row = dict(id=identifier, prompt=request.item['prompt'], prompt_token_ids=request.item['prompt_token_ids'],
+                                generated_token_ids=request.output, text=tokenizer.decode(request.output, skip_special_tokens=True),
+                                step_seconds=request.step_seconds, stopped_on_eos=request.stopped_on_eos,
+                                released_request_kv_entries=0, remaining_kv_owners=len(state.requests))
+                            with (directory/f'stage0-lane{lane}.jsonl').open('a') as sink:
+                                sink.write(json.dumps(row, ensure_ascii=False)+'\n')
+                            if settings.get('mode') != 'http':
+                                rows.append(row)
+                            finish_future(request.future, row)
+                            trace.write(event='release', request_id=identifier, kv_owners=len(state.requests))
+                            print(json.dumps(dict(event='request_complete', id=identifier, tokens=len(request.output),
+                                                  remaining_kv_owners=len(state.requests))), flush=True)
+                    elif operation == 'stop':
+                        channel.send(command)
+                        break
+                    else:
+                        raise ValueError('Unknown scheduler operation')
+                    lifecycle.update(active_requests=len(scheduler.active), inflight_batches=len(scheduler.inflight),
+                        kv_owners=len(state.requests), **scheduler.stats)
+                (directory/f'stage0-lane{lane}.json').write_text(json.dumps(dict(stage=0, lane=lane, scheduler='continuous',
+                    stats=scheduler.stats, requests=rows, caches_after_release=len(state.requests)), ensure_ascii=False, indent=2))
+    finally:
+        if stage == 0 and receiver is not None:
+            lifecycle['draining'] = True
+            # Wake HTTP waiters on peer failure; never leave token-event readers hanging.
+            for entry in list(receiver.requests.values()):
+                pending = entry['future']
+                if pending is not None and not pending.done():
+                    pending.set_exception(RuntimeError('PP executor stopped before cache release'))
+                if pending is not None and hasattr(pending, 'token_events'):
+                    pending.token_events.put(None)
+            while not admission.empty():
+                _, pending = admission.get_nowait()
+                if pending is not None and not pending.done():
+                    pending.set_exception(RuntimeError('PP executor stopped before admission'))
+                    if hasattr(pending, 'token_events'):
+                        pending.token_events.put(None)
+            if server is not None:
+                server.should_exit = True
+            receiver.close()
+        channel.connection.close()
+
+
+def execute(config, stage, lane):
+    scheduler = config['execution'].get('scheduler', 'serial')
+    if scheduler == 'continuous':
+        execute_continuous(config, stage, lane)
+    elif scheduler == 'serial':
+        execute_serial(config, stage, lane)
+    else:
+        raise ValueError('Unknown scheduler policy')
 
 
 def main():
