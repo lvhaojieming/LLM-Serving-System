@@ -30,6 +30,15 @@ def write_json(path, value):
     temporary.replace(path)
 
 
+def inside(path, root):
+    """Support the existing Python 3.7 runtime as well as newer nodes."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def model_files(model, revision):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", model):
         raise ValueError("Expected an organization/model identifier")
@@ -63,7 +72,7 @@ def model_files(model, revision):
 
 def fetch(item, destination):
     path = destination / item["path"]
-    if path.is_symlink() or not path.resolve().is_relative_to(destination):
+    if path.is_symlink() or not inside(path.resolve(), destination):
         raise ValueError("Model asset escaped the destination")
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -76,10 +85,13 @@ def fetch(item, destination):
     for attempt in range(6):
         if partial.exists() and partial.stat().st_size == item["size"]:
             break
-        response = subprocess.run(["curl", "--fail", "--location", "--silent", "--show-error",
-            "--connect-timeout", "15", "--speed-time", "60", "--speed-limit", "1024",
-            "--continue-at", "-", "--output", str(partial), item["url"]],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for url in item.get('download_urls', [item['url']]):
+            response = subprocess.run(["curl", "--fail", "--location", "--silent", "--show-error",
+                "--connect-timeout", "15", "--speed-time", "60", "--speed-limit", "1024",
+                "--continue-at", "-", "--output", str(partial), url],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if response.returncode == 0:
+                break
         if response.returncode == 0:
             break
         print(json.dumps({"event": "retry", "file": item["path"], "attempt": attempt + 1,
@@ -101,7 +113,7 @@ def verify_weights(destination):
     seen, dtypes, parameters, tensor_bytes = set(), {}, 0, 0
     for name in sorted(set(mapping.values())):
         path = destination / name
-        if not path.resolve().is_relative_to(destination):
+        if not inside(path.resolve(), destination):
             raise ValueError("Weight index escaped the model directory")
         with path.open("rb") as stream:
             length = struct.unpack("<Q", stream.read(8))[0]
@@ -150,6 +162,7 @@ def main():
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument('--mirror', choices=['modelscope', 'hf-mirror'], default='modelscope')
     args = parser.parse_args()
     if not 1 <= args.workers <= 16:
         parser.error("Use 1 to 16 concurrent file downloads")
@@ -162,6 +175,12 @@ def main():
     with report.with_suffix(".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         files = model_files(args.model, args.revision)
+        if args.mirror == 'hf-mirror':
+            for item in files:
+                if not item['path'].endswith('.safetensors'):
+                    continue
+                mirror = 'https://hf-mirror.com/'+args.model+'/resolve/main/'+urllib.parse.quote(item['path'])
+                item['download_urls'] = [mirror, item['url']]
         source = {"model": args.model, "revision": args.revision, "source": "modelscope.cn", "files": files}
         manifest = report.with_name(report.stem + "-source.json")
         write_json(manifest, source)
@@ -185,6 +204,9 @@ def main():
             write_json(report, status)
             raise
         write_json(report, status)
+        write_json(destination/'download_manifest.json', status)
+        (destination/'SHA256SUMS').write_text(''.join(item['sha256']+'  '+item['path']+'\n' for item in files))
+        (destination/'DOWNLOAD_COMPLETE').write_text(status['completed_at']+'\n')
         print(json.dumps({"event": "complete", "success": True, "elapsed_seconds": status["elapsed_seconds"],
                           "weights": status["weights"]}), flush=True)
 
