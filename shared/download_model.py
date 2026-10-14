@@ -104,13 +104,19 @@ def fetch(item, destination):
     return {**item, "reused": False}
 
 
-def verify_weights(destination):
+def verify_weights(destination, quantization='none'):
     config = json.loads((destination / "config.json").read_text(encoding="utf-8"))
-    if config.get("quantization_config") or config.get("torch_dtype") != "bfloat16":
-        raise ValueError("This acceptance requires original, unquantized BF16 weights")
+    quant = config.get('quantization_config', {})
+    if quantization == 'none':
+        if quant or config.get("torch_dtype") != "bfloat16":
+            raise ValueError("This acceptance requires original, unquantized BF16 weights")
+    elif quant.get('quant_method') != quantization or quant.get('bits') != 4 or quant.get('group_size') != 128:
+        raise ValueError('Expected the requested W4A16 group128 checkpoint')
+    elif quantization == 'gptq' and (quant.get('desc_act') or quant.get('checkpoint_format', 'gptq') != 'gptq'):
+        raise ValueError('Existing adapters require legacy GPTQ without activation ordering')
     index = json.loads((destination / "model.safetensors.index.json").read_text(encoding="utf-8"))
     mapping = index["weight_map"]
-    seen, dtypes, parameters, tensor_bytes = set(), {}, 0, 0
+    seen, dtypes, parameters, tensor_bytes, packed, schema = set(), {}, 0, 0, 0, {}
     for name in sorted(set(mapping.values())):
         path = destination / name
         if not inside(path.resolve(), destination):
@@ -127,17 +133,23 @@ def verify_weights(destination):
             if key in seen or mapping.get(key) != name:
                 raise ValueError("Safetensors names disagree with the weight index")
             dtype = value["dtype"]
-            if dtype not in {"BF16", "F32"}:
-                raise ValueError("Unexpected dtype in original floating-point weights")
+            widths = {'BF16': 2, 'F32': 4} if quantization == 'none' else {'BF16': 2, 'F16': 2, 'F32': 4, 'I32': 4, 'I64': 8}
+            if dtype not in widths:
+                raise ValueError("Unexpected checkpoint tensor dtype")
+            if key.endswith('.qweight'):
+                if dtype != 'I32':
+                    raise ValueError('Quantized weights must be packed INT32')
+                packed += 1
             count = 1
             for dimension in value["shape"]:
                 if type(dimension) is not int or dimension < 0:
                     raise ValueError("Invalid tensor shape")
                 count *= dimension
             start, end = value["data_offsets"]
-            if not 0 <= start <= end <= payload_size or end - start != count * (2 if dtype == "BF16" else 4):
+            if not 0 <= start <= end <= payload_size or end - start != count * widths[dtype]:
                 raise ValueError("Invalid tensor offsets or payload size")
             seen.add(key)
+            schema[key] = value
             intervals.append((start, end))
             parameters += count
             tensor_bytes += end - start
@@ -151,8 +163,28 @@ def verify_weights(destination):
             raise ValueError("Unreferenced bytes in a safetensors shard")
     if seen != set(mapping) or tensor_bytes != index["metadata"]["total_size"]:
         raise ValueError("Weight index is incomplete")
-    return {"dtype": config["torch_dtype"], "quantized": False, "model_type": config["model_type"],
-            "tensor_count": len(seen), "dtype_counts": dtypes, "parameters": parameters, "tensor_bytes": tensor_bytes}
+    if quantization != 'none' and config['model_type']=='qwen3' and packed != config['num_hidden_layers']*7:
+        raise ValueError('Expected seven packed projections per Qwen3 decoder layer')
+    if quantization != 'none':
+        if schema.get('lm_head.weight', {}).get('dtype') not in {'F16', 'BF16'}:
+            raise ValueError('W4A16 checkpoint must preserve the floating LM head')
+        for name, value in schema.items():
+            if not name.endswith('.qweight'):
+                continue
+            prefix = name[:-len('.qweight')]
+            a, b = value['shape']
+            k, n = (a*8, b) if quantization=='gptq' else (a, b*8)
+            for suffix, shape, allowed in [('qzeros', [k//128, n//8], {'I32'}),
+                                           ('scales', [k//128, n], {'F16', 'BF16', 'F32'})]:
+                item = schema.get(prefix+'.'+suffix, {})
+                if item.get('shape') != shape or item.get('dtype') not in allowed:
+                    raise ValueError('Packed tensor metadata differs: '+prefix+'.'+suffix)
+            if quantization=='gptq' and schema.get(prefix+'.g_idx', {}).get('shape') != [k]:
+                raise ValueError('GPTQ grouping metadata is missing or incomplete')
+    return {"dtype": config["torch_dtype"], "quantized": quantization!='none', "quantization": quantization,
+            "model_type": config["model_type"], "tensor_count": len(seen), "dtype_counts": dtypes,
+            ('parameters' if quantization=='none' else 'stored_elements'): parameters,
+            "packed_linear_layers": packed, "tensor_bytes": tensor_bytes}
 
 
 def main():
@@ -163,6 +195,7 @@ def main():
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument('--mirror', choices=['modelscope', 'hf-mirror'], default='modelscope')
+    parser.add_argument('--quantization', choices=['none', 'awq', 'gptq'], default='none')
     args = parser.parse_args()
     if not 1 <= args.workers <= 16:
         parser.error("Use 1 to 16 concurrent file downloads")
@@ -198,7 +231,7 @@ def main():
             with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
                 results = list(executor.map(lambda item: fetch(item, destination), files))
             status.update(success=True, elapsed_seconds=round(time.monotonic() - start, 3),
-                          completed_at=datetime.now(timezone.utc).isoformat(), weights=verify_weights(destination), files=results)
+                          completed_at=datetime.now(timezone.utc).isoformat(), weights=verify_weights(destination, args.quantization), files=results)
         except Exception as exc:
             status.update(error=type(exc).__name__ + ": " + str(exc), elapsed_seconds=round(time.monotonic() - start, 3))
             write_json(report, status)

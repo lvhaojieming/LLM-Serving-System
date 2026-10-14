@@ -1,5 +1,9 @@
 # Qwen3-14B W4A16 权重生成
 
+2026-10-14 当前选择：AWQ 自量化权重已通过导出校验，保留用于复现；GPTQModel NPU 自量化在第一层 down_proj 的 AICPU QR 上失败，按用户要求停止重跑。未采用的自定义 Hessian 实现、msModelSlim 安装临时文件和失败 GPTQ offload 缓存已清理，保留必要失败日志。用户已选择直接下载社区 `JunHowie/Qwen3-14B-GPTQ-Int4`，不将其标为 Qwen 官方发布。
+
+社区模型的 ModelScope revision 固定为 `63ca45ac5d22ed49897a9e55112a1c32360869fc`，配置为标准 GPTQ、bits=4、group_size=128、desc_act=false、checkpoint_format=gptq。当前下载节点 `.24`，目录 `~/models/Qwen3-14B-GPTQ-Int4`；复用 `shared/download_model.py --quantization gptq`。已验证下载进程及三个权重分片持续增长，完整文件哈希和推理验收待完成。确认启动后按工程约定不持续轮询。
+
 复用原始 BF16 模型与固定 ShareGPT 校准集，使用同一入口通过 `--algorithm awq|gptq` 切换算法。复用同构项目的 SHA256 与 tokenizer 校验函数，不复制量化后端。
 
 校准集 256 条、最大长度 512，seed 20261014；与现有官方 benchmark 的 200 条输入无重合。`prepare_calibration.py` 在现有 vLLM benchmark 客户端环境中运行，复用已下载的数据集，不重新下载完整语料。

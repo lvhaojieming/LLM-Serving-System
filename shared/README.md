@@ -3,6 +3,7 @@
 `download_model.py` 复用节点已有 Python/curl，从 ModelScope 的不可变 revision 读取文件清单与 SHA256。可用 `--mirror hf-mirror` 优先下载国内镜像的 safetensors，失败时使用官方 ModelScope；两种来源均必须通过官方清单的大小与哈希检查。元数据始终从固定版本获取。支持已有 Python 3.7 环境、断点续传及多文件并发，不安装新环境。
 
 完成权重结构验收后写 `download_manifest.json`、`SHA256SUMS`、`DOWNLOAD_COMPLETE`。下载日志和报告放在 `artifacts/downloads/`，模型留在用户模型目录。
+默认验收原始 BF16；下载标准量化权重时显式指定 `--quantization awq` 或 `--quantization gptq`，检查 W4/group128 配置、打包 dtype、投影数量与索引完整性，不把 INT4 模型当成浮点模型验收。下载校验不等于后端推理验收。
 
 `distribute_model.py --config <配置>` 等待下载完成标志，再用 SCP 分发。配置包含 source_directory、task_directory、report_directory、download_report、task_name、source_ip、workers 和 peers；每个 peer 为 `[别名, 内网IP, SSH端口, 已信任的HostKeyAlias]`。使用 `--check` 只验证节点认证。运行配置和已信任 known_hosts 放在忽略的 artifacts 中，不提交认证信息。
 
