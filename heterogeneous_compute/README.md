@@ -282,3 +282,59 @@ metrics must come from validated case JSON, not live progress estimates.
 Other services remain running on separate devices, so these are shared-host
 measurements rather than isolated-host hardware limits. No containers or
 limits were changed and no model/data copies were created by the benchmark.
+
+
+## Official vendor kernels in the FlagCX pipeline
+
+`configs/musa_iluvatar_flagcx.json` selects `attention_backend=vendor` and
+`tp_communicator=vllm`. The adapter calls the installed Iluvatar
+`vllm_iluvatar.attention.flash_attn_interface.flash_attn_varlen_func` and
+MUSA `aten._scaled_dot_product_attention_flash_musa` used by vendor vLLM.
+No custom attention/GEMM kernel is introduced. Packed request layout, KV
+ownership and cross-vendor scheduling remain project adapter code; this is
+not a claim that upstream vLLM Engine supports mixed vendors/versions.
+Official local TP GroupCoordinator chooses its installed communication path;
+MUSA local P2P/SHM are no longer disabled. Cross-node PP still uses FlagCX
+Socket and does not claim RDMA. MUSA's installed causal flash op aligns to
+the top left: cached multi-token Q chunks are left-padded to KV length before
+the official call, then only real query rows are retained. Single-token
+decode uses noncausal attention over that request's complete existing KV.
+Requests are bucketed by Q/KV length on MUSA; Iluvatar uses one varlen call.
+
+Before model startup, rerun the retained `manage.py probe` entry and require
+both lanes' exact BF16 communication tests to pass. Then use `manage.py
+start` with the same configuration. An existing matching executor must be
+drained before startup; all containers and unrelated workloads are retained.
+Official/reference numerical comparisons can be run explicitly in the
+retained vendor runtime using `HETEROSERVE_TEST_DEVICE=musa:0` or `cuda:0`
+with `tests/test_pipeline_execution.py`; tests include distinct requests,
+unequal lengths, decode, mixed chunks and cache release. A separate
+`benchmark.py --result-dir <directory>` supports short validation without
+overwriting retained baseline/performance data. Kernel numerical tolerance
+is 0.025 absolute/relative for BF16; full-model native text comparisons are
+reported independently by `validate.py` with the configured reference server.
+
+
+The retained short validation in
+`results/musa_iluvatar_official_parallel.json` used 12 requests per case,
+256 input/64 output tokens: output throughput 19.67/29.84/52.18 tok/s,
+mean TTFT 212.89/260.81/427.65 ms, and mean TPOT 48.22/63.67/70.75 ms
+at concurrency 1/2/4. It is preliminary evidence, not the final 200-request
+baseline. Both TP lanes observed different-stage, different-microbatch
+execution-window overlap, with conservative maximum overlap about 43 ms;
+clock uncertainty was under 0.07 ms in this short acceptance. Stream token
+counts, lane agreement, continuous refill, 827-token chunked prefill and
+cancellation/KV reclamation passed. Six of seven native text comparisons
+matched exactly. Open-ended batch prefix/native text invariance failed;
+the independent native MUSA vLLM control also failed text prefix invariance.
+The strict acceptance report therefore remains `passed=false`, while
+`functional_passed=true`; these flags must not be conflated. No bitwise
+identity across batches, vendors or software versions is claimed.
+
+Replacing attention alone retained approximately 6.2-second MUSA prefill.
+The major improvement followed official local TP group/communicator use
+and removal of forced local Socket/P2P/SHM restrictions. These changes were
+combined, so their individual contributions were not measured separately.
+The earlier reference baseline and attention-only diagnostic runs are kept
+under the original artifact directory; uncompleted cases are marked as
+interrupted and are not reported as completed performance data.

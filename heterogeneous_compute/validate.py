@@ -8,6 +8,7 @@ PROGRAM = r'''
 import concurrent.futures, json, time, urllib.request, urllib.error
 from pathlib import Path
 urls = dict(CONFIG['validation']['references'])
+reference_name = next(iter(urls))
 urls['pipeline'] = 'http://%s:%s' % (CONFIG['master'], CONFIG['execution']['api_port'])
 def request(item, name):
     body = dict(model='Qwen3-14B', messages=[dict(role='user',content=item['prompt'])],
@@ -88,7 +89,7 @@ if CONFIG['execution'].get('scheduler') == 'continuous':
     long_item = dict(id='chunked-context', prompt='背景资料：今天气温适宜，实验正在进行。'*80+
                     '请忽略背景资料，只回答9加8的结果，输出数字。', max_tokens=8)
     chunked_response = request(long_item,'pipeline')
-    chunked_native = request(long_item,'ascend')
+    chunked_native = request(long_item,reference_name)
     cancel_query = urllib.request.Request(urls['pipeline']+'/v1/completions',
         data=json.dumps(dict(model='Qwen3-14B',prompt=prompt,max_tokens=128,temperature=0,
                              ignore_eos=True,stream=True)).encode(),headers={'Content-Type':'application/json'})
@@ -116,7 +117,7 @@ if CONFIG['execution'].get('scheduler') == 'continuous':
     stream_ids = {r['id'] for r in streams}
     baseline_tokens = lane_tokens[0][next(r['id'] for r in streams if r['maximum']==64)]
     token_prefixes_match = all(lane_tokens[0][r['id']]==baseline_tokens[:r['maximum']] for r in streams)
-    native_query = urllib.request.Request(urls['ascend']+'/v1/completions',
+    native_query = urllib.request.Request(urls[reference_name]+'/v1/completions',
         data=json.dumps(dict(model='Qwen3-14B', prompt=prompt, max_tokens=64, temperature=0, ignore_eos=True)).encode(),
         headers={'Content-Type':'application/json'})
     native_text = json.load(urllib.request.urlopen(native_query, timeout=180))['choices'][0]['text']

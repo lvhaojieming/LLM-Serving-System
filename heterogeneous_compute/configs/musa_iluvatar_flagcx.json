@@ -38,9 +38,6 @@
         "MTHREADS_VISIBLE_DEVICES": "4,5",
         "VLLM_USE_V1": "0",
         "MCCL_IB_DISABLE": "1",
-        "MCCL_NET": "Socket",
-        "MCCL_P2P_DISABLE": "1",
-        "MCCL_SHM_DISABLE": "1",
         "FLAGCX_SOCKET_NTHREADS": "1",
         "FLAGCX_NSOCKS_PERTHREAD": "1",
         "FLAGCX_NET_BUFFER_SIZE": "4194304",
@@ -105,7 +102,7 @@
     "tp_port": 29861,
     "pp_port": 29862,
     "max_model_len": 2048,
-    "result_dir": "/workspace/artifacts/baselines/musa-iluvatar-flagcx",
+    "result_dir": "/workspace/artifacts/baselines/musa-iluvatar-flagcx/vendor",
     "requests": [
       {
         "id": "math-first",
@@ -145,14 +142,16 @@
     ],
     "mode": "http",
     "api_port": 18297,
-    "scope": "Custom vLLM-component TP2 PP2 executor; FlagCX device-buffer PP over Socket; native local TP; reference attention",
+    "scope": "Custom TP2 PP2 scheduling adapter; official vendor attention and model custom ops; FlagCX device-buffer PP over Socket; native local TP",
     "scheduler": "continuous",
     "max_active_requests": 8,
     "microbatch_size": 4,
     "max_inflight_batches": 2,
     "max_batch_tokens": 1024,
     "prefill_chunk_tokens": 512,
-    "transport": "flagcx"
+    "transport": "flagcx",
+    "attention_backend": "vendor",
+    "tp_communicator": "vllm"
   },
   "validation": {
     "references": {

@@ -156,7 +156,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--vendor', choices=['musa', 'iluvatar'])
-    parser.add_argument('--concurrencies', type=int, nargs='+', default=[1, 4, 8])
+    parser.add_argument('--result-dir', type=Path, help='Cross-vendor validation output; never overwrites an existing run')
+    parser.add_argument('--concurrencies', type=int, nargs='+', default=[1, 2, 4, 8])
     parser.add_argument('--num-prompts', type=int, default=200)
     parser.add_argument('--input-tokens', type=int, default=256)
     parser.add_argument('--output-tokens', type=int, default=64)
@@ -167,7 +168,7 @@ def main():
         native_matrix(config, args.vendor, args.config)
         return
     endpoint = f"http://{config['master']}:{config['execution']['api_port']}"
-    directory = Path(config['execution']['result_dir'])/'performance'
+    directory = args.result_dir or Path(config['execution']['result_dir'])/'performance'
     directory.mkdir(parents=True, exist_ok=True)
     marker = directory/'status.json'
     # An exclusive marker also prevents simultaneous duplicate benchmark clients.

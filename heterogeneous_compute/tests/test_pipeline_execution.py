@@ -5,6 +5,7 @@ import unittest
 import concurrent.futures
 import queue
 import importlib.util
+import os
 from unittest.mock import patch
 from types import SimpleNamespace
 from heterogeneous_compute.pipeline_execution import RequestState, TensorChannel
@@ -16,6 +17,30 @@ from heterogeneous_compute.manage import processes
 from heterogeneous_compute.benchmark import summarize
 
 class PipelineExecutionTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('HETEROSERVE_TEST_DEVICE'), 'Explicit retained vendor device required')
+    def test_official_attention_matches_reference_with_independent_cached_requests(self):
+        import torch
+        device = os.environ['HETEROSERVE_TEST_DEVICE']
+        if device.startswith('musa'):
+            import torch_musa
+        torch.manual_seed(7)
+        attention = SimpleNamespace(head_dim=128, num_heads=20, num_kv_heads=4, scaling=128**-.5)
+        reference, vendor = BatchState(2), BatchState(2)
+        vendor.attention_backend = 'vendor'
+        # Unequal initial lengths, single-token decode, then mixed cached chunks.
+        for positions in [([0,1,2], [0,1,2,3,4]), ([3], [5]), ([4], [6,7,8]), ([5,6], [9,10])]:
+            segments = [dict(request_id=key, positions=list(p)) for key,p in zip(['a','b'],positions)]
+            n = sum(len(p) for p in positions)
+            q,k,v = [torch.randn(n,w,dtype=torch.bfloat16,device=device) for w in [2560,512,512]]
+            reference.install(segments)
+            vendor.install(segments)
+            expected = packed_attention(q,k,v,attention,reference,0)
+            actual = packed_attention(q,k,v,attention,vendor,0)
+            torch.testing.assert_close(actual,expected,rtol=.025,atol=.025)
+        for state in [reference,vendor]:
+            state.release('a')
+            self.assertEqual(set(state.requests), {'b'})
+
     def test_manager_selects_only_the_requested_config(self):
         entry = '/workspace/heterogeneous_compute/pipeline_execution.py'
         wanted = '/workspace/heterogeneous_compute/configs/musa_iluvatar_flagcx.json'

@@ -252,6 +252,48 @@ class ParallelGroup:
         return torch.cat(pieces, dim=dim)
 
 
+def vendor_attention(pieces, scale, device_type):
+    """Use installed official vendor kernels; adapt layouts, never replace kernels."""
+    import torch
+    if device_type == 'cuda':
+        from vllm_iluvatar.attention.flash_attn_interface import flash_attn_varlen_func
+        q_lengths = [p[0].shape[1] for p in pieces]
+        k_lengths = [p[1].shape[1] for p in pieces]
+        def offsets(lengths):
+            values = [0]
+            for length in lengths:
+                values.append(values[-1]+length)
+            return torch.tensor(values, dtype=torch.int32, device=pieces[0][0].device)
+        output = flash_attn_varlen_func(
+            torch.cat([p[0].transpose(0, 1) for p in pieces]).contiguous(),
+            torch.cat([p[1].transpose(0, 1) for p in pieces]).contiguous(),
+            torch.cat([p[2].transpose(0, 1) for p in pieces]).contiguous(),
+            max_seqlen_q=max(q_lengths), cu_seqlens_q=offsets(q_lengths),
+            max_seqlen_k=max(k_lengths), cu_seqlens_k=offsets(k_lengths),
+            softmax_scale=scale, causal=True)
+        return output.reshape(output.shape[0], -1)
+    if device_type != 'musa':
+        raise ValueError('Official attention adapter supports musa and iluvatar cuda only')
+    # This installed MUSA flash op uses top-left causal alignment. Decode sees
+    # all existing KV; cached multi-token chunks right-align Q by left-padding.
+    groups = {}
+    for row, (q, k, v, past) in enumerate(pieces):
+        groups.setdefault((q.shape[1], k.shape[1]), []).append((row, q, k, v))
+    outputs = [None]*len(pieces)
+    for (nq, nk), rows in groups.items():
+        q = torch.stack([r[1] for r in rows])
+        k = torch.stack([r[2] for r in rows])
+        v = torch.stack([r[3] for r in rows])
+        if nq > 1 and nk > nq:
+            q = torch.nn.functional.pad(q, (0, 0, nk-nq, 0))
+        result = torch.ops.aten._scaled_dot_product_attention_flash_musa(
+            q, k, v, dropout_p=0.0, is_causal=nq > 1, scale=scale)[0]
+        result = result[:, :, -nq:, :].transpose(1, 2)
+        for offset, (row, _, _, _) in enumerate(rows):
+            outputs[row] = result[offset].reshape(nq, -1)
+    return torch.cat(outputs, dim=0)
+
+
 def packed_attention(q, k, v, attention, state, index):
     """Packed projections, separate KV owners; fuse independent decode rows."""
     import torch
@@ -274,15 +316,16 @@ def packed_attention(q, k, v, attention, state, index):
         if previous is not None:
             kk, vv = torch.cat((previous[0], kk), 1), torch.cat((previous[1], vv), 1)
         owner.caches[index] = (kk, vv)
-        pieces.append((queries[:, start:start+count], kk.repeat_interleave(ratio, 0),
-                       vv.repeat_interleave(ratio, 0), past))
+        pieces.append((queries[:, start:start+count], kk, vv, past))
+    if getattr(state, 'attention_backend', 'reference') == 'vendor':
+        return vendor_attention(pieces, attention.scaling, q.device.type)
     # One batched attention calculation for prefill, decode and mixed phases.
     # Padding preserves independent KV owners; causal positions include past KV.
     maximum_k = max(kk.shape[1] for _,kk,_,_ in pieces)
     maximum_q = max(qq.shape[1] for qq,_,_,_ in pieces)
     qq = torch.stack([torch.nn.functional.pad(p[0], (0,0,0,maximum_q-p[0].shape[1])) for p in pieces])
-    kk = torch.stack([torch.nn.functional.pad(p[1], (0,0,0,maximum_k-p[1].shape[1])) for p in pieces])
-    vv = torch.stack([torch.nn.functional.pad(p[2], (0,0,0,maximum_k-p[2].shape[1])) for p in pieces])
+    kk = torch.stack([torch.nn.functional.pad(p[1].repeat_interleave(ratio, 0), (0,0,0,maximum_k-p[1].shape[1])) for p in pieces])
+    vv = torch.stack([torch.nn.functional.pad(p[2].repeat_interleave(ratio, 0), (0,0,0,maximum_k-p[2].shape[1])) for p in pieces])
     lengths = torch.tensor([p[1].shape[1] for p in pieces],device=q.device)
     past = torch.tensor([p[3] for p in pieces],device=q.device)
     query_positions = past[:,None]+torch.arange(maximum_q,device=q.device)[None,:]
@@ -317,15 +360,24 @@ def load_stage(config, stage, lane):
     parallel_state._PP = ParallelGroup(stage, 2, device, native=False)
     from vllm.engine.arg_utils import EngineArgs
     from vllm.config import set_current_vllm_config
+    tp_communicator = config['execution'].get('tp_communicator', 'torch')
+    if tp_communicator not in {'torch', 'vllm'}:
+        raise ValueError('Unknown configured TP communicator')
+    official_tp = tp_communicator == 'vllm'
     args = EngineArgs(model=config['execution']['model_path'], dtype='bfloat16',
                       tensor_parallel_size=2, pipeline_parallel_size=2,
                       max_model_len=config['execution']['max_model_len'],
-                      enforce_eager=True, disable_custom_all_reduce=True,
+                      enforce_eager=True, disable_custom_all_reduce=not official_tp,
                       enable_prefix_caching=False)
     vconfig = args.create_engine_config()
     from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
     torch.set_default_dtype(torch.bfloat16)
     with set_current_vllm_config(vconfig), torch.device(device):
+        if official_tp:
+            parallel_state.set_custom_all_reduce(True)
+            parallel_state._TP = parallel_state.init_model_parallel_group(
+                [list(range(config['tp']))], local_rank=lane,
+                backend=spec['tp_backend'], group_name='tp')
         model = Qwen3ForCausalLM(vllm_config=vconfig)
     from safetensors import safe_open
     start, end = model.model.start_layer, model.model.end_layer
@@ -345,14 +397,18 @@ def load_stage(config, stage, lane):
     missing = set(dict(model.named_parameters())) - loaded
     if missing:
         raise RuntimeError(f'Uninitialized stage weights: {sorted(missing)}')
-    # Portable reference kernels avoid dependence on incompatible vendor
-    # attention metadata and custom-op dispatch. TP projections stay vLLM.
+    # Retain the portable reference for comparison. The vendor path preserves
+    # official custom-op dispatch and adapts only packed attention/KV layouts.
     from vllm.model_executor.custom_op import CustomOp
+    backend = config['execution'].get('attention_backend', 'reference')
+    if backend not in {'reference', 'vendor'}:
+        raise ValueError('Unknown configured attention backend')
     for module in model.modules():
-        if (hasattr(module, 'forward_native')
+        if (backend == 'reference' and hasattr(module, 'forward_native')
                 and type(module).forward_native is not CustomOp.forward_native):
             module.forward = module.forward_native
     state = BatchState(config['execution'].get('max_active_requests', 8))
+    state.attention_backend = backend
     for index in range(start, end):
         attention = model.model.layers[index].self_attn
 

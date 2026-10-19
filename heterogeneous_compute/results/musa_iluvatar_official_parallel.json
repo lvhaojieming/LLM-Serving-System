@@ -1,0 +1,186 @@
+{
+  "model": "Qwen3-14B",
+  "dtype": "bfloat16",
+  "tp": 2,
+  "pp": 2,
+  "devices": {
+    "musa": [
+      4,
+      5
+    ],
+    "iluvatar": [
+      0,
+      1
+    ]
+  },
+  "software": "Installed official vendor Flash Attention and vLLM local TP GroupCoordinator; project cross-vendor scheduling adapter; FlagCX Socket PP",
+  "workload": {
+    "input_tokens": 256,
+    "output_tokens": 64,
+    "requests_per_case": 12,
+    "warmups": 3,
+    "concurrencies": [
+      1,
+      2,
+      4
+    ],
+    "seed": 20261010
+  },
+  "short_validation": {
+    "1": {
+      "completed": 12,
+      "failed": 0,
+      "duration": 39.035591192077845,
+      "request_throughput": 0.3074117653541613,
+      "output_throughput": 19.674352982666324,
+      "total_token_throughput": 98.37176491333162,
+      "mean_ttft_ms": 212.89264259394258,
+      "p50_ttft_ms": 212.17743470333517,
+      "p95_ttft_ms": 216.98674787767231,
+      "p99_ttft_ms": 217.33432942070067,
+      "mean_tpot_ms": 48.219649409431774,
+      "p50_tpot_ms": 47.212423549758064,
+      "p95_tpot_ms": 50.678119346839445,
+      "p99_tpot_ms": 50.80954832564448,
+      "mean_itl_ms": 48.21965254956571,
+      "p50_itl_ms": 47.11454827338457,
+      "p95_itl_ms": 51.972999586723745,
+      "p99_itl_ms": 52.51942812465132,
+      "mean_e2el_ms": 3250.730555388145,
+      "p50_e2el_ms": 3185.145946452394,
+      "p95_e2el_ms": 3409.3082883162424,
+      "p99_e2el_ms": 3418.2558782538404
+    },
+    "2": {
+      "completed": 12,
+      "failed": 0,
+      "duration": 25.738846264779568,
+      "request_throughput": 0.4662213634812574,
+      "output_throughput": 29.838167262800475,
+      "total_token_throughput": 149.19083631400238,
+      "mean_ttft_ms": 260.80533512867987,
+      "p50_ttft_ms": 261.299961945042,
+      "p95_ttft_ms": 304.4098185142502,
+      "p99_ttft_ms": 305.0955269066617,
+      "mean_tpot_ms": 63.66559017323962,
+      "p50_tpot_ms": 63.53393642394434,
+      "p95_tpot_ms": 65.5916790041836,
+      "p99_tpot_ms": 65.9690045362841,
+      "mean_itl_ms": 63.66559310949274,
+      "p50_itl_ms": 62.92718998156488,
+      "p95_itl_ms": 64.88724914379418,
+      "p99_itl_ms": 89.27799360826631,
+      "mean_e2el_ms": 4271.737516042776,
+      "p50_e2el_ms": 4250.1623765565455,
+      "p95_e2el_ms": 4394.597884337418,
+      "p99_e2el_ms": 4407.947736992501
+    },
+    "4": {
+      "completed": 12,
+      "failed": 0,
+      "duration": 14.716982702258974,
+      "request_throughput": 0.8153845283896451,
+      "output_throughput": 52.18460981693729,
+      "total_token_throughput": 260.92304908468645,
+      "mean_ttft_ms": 427.6511938854431,
+      "p50_ttft_ms": 428.0754728242755,
+      "p95_ttft_ms": 516.9033957412466,
+      "p99_ttft_ms": 516.947679030709,
+      "mean_tpot_ms": 70.74502256277593,
+      "p50_tpot_ms": 69.47587826658808,
+      "p95_tpot_ms": 76.73320896694408,
+      "p99_tpot_ms": 76.73373518223386,
+      "mean_itl_ms": 70.74502572323635,
+      "p50_itl_ms": 65.60655334033072,
+      "p95_itl_ms": 99.35892338398844,
+      "p99_itl_ms": 189.22853551339364,
+      "mean_e2el_ms": 4884.587615340327,
+      "p50_e2el_ms": 4758.770642336458,
+      "p95_e2el_ms": 5204.783992399462,
+      "p99_e2el_ms": 5204.927208931185
+    }
+  },
+  "functional_passed": true,
+  "strict_acceptance_passed": false,
+  "native_text_matched_cases": 6,
+  "native_text_cases": 7,
+  "strict_batch_invariance_passed": false,
+  "native_control_batch_prefixes_match": false,
+  "limitations": [
+    "Short validation has 12 requests per case; not a replacement for 200-request final benchmark.",
+    "Open-ended greedy text differs across batches and vendor stacks; native MUSA vLLM control also fails exact text prefix invariance. No bitwise/batch invariance claim.",
+    "Execution overlap windows include dispatch and local TP; not a unified cross-vendor kernel profiler. Hosts also run unrelated retained services.",
+    "Cross-vendor scheduling adapter is project code; this is not an unmodified distributed vLLM Engine."
+  ],
+  "acceptance": {
+    "passed": true,
+    "requests": 12,
+    "tp_lane_tokens_match": true,
+    "token_prefixes_match": false,
+    "native_64token_text_match": false,
+    "overlap": [
+      {
+        "lane": 0,
+        "clock_uncertainty_ms": 0.06274506449699402,
+        "clock_assumption": "Stable monotonic offset during this short acceptance; RTT uncertainty, drift not measured",
+        "overlapping_windows": 1546,
+        "conservative_max_overlap_ms": 43.46718778833747,
+        "max_packed_batch_size": 4
+      },
+      {
+        "lane": 1,
+        "clock_uncertainty_ms": 0.0692899338901043,
+        "clock_assumption": "Stable monotonic offset during this short acceptance; RTT uncertainty, drift not measured",
+        "overlapping_windows": 1546,
+        "conservative_max_overlap_ms": 43.38126117363572,
+        "max_packed_batch_size": 4
+      }
+    ],
+    "scope": "Stage execution window overlap, including dispatch and native TP; not a GPU kernel profiler",
+    "health_after": {
+      "ready": true,
+      "tp": 2,
+      "pp": 2,
+      "queue": 0,
+      "execution": "continuous",
+      "draining": false,
+      "completed": 71,
+      "active_requests": 0,
+      "inflight_batches": 0,
+      "kv_owners": 0,
+      "max_batch_size": 4,
+      "max_inflight_batches": 2,
+      "admitted_requests": 72,
+      "microbatches": 2641,
+      "generated_tokens": 3256
+    },
+    "refilled_before_all_requests_finished": true,
+    "max_observed_active": 8,
+    "max_observed_queued": 4,
+    "chunked_prefill_passed": true,
+    "chunked_prompt_tokens": 827,
+    "cancellation_passed": true,
+    "canceled_generated_tokens": 1,
+    "shorter_request_seconds": 0.3964797407388687,
+    "longer_request_seconds": 4.409742273855954
+  },
+  "tests": {
+    "local": "13 passed; 2 vendor runtime checks skipped",
+    "iluvatar_retained_runtime": "14 passed; 1 explicit vendor-device check skipped",
+    "official_attention_musa": "passed on physical device4",
+    "official_attention_iluvatar": "passed on logical device0"
+  },
+  "final_benchmark": {
+    "status": "running",
+    "requests_per_case": 200,
+    "concurrencies": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "started_at": "2026-10-19T08:40:10.178227+00:00",
+    "result_dir": "/workspace/artifacts/baselines/musa-iluvatar-flagcx/vendor/performance"
+  },
+  "artifacts": "/workspace/artifacts/baselines/musa-iluvatar-flagcx/vendor"
+}
