@@ -1,0 +1,86 @@
+{
+  "model": "Qwen3-14B",
+  "model_path": "/models/Qwen3-14B",
+  "quantization": null,
+  "dtype": "bfloat16",
+  "tp": 2,
+  "pp": 1,
+  "max_model_len": 2048,
+  "max_num_seqs": 8,
+  "max_num_batched_tokens": 2048,
+  "gpu_memory_utilization": 0.6,
+  "enforce_eager": true,
+  "prefix_caching": false,
+  "resource_limits_enabled": false,
+  "weight_provenance": "Existing Qwen3-14B BF16 checkpoint; no quantization",
+  "benchmark": {
+    "lengths": [
+      [
+        256,
+        64
+      ]
+    ],
+    "concurrencies": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "num_prompts": 200,
+    "warmups": 3,
+    "seed": 20261010
+  },
+  "vendors": {
+    "musa": {
+      "ssh_alias": "s5000-01",
+      "host": "192.168.162.97",
+      "container": "heteroserve-musa",
+      "devices": [
+        0,
+        1
+      ],
+      "port": 18097,
+      "result_dir": "/workspace/artifacts/baselines/native-bf16-tp2/musa",
+      "kernel_path": "Installed official vendor vLLM BF16 engine and local TP communicator",
+      "reuse_existing_service": true,
+      "co_resident_service": "Retained old Ascend-MUSA stage also holds memory on devices0/1; do not stop it"
+    },
+    "iluvatar": {
+      "ssh_alias": "iluvatar150-02",
+      "host": "192.168.162.60",
+      "container": "heteroserve-iluvatar-pp",
+      "devices": [
+        4,
+        5
+      ],
+      "port": 18560,
+      "result_dir": "/workspace/artifacts/baselines/native-bf16-tp2/iluvatar",
+      "kernel_path": "Installed official vendor vLLM BF16 engine and local TP communicator",
+      "reuse_existing_service": false,
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "4,5",
+        "IX_VISIBLE_DEVICES": "4,5",
+        "NCCL_IB_DISABLE": "1",
+        "NCCL_CUMEM_ENABLE": "0",
+        "NCCL_SOCKET_IFNAME": "ens1f0np0",
+        "GLOO_SOCKET_IFNAME": "ens1f0np0",
+        "VLLM_NCCL_SO_PATH": "/usr/local/corex/lib64/libixsysnccl.so",
+        "OMP_NUM_THREADS": "4"
+      }
+    },
+    "ascend": {
+      "ssh_alias": "ascend910c-01",
+      "host": "192.168.162.23",
+      "container": "heteroserve-ascend",
+      "devices": [
+        0,
+        1
+      ],
+      "port": 18023,
+      "result_dir": "/workspace/artifacts/baselines/native-bf16-tp2/ascend",
+      "kernel_path": "Installed official vLLM-Ascend BF16 engine and local TP communicator",
+      "reuse_existing_service": true,
+      "co_resident_service": "Retained old Ascend-MUSA stage also holds memory on logical devices0/1; do not stop it"
+    }
+  }
+}

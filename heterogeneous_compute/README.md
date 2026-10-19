@@ -338,3 +338,48 @@ combined, so their individual contributions were not measured separately.
 The earlier reference baseline and attention-only diagnostic runs are kept
 under the original artifact directory; uncompleted cases are marked as
 interrupted and are not reported as completed performance data.
+
+
+## Three-vendor single-node BF16 TP2 comparison
+
+`configs/native_bf16.json` reuses the same `benchmark.py --vendor <key>`
+runner for `ascend`, `musa`, and `iluvatar`. All endpoints serve the existing
+Qwen3-14B BF16 checkpoint with TP2/PP1, eager execution, prefix caching off,
+context/batched-token bound 2048, sequence cap 8, memory utilization 0.60,
+and seed 20261010. Reuse existing Ascend .23 port18023 on logical devices0/1
+and Moore .97 port18097 on physical devices0/1. Iluvatar .60 port18560 is a
+new BF16 service process on unused logical devices4/5 within the existing
+`heteroserve-iluvatar-pp` container; no environment/image/container is created.
+The config retains that process's device/NCCL environment. Its `vllm serve`
+arguments follow these common engine settings with model path
+`/models/Qwen3-14B` and served name `Qwen3-14B`; no quantization option is used.
+
+Run all clients in the retained .60 container using installed official
+`vllm bench serve` 0.23.0 via the shared runner:
+
+```bash
+python3 -u /workspace/heterogeneous_compute/benchmark.py \
+ --config /workspace/heterogeneous_compute/configs/native_bf16.json --vendor ascend
+python3 -u /workspace/heterogeneous_compute/benchmark.py \
+ --config /workspace/heterogeneous_compute/configs/native_bf16.json --vendor musa
+python3 -u /workspace/heterogeneous_compute/benchmark.py \
+ --config /workspace/heterogeneous_compute/configs/native_bf16.json --vendor iluvatar
+```
+
+Each vendor has four cases: fixed 256 input/64 output tokens, concurrency
+1/2/4/8, 200 requests and three warmups per case, greedy sampling and ignored
+EOS. This matches the current cross-node BF16 workload; it is separate from
+the 256/128, 2048/128, 256/1024 AWQ matrix. Fixed lengths, successful request
+counts, latency percentile order and recomputed throughput are validated.
+Raw results/status/commands/acceptance stay in the client container under
+`artifacts/baselines/native-bf16-tp2/<vendor>/performance`. Package versions,
+actual server argv/environment and container identities are retained in local
+`artifacts/baselines/native-bf16-tp2/deployment.json`. All three must pass six
+exact-answer smoke checks before their benchmarks start. Results are pending
+until completed case files are validated.
+
+These are shared-host measurements. The retained older Ascend-Moore pipeline
+also owns memory on Ascend and Moore devices0/1, although idle at dispatch.
+Other-node workloads, AWQ and the new FlagCX pipeline remain running. Never
+label this comparison isolated hardware peak performance or conflate the
+single-node two-device instances with the cross-node four-device instance.

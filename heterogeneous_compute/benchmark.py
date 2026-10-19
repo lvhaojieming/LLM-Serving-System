@@ -155,7 +155,7 @@ def native_matrix(config, vendor, config_path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path, required=True)
-    parser.add_argument('--vendor', choices=['musa', 'iluvatar'])
+    parser.add_argument('--vendor', help='Native vendor key from the configuration')
     parser.add_argument('--result-dir', type=Path, help='Cross-vendor validation output; never overwrites an existing run')
     parser.add_argument('--concurrencies', type=int, nargs='+', default=[1, 2, 4, 8])
     parser.add_argument('--num-prompts', type=int, default=200)
@@ -165,6 +165,8 @@ def main():
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
     if args.vendor:
+        if args.vendor not in config.get('vendors', {}):
+            parser.error('Requested vendor is absent from the configuration')
         native_matrix(config, args.vendor, args.config)
         return
     endpoint = f"http://{config['master']}:{config['execution']['api_port']}"
