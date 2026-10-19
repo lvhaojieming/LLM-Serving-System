@@ -12,8 +12,30 @@ from heterogeneous_compute.pipeline_execution import FeedbackReceiver
 from heterogeneous_compute.pipeline_execution import packed_attention
 from heterogeneous_compute.pipeline_execution import finish_future
 from heterogeneous_compute.scheduling import BatchState, ContinuousScheduler
+from heterogeneous_compute.manage import processes
+from heterogeneous_compute.benchmark import summarize
 
 class PipelineExecutionTests(unittest.TestCase):
+    def test_manager_selects_only_the_requested_config(self):
+        entry = '/workspace/heterogeneous_compute/pipeline_execution.py'
+        wanted = '/workspace/heterogeneous_compute/configs/musa_iluvatar_flagcx.json'
+        listing = ('PID COMMAND\n'
+                   f'11 python3 {entry} --config {wanted} --lane 0\n'
+                   f'12 python3 {entry} --config /workspace/heterogeneous_compute/configs/ascend_musa.json --lane 0\n'
+                   f'13 bash -lc "python3 {entry} --config {wanted}"\n')
+        with patch('heterogeneous_compute.manage.remote', return_value=listing):
+            rows = processes('unused', dict(container='retained', ssh_alias='node'), wanted)
+        self.assertEqual([row['pid'] for row in rows], [11])
+
+    def test_speed_summary_rejects_incomplete_output_and_inconsistent_workloads(self):
+        data = dict(completed=2, failed=0, duration=1, output_throughput=128,
+                    output_lens=[64,64], input_lens=[256,256])
+        self.assertEqual(summarize(data, 2, 64, [256,256])['output_throughput'], 128)
+        for change in [dict(failed=1), dict(output_lens=[64,63]),
+                       dict(input_lens=[256,255]), dict(output_throughput=129)]:
+            with self.assertRaises(RuntimeError):
+                summarize(dict(data, **change), 2, 64, [256,256])
+
     def test_kv_ownership_and_contiguous_decode_then_release(self):
         state = RequestState()
         state.advance('a', [0, 1, 2])

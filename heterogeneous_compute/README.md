@@ -8,6 +8,10 @@
 
 ## Qwen3-14B Ascend / MUSA TP2 PP2 experimental executor
 
+摩尔 S5000 / 天数 BI-V150 的 FlagCX TP2×PP2 配置、构建与验收入口见
+[FlagCX 跨厂商实验](platforms/flagcx/README.md)。它复用本目录执行器，
+通过独立配置选择设备张量通信，不覆盖下述昇腾 / 摩尔配置。
+
 Functional acceptance on 2026-10-14: actual Qwen3-14B BF16 weights and all
 40 decoder layers execute across .23/.97, using two accelerator processes
 per stage. Retained containers `heteroserve-ascend` / `heteroserve-musa` and

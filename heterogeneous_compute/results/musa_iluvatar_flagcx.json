@@ -1,0 +1,320 @@
+{
+  "checked_at": "2026-10-19T06:49:47.350733+00:00",
+  "model": "Qwen3-14B BF16",
+  "tp": 2,
+  "pp": 2,
+  "total_devices": 4,
+  "config": "heterogeneous_compute/configs/musa_iluvatar_flagcx.json",
+  "scope": "Custom vLLM-component TP2 PP2 executor; FlagCX device-buffer PP over Socket; native local TP; reference attention",
+  "flagcx": {
+    "repository": "https://github.com/flagos-ai/FlagCX",
+    "commit": "4dd8862e09be73c8e54f49b763186e80c365f195",
+    "source_sha256": "82e997c347764d18b6abdb15d049cedea0ecbc3acb1bcdb8a6e6763118eb62a4",
+    "json_commit": "a0e9fb1e638cfbb5b8b556b7c51eaa81977bad48",
+    "build_source_sha256": "63b0944b916ce14618c4ef26ae58ff9950261e3a55262a6662d69e697716ae16",
+    "library": "/workspace/artifacts/dependencies/flagcx/4dd8862e09be73c8e54f49b763186e80c365f195/FlagCX/build/lib/libheteroserve_flagcx.so",
+    "network": "Socket (FLAGCX_IB_DISABLE=1); no GPUDirect/RDMA claim"
+  },
+  "nodes": [
+    {
+      "ssh_alias": "s5000-01",
+      "container_id": "a725763f7114c94a7f113a162f27d421db6b611ed008e4690c36261114de1032",
+      "image_id": "sha256:34cb8777a848bc0689118801fc720c46906b45cfab6dba95d7010601ba60b1c1",
+      "versions": {
+        "transformers": "4.52.4",
+        "vllm": "0.9.3.dev0+ga5dd03c1e.d20260309.empty",
+        "torch": "2.5.0"
+      }
+    },
+    {
+      "ssh_alias": "iluvatar150-02",
+      "container_id": "a5eb6100dd54ad96957e07c13e59a06d53d4e6e4647c454a6a4ce85bb76986af",
+      "image_id": "sha256:b01fe538df482b10418548d9d43ac15a348e2e30c218c9d75eb7c12ae195dbc4",
+      "versions": {
+        "torch": "2.10.0+corex.4.5.0.20260619",
+        "transformers": "5.12.1",
+        "vllm": "0.23.0"
+      }
+    }
+  ],
+  "source_sha256": {
+    "heterogeneous_compute/pipeline_execution.py": "4cd29b2b85c7f16b45621ae8cc2f609e081e5b5e2b1ada9e990ec43935b0762e",
+    "heterogeneous_compute/scheduling.py": "fc09962df77a191b50ea9a5bf0fe8a7328830c46dd087369de8e03010c2d7a8d",
+    "heterogeneous_compute/manage.py": "24ea5cea422daeb7483a2197babf3b96eaddbc308e9ecde3983e0daedd7c58d6",
+    "heterogeneous_compute/benchmark.py": "65f9c809c9ca817486afe0a9233a93bd0cd4ff9bc13613dbf4bd5e3d67ee0ab0",
+    "heterogeneous_compute/flagcx_transport.py": "07c70337c929868ad108a7eefb3e1f0d69571a93cedf730f2c873aabd100d901",
+    "heterogeneous_compute/platforms/flagcx/bridge.cc": "63bafb4d8d5371a184df408f7d27d8ea88a452aaf79dac559e733396d8f6077c",
+    "heterogeneous_compute/platforms/flagcx/build.sh": "e3558e95fb3aa641320d7d0b66b25b5c0e8d789358208c2a095194298a919ec0"
+  },
+  "communication": [
+    {
+      "stage": 0,
+      "lane": 0,
+      "passed": true,
+      "config_sha256": "bf17d6f7c7f5b7ed19fa5f6c2dfa88c0a342f974d005b99f6c4872609bc7dfe2",
+      "transport": "flagcx",
+      "sent_bytes": 51148800,
+      "received_bytes": 51148800,
+      "sent_tensors": 12,
+      "received_tensors": 12,
+      "roundtrips": 12,
+      "all_exact": true,
+      "tested_shapes": [
+        [
+          1,
+          5120
+        ],
+        [
+          128,
+          5120
+        ],
+        [
+          512,
+          5120
+        ],
+        [
+          1024,
+          5120
+        ]
+      ],
+      "raw_report": "artifacts/baselines/musa-iluvatar-flagcx/communication-stage0-lane0.json"
+    },
+    {
+      "stage": 0,
+      "lane": 1,
+      "passed": true,
+      "config_sha256": "bf17d6f7c7f5b7ed19fa5f6c2dfa88c0a342f974d005b99f6c4872609bc7dfe2",
+      "transport": "flagcx",
+      "sent_bytes": 51148800,
+      "received_bytes": 51148800,
+      "sent_tensors": 12,
+      "received_tensors": 12,
+      "roundtrips": 12,
+      "all_exact": true,
+      "tested_shapes": [
+        [
+          1,
+          5120
+        ],
+        [
+          128,
+          5120
+        ],
+        [
+          512,
+          5120
+        ],
+        [
+          1024,
+          5120
+        ]
+      ],
+      "raw_report": "artifacts/baselines/musa-iluvatar-flagcx/communication-stage0-lane1.json"
+    },
+    {
+      "stage": 1,
+      "lane": 0,
+      "passed": true,
+      "config_sha256": "bf17d6f7c7f5b7ed19fa5f6c2dfa88c0a342f974d005b99f6c4872609bc7dfe2",
+      "transport": "flagcx",
+      "sent_bytes": 51148800,
+      "received_bytes": 51148800,
+      "sent_tensors": 12,
+      "received_tensors": 12,
+      "roundtrips": 12,
+      "all_exact": true,
+      "tested_shapes": [
+        [
+          1,
+          5120
+        ],
+        [
+          128,
+          5120
+        ],
+        [
+          512,
+          5120
+        ],
+        [
+          1024,
+          5120
+        ]
+      ],
+      "raw_report": "artifacts/baselines/musa-iluvatar-flagcx/communication-stage1-lane0.json"
+    },
+    {
+      "stage": 1,
+      "lane": 1,
+      "passed": true,
+      "config_sha256": "bf17d6f7c7f5b7ed19fa5f6c2dfa88c0a342f974d005b99f6c4872609bc7dfe2",
+      "transport": "flagcx",
+      "sent_bytes": 51148800,
+      "received_bytes": 51148800,
+      "sent_tensors": 12,
+      "received_tensors": 12,
+      "roundtrips": 12,
+      "all_exact": true,
+      "tested_shapes": [
+        [
+          1,
+          5120
+        ],
+        [
+          128,
+          5120
+        ],
+        [
+          512,
+          5120
+        ],
+        [
+          1024,
+          5120
+        ]
+      ],
+      "raw_report": "artifacts/baselines/musa-iluvatar-flagcx/communication-stage1-lane1.json"
+    }
+  ],
+  "model_acceptance": {
+    "passed": true,
+    "sequential": [
+      {
+        "prompt": "2+3等于多少？只输出数字。",
+        "expected": "5",
+        "actual": "5",
+        "passed": true,
+        "seconds": 9.755083029158413,
+        "usage": {
+          "prompt_tokens": 22,
+          "completion_tokens": 2,
+          "total_tokens": 24
+        }
+      },
+      {
+        "prompt": "法国的首都是哪里？只回答城市名。",
+        "expected": "巴黎",
+        "actual": "巴黎",
+        "passed": true,
+        "seconds": 0.7199269100092351,
+        "usage": {
+          "prompt_tokens": 23,
+          "completion_tokens": 2,
+          "total_tokens": 25
+        }
+      },
+      {
+        "prompt": "What is 7 minus 4? Reply with only the digit.",
+        "expected": "3",
+        "actual": "3",
+        "passed": true,
+        "seconds": 0.8486272562295198,
+        "usage": {
+          "prompt_tokens": 26,
+          "completion_tokens": 2,
+          "total_tokens": 28
+        }
+      }
+    ],
+    "concurrent": [
+      {
+        "prompt": "2+3等于多少？只输出数字。",
+        "expected": "5",
+        "actual": "5",
+        "passed": true,
+        "seconds": 1.8136215270496905,
+        "usage": {
+          "prompt_tokens": 22,
+          "completion_tokens": 2,
+          "total_tokens": 24
+        }
+      },
+      {
+        "prompt": "法国的首都是哪里？只回答城市名。",
+        "expected": "巴黎",
+        "actual": "巴黎",
+        "passed": true,
+        "seconds": 1.8140514907427132,
+        "usage": {
+          "prompt_tokens": 23,
+          "completion_tokens": 2,
+          "total_tokens": 25
+        }
+      },
+      {
+        "prompt": "What is 7 minus 4? Reply with only the digit.",
+        "expected": "3",
+        "actual": "3",
+        "passed": true,
+        "seconds": 1.814425301272422,
+        "usage": {
+          "prompt_tokens": 26,
+          "completion_tokens": 2,
+          "total_tokens": 28
+        }
+      }
+    ],
+    "health_after": {
+      "ready": true,
+      "tp": 2,
+      "pp": 2,
+      "queue": 0,
+      "execution": "continuous",
+      "draining": false,
+      "completed": 6,
+      "active_requests": 0,
+      "inflight_batches": 0,
+      "kv_owners": 0,
+      "max_batch_size": 2,
+      "max_inflight_batches": 2,
+      "admitted_requests": 6,
+      "microbatches": 10,
+      "generated_tokens": 12
+    },
+    "scope": "Six exact-answer smoke checks; not general model quality or batch invariance"
+  },
+  "performance": {
+    "status": "running",
+    "started_at": "2026-10-19T06:47:47.784015+00:00",
+    "model": "Qwen/Qwen3-14B",
+    "tp": 2,
+    "pp": 2,
+    "total_devices": 4,
+    "dtype": "bfloat16",
+    "transport": "flagcx",
+    "client_vllm": "0.23.0",
+    "workload": "synthetic random tokens; not ShareGPT",
+    "input_tokens": 256,
+    "output_tokens": 64,
+    "requests_per_case": 200,
+    "concurrencies": [
+      1,
+      4,
+      8
+    ],
+    "seed": 20261010,
+    "cases": {},
+    "scope": "Custom vLLM-component TP2 PP2 executor; FlagCX device-buffer PP over Socket; native local TP; reference attention",
+    "config_sha256": "c9904c696015e5dd18287dfc9737db83b6faa6f68bf0dc2ecbc47bb82b951f57",
+    "current_concurrency": 1
+  },
+  "performance_progress_at_last_check": "concurrency 1 main benchmark: 2/200 completed; about 12.8 seconds/request; later cases remain queued",
+  "limitations": [
+    "Custom reference-attention executor, not native vLLM Engine",
+    "FlagCX Socket backend; no RDMA/zero-copy claim",
+    "One network slot retained after default Socket packet-length errors",
+    "MUSA asynchronous sender event timing failed before explicit producer event synchronization; corrected session passed six functional checks and entered measured 64-token requests; full stability acceptance pending",
+    "Synthetic workload differs from previous ShareGPT baselines",
+    "No full model-quality or batch-size numerical-invariance acceptance"
+  ],
+  "resource_limits_enabled": false,
+  "containers_recreated": false,
+  "validation": {
+    "local_tests_passed": 13,
+    "local_tests_skipped": 1,
+    "communication_roundtrips_per_lane": 12,
+    "lanes": 2,
+    "smoke_requests": 6,
+    "failed_zero_success_speed_output_removed": true
+  }
+}

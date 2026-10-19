@@ -121,9 +121,16 @@ class AsyncTensorSender:
                     metadata,tensors,events,started=item
                     copied={}
                     if tensors:
+                        if getattr(self.channel, 'device_transport', False):
+                            # MUSA stream waits alone did not make elapsed_time
+                            # ready reliably. Device-buffer transport also needs
+                            # the producer complete before the native stream reads.
+                            events[0].synchronize()
+                            events[1].synchronize()
                         with accelerator.stream(stream):
                             stream.wait_event(events[1])
-                            copied={name:t.detach().to('cpu') for name,t in tensors.items()}
+                            copied={name:(t.detach() if getattr(self.channel, 'device_transport', False)
+                                          else t.detach().to('cpu')) for name,t in tensors.items()}
                         # CPU reads only these copies; producer may enqueue next batch.
                         stream.synchronize()
                         self.trace.write(event='execution',batch_id=metadata['batch_id'],
@@ -138,6 +145,8 @@ class AsyncTensorSender:
                                      start=sent,end=time.perf_counter())
         except Exception as error:
             self.error=error
+            print(json.dumps(dict(event='transport_error', error=repr(error))), flush=True)
+            self.trace.write(event='transport_error', error=repr(error))
             try:
                 self.channel.connection.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -291,7 +300,7 @@ def load_stage(config, stage, lane):
     spec = config['stages'][stage]
     if spec['device'] == 'npu':
         import torch_npu  # noqa: F401
-    else:
+    elif spec['device'] == 'musa':
         import torch_musa  # noqa: F401
     device = torch.device(f"{spec['device']}:{lane}")
     getattr(torch, spec['device']).set_device(lane)
@@ -381,7 +390,17 @@ def open_channel(config, stage, lane):
                     raise
                 time.sleep(1)
     version = 3 if config['execution'].get('scheduler') == 'continuous' else 1
-    return TensorChannel(connection, version)
+    channel = TensorChannel(connection, version)
+    if config['execution'].get('transport') == 'flagcx':
+        if __package__:
+            from .flagcx_transport import FlagCXChannel
+        else:
+            from flagcx_transport import FlagCXChannel
+        import torch
+        spec = config['stages'][stage]
+        return FlagCXChannel(channel, config['flagcx']['library'],
+                             torch.device(f"{spec['device']}:{lane}"), stage)
+    return channel
 
 
 def create_admission(config, lane, tokenizer):

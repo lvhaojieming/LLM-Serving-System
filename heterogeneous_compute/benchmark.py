@@ -1,0 +1,154 @@
+"""Acceptance and official vLLM speed tests for a configured PP executor.
+
+Runs inside an existing container with the installed official benchmark client.
+Only synthetic random-token workload is used; it is not ShareGPT throughput.
+"""
+import argparse
+import concurrent.futures
+from datetime import datetime, timezone
+import hashlib
+import importlib.metadata
+import json
+from pathlib import Path
+import subprocess
+import time
+import urllib.request
+
+
+def request(endpoint, body):
+    query = urllib.request.Request(endpoint+'/v1/chat/completions',
+        data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(query, timeout=180) as response:
+        return json.load(response)
+
+
+def acceptance(endpoint, directory):
+    cases = [('2+3等于多少？只输出数字。', '5'),
+             ('法国的首都是哪里？只回答城市名。', '巴黎'),
+             ('What is 7 minus 4? Reply with only the digit.', '3')]
+
+    def check(case):
+        prompt, expected = case
+        started = time.perf_counter()
+        response = request(endpoint, dict(model='Qwen3-14B',
+            messages=[dict(role='user', content=prompt)], temperature=0, max_tokens=16,
+            chat_template_kwargs=dict(enable_thinking=False)))
+        actual = response['choices'][0]['message']['content'].strip()
+        row = dict(prompt=prompt, expected=expected, actual=actual,
+                    passed=actual == expected, seconds=time.perf_counter()-started,
+                    response=response)
+        print(json.dumps(dict(event='model_acceptance', **row), ensure_ascii=False), flush=True)
+        return row
+
+    rows = [check(case) for case in cases]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        concurrent_rows = list(pool.map(check, cases))
+    with urllib.request.urlopen(endpoint+'/health', timeout=10) as response:
+        health = json.load(response)
+    report = dict(passed=all(row['passed'] for row in rows+concurrent_rows)
+                  and health['kv_owners'] == 0 and health['active_requests'] == 0,
+                  sequential=rows, concurrent=concurrent_rows, health_after=health,
+                  scope='Six exact-answer smoke checks; not general model quality or batch invariance')
+    (directory/'acceptance.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    if not report['passed']:
+        raise RuntimeError('Model acceptance failed; benchmark was not started')
+    return report
+
+
+def summarize(data, count, output_tokens, previous_inputs):
+    if data['completed'] != count or data.get('failed', 0):
+        raise RuntimeError('Failed or missing benchmark requests')
+    if len(data['output_lens']) != count or any(n != output_tokens for n in data['output_lens']):
+        raise RuntimeError('Benchmark output budget mismatch')
+    if previous_inputs is not None and data['input_lens'] != previous_inputs:
+        raise RuntimeError('Benchmark input lengths differ between concurrency cases')
+    throughput = sum(data['output_lens']) / data['duration']
+    if abs(throughput-data['output_throughput']) > 1e-5*max(throughput, 1):
+        raise RuntimeError('Benchmark throughput recomputation mismatch')
+    metrics = ['completed', 'failed', 'duration', 'request_throughput', 'output_throughput',
+               'total_token_throughput']
+    for name in ('ttft', 'tpot', 'itl', 'e2el'):
+        metrics += [f'{percent}_{name}_ms' for percent in ('mean', 'p50', 'p95', 'p99')]
+        percentiles = [data.get(f'{percent}_{name}_ms') for percent in ('p50', 'p95', 'p99')]
+        if all(n is not None for n in percentiles) and percentiles != sorted(percentiles):
+            raise RuntimeError('Latency percentile ordering mismatch')
+    return {key: data[key] for key in metrics if key in data}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--concurrencies', type=int, nargs='+', default=[1, 4, 8])
+    parser.add_argument('--num-prompts', type=int, default=200)
+    parser.add_argument('--input-tokens', type=int, default=256)
+    parser.add_argument('--output-tokens', type=int, default=64)
+    parser.add_argument('--seed', type=int, default=20261010)
+    args = parser.parse_args()
+    config = json.loads(args.config.read_text())
+    endpoint = f"http://{config['master']}:{config['execution']['api_port']}"
+    directory = Path(config['execution']['result_dir'])/'performance'
+    directory.mkdir(parents=True, exist_ok=True)
+    marker = directory/'status.json'
+    # An exclusive marker also prevents simultaneous duplicate benchmark clients.
+    with marker.open('x') as stream:
+        stream.write('{}')
+    state = dict(status='accepting_model', started_at=datetime.now(timezone.utc).isoformat(),
+                 model=config['model'], tp=config['tp'], pp=config['pp'], total_devices=4,
+                 dtype=config['dtype'], transport=config['execution']['transport'],
+                 flagcx=config['flagcx'], stages=config['stages'],
+                 client_vllm=importlib.metadata.version('vllm'),
+                 workload='synthetic random tokens; not ShareGPT',
+                 input_tokens=args.input_tokens, output_tokens=args.output_tokens,
+                 requests_per_case=args.num_prompts, concurrencies=args.concurrencies,
+                 seed=args.seed, cases={},
+                 scope=config['execution']['scope'],
+                 config_sha256=hashlib.sha256(args.config.read_bytes()).hexdigest())
+
+    def save(**updates):
+        state.update(updates)
+        temporary = marker.with_suffix('.tmp')
+        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+        temporary.replace(marker)
+        print(json.dumps(updates, ensure_ascii=False), flush=True)
+
+    save()
+    try:
+        acceptance(endpoint, directory)
+        (directory/'config.json').write_text(json.dumps(config, ensure_ascii=False, indent=2))
+        inputs = None
+        for concurrency in args.concurrencies:
+            label = f'random-c{concurrency}'
+            output = directory/(label+'.json')
+            if output.exists():
+                raise RuntimeError('Refusing to overwrite retained benchmark results')
+            command = ['vllm', 'bench', 'serve', '--backend', 'vllm',
+                '--endpoint', '/v1/completions', '--base-url', endpoint,
+                '--model', config['execution']['model_path'],
+                '--tokenizer', config['execution']['model_path'],
+                '--served-model-name', 'Qwen3-14B', '--dataset-name', 'random',
+                '--random-input-len', str(args.input_tokens),
+                '--random-output-len', str(args.output_tokens), '--random-range-ratio', '0.0',
+                '--num-prompts', str(args.num_prompts), '--num-warmups', '3',
+                '--max-concurrency', str(concurrency), '--request-rate', 'inf',
+                '--ignore-eos', '--temperature', '0', '--seed', str(args.seed),
+                '--percentile-metrics', 'ttft,tpot,itl,e2el', '--metric-percentiles', '50,95,99',
+                '--save-result', '--save-detailed', '--result-dir', str(directory),
+                '--result-filename', output.name]
+            (directory/(label+'-command.json')).write_text(json.dumps(command, indent=2))
+            save(status='running', current_concurrency=concurrency, command=command)
+            with (directory/(label+'.log')).open('w') as log:
+                subprocess.run(command, stdout=log, stderr=log, check=True)
+            data = json.loads(output.read_text())
+            state['cases'][str(concurrency)] = summarize(data, args.num_prompts, args.output_tokens, inputs)
+            inputs = data['input_lens']
+            save(completed_cases=len(state['cases']))
+        save(status='complete', completed_at=datetime.now(timezone.utc).isoformat(),
+             validation='All requests passed; fixed outputs; identical case input lengths; throughput recomputed')
+        (directory/'summary.json').write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    except Exception as error:
+        save(status='failed', error=str(error))
+        raise
+
+
+if __name__ == '__main__':
+    main()

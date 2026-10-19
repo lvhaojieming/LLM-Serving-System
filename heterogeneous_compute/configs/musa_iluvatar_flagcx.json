@@ -1,0 +1,171 @@
+{
+  "model": "Qwen/Qwen3-14B",
+  "dtype": "bfloat16",
+  "tp": 2,
+  "pp": 2,
+  "resource_limits_enabled": false,
+  "master": "192.168.162.97",
+  "port": 29850,
+  "stages": [
+    {
+      "stage": 0,
+      "ssh_alias": "s5000-01",
+      "host": "192.168.162.97",
+      "container": "heteroserve-musa",
+      "device": "musa",
+      "devices": [
+        4,
+        5
+      ],
+      "ranks": [
+        0,
+        1
+      ],
+      "planned_layers": [
+        0,
+        20
+      ],
+      "tp_backend": "mccl",
+      "env": {
+        "FLAGCX_IB_DISABLE": "1",
+        "FLAGCX_USE_HETERO_COMM": "1",
+        "FLAGCX_DEBUG": "INFO",
+        "FLAGCX_DEBUG_SUBSYS": "INIT,NET",
+        "OMP_NUM_THREADS": "2",
+        "FLAGCX_SOCKET_IFNAME": "ens18f0",
+        "GLOO_SOCKET_IFNAME": "ens18f0",
+        "MUSA_VISIBLE_DEVICES": "4,5",
+        "MTHREADS_VISIBLE_DEVICES": "4,5",
+        "VLLM_USE_V1": "0",
+        "MCCL_IB_DISABLE": "1",
+        "MCCL_NET": "Socket",
+        "MCCL_P2P_DISABLE": "1",
+        "MCCL_SHM_DISABLE": "1",
+        "FLAGCX_SOCKET_NTHREADS": "1",
+        "FLAGCX_NSOCKS_PERTHREAD": "1",
+        "FLAGCX_NET_BUFFER_SIZE": "4194304",
+        "FLAGCX_NET_CHUNK_SIZE": "4194304"
+      }
+    },
+    {
+      "stage": 1,
+      "ssh_alias": "iluvatar150-02",
+      "host": "192.168.162.60",
+      "container": "heteroserve-iluvatar-pp",
+      "device": "cuda",
+      "devices": [
+        0,
+        1
+      ],
+      "ranks": [
+        2,
+        3
+      ],
+      "planned_layers": [
+        20,
+        40
+      ],
+      "tp_backend": "nccl",
+      "env": {
+        "FLAGCX_IB_DISABLE": "1",
+        "FLAGCX_USE_HETERO_COMM": "1",
+        "FLAGCX_DEBUG": "INFO",
+        "FLAGCX_DEBUG_SUBSYS": "INIT,NET",
+        "OMP_NUM_THREADS": "2",
+        "FLAGCX_SOCKET_IFNAME": "ens1f0np0",
+        "GLOO_SOCKET_IFNAME": "ens1f0np0",
+        "CUDA_VISIBLE_DEVICES": "0,1",
+        "IX_VISIBLE_DEVICES": "0,1",
+        "NCCL_SOCKET_IFNAME": "ens1f0np0",
+        "NCCL_IB_DISABLE": "1",
+        "NCCL_CUMEM_ENABLE": "0",
+        "VLLM_NCCL_SO_PATH": "/usr/local/corex/lib64/libixsysnccl.so",
+        "FLAGCX_SOCKET_NTHREADS": "1",
+        "FLAGCX_NSOCKS_PERTHREAD": "1",
+        "FLAGCX_NET_BUFFER_SIZE": "4194304",
+        "FLAGCX_NET_CHUNK_SIZE": "4194304"
+      }
+    }
+  ],
+  "layer_interval": "start inclusive, end exclusive; actual vLLM PP layer allocation",
+  "pp_rank_pairs": [
+    [
+      0,
+      2
+    ],
+    [
+      1,
+      3
+    ]
+  ],
+  "probe": "heterogeneous_compute/flagcx_transport.py",
+  "results": "artifacts/baselines/musa-iluvatar-flagcx",
+  "execution": {
+    "model_path": "/models/Qwen3-14B",
+    "tp_port": 29861,
+    "pp_port": 29862,
+    "max_model_len": 2048,
+    "result_dir": "/workspace/artifacts/baselines/musa-iluvatar-flagcx",
+    "requests": [
+      {
+        "id": "math-first",
+        "prompt": "2+3等于多少？只输出数字。",
+        "max_tokens": 8
+      },
+      {
+        "id": "capital",
+        "prompt": "法国的首都是哪里？只回答城市名。",
+        "max_tokens": 12
+      },
+      {
+        "id": "english",
+        "prompt": "What is 7 minus 4? Reply with only the digit.",
+        "max_tokens": 8
+      },
+      {
+        "id": "math-repeat",
+        "prompt": "2+3等于多少？只输出数字。",
+        "max_tokens": 8
+      },
+      {
+        "id": "explain",
+        "prompt": "请用一句话解释什么是流水线并行。",
+        "max_tokens": 32
+      },
+      {
+        "id": "sequence",
+        "prompt": "按顺序输出从1到10的整数，用逗号隔开，不要解释。",
+        "max_tokens": 32
+      },
+      {
+        "id": "context",
+        "prompt": "背景资料：今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。请忽略背景资料，只回答9加8的结果，输出数字。",
+        "max_tokens": 8
+      }
+    ],
+    "mode": "http",
+    "api_port": 18297,
+    "scope": "Custom vLLM-component TP2 PP2 executor; FlagCX device-buffer PP over Socket; native local TP; reference attention",
+    "scheduler": "continuous",
+    "max_active_requests": 8,
+    "microbatch_size": 4,
+    "max_inflight_batches": 2,
+    "max_batch_tokens": 1024,
+    "prefill_chunk_tokens": 512,
+    "transport": "flagcx"
+  },
+  "validation": {
+    "references": {
+      "musa": "http://127.0.0.1:18097"
+    }
+  },
+  "flagcx": {
+    "repository": "https://github.com/flagos-ai/FlagCX",
+    "commit": "4dd8862e09be73c8e54f49b763186e80c365f195",
+    "source_sha256": "82e997c347764d18b6abdb15d049cedea0ecbc3acb1bcdb8a6e6763118eb62a4",
+    "json_commit": "a0e9fb1e638cfbb5b8b556b7c51eaa81977bad48",
+    "build_source_sha256": "63b0944b916ce14618c4ef26ae58ff9950261e3a55262a6662d69e697716ae16",
+    "library": "/workspace/artifacts/dependencies/flagcx/4dd8862e09be73c8e54f49b763186e80c365f195/FlagCX/build/lib/libheteroserve_flagcx.so",
+    "network": "Socket (FLAGCX_IB_DISABLE=1); no GPUDirect/RDMA claim"
+  }
+}
