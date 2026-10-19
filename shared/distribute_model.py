@@ -1,4 +1,4 @@
-"""Wait for verified model download, then SCP and verify each configured peer."""
+"""SCP a verified downloaded or quantized checkpoint to configured peers."""
 import argparse
 import concurrent.futures
 from datetime import datetime, timezone
@@ -17,6 +17,14 @@ def main():
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
+    completion_marker = config.get('completion_marker', 'DOWNLOAD_COMPLETE')
+    manifest_name = config.get('manifest_name', 'download_manifest.json')
+    metadata_files = config.get('metadata_files', ['SHA256SUMS', 'download_manifest.json', 'DOWNLOAD_COMPLETE'])
+    for name in [completion_marker, manifest_name, *metadata_files]:
+        if Path(name).name != name or name in {'.', '..'}:
+            raise ValueError('Checkpoint metadata must be a direct child filename')
+    if not metadata_files or metadata_files[-1] != completion_marker:
+        raise ValueError('Publish the completion marker last')
     source, task, report = (Path(config[k]) for k in ['source_directory', 'task_directory', 'report_directory'])
     report.mkdir(parents=True, exist_ok=True)
     peers = config['peers']
@@ -58,7 +66,7 @@ def main():
 
     save()
     try:
-        while not (source/'DOWNLOAD_COMPLETE').exists():
+        while not (source/completion_marker).exists():
             path = Path(config['download_report'])
             if path.exists():
                 download = json.loads(path.read_text())
@@ -67,8 +75,12 @@ def main():
             time.sleep(15)
         state['status'] = 'distributing'
         save()
-        manifest = json.loads((source/'download_manifest.json').read_text())
-        expected = [(item['path'], item['sha256']) for item in manifest['files']]
+        manifest = json.loads((source/manifest_name).read_text())
+        files = manifest['files']
+        expected = list(files.items()) if isinstance(files, dict) else [(item['path'], item['sha256']) for item in files]
+        for name, digest in expected:
+            if Path(name).is_absolute() or '..' in Path(name).parts or len(digest) != 64:
+                raise ValueError('Invalid checkpoint manifest entry')
         destination = '/home/zhangjinhao/models/'+source.name
         ownership = config['task_name']
 
@@ -78,7 +90,7 @@ def main():
                 try:
                     update(alias, status='preflight')
                     dst, marker = shlex.quote(destination), shlex.quote(ownership)
-                    command = ('if [ -e '+dst+' ]; then test -f '+dst+'/DOWNLOAD_COMPLETE || '
+                    command = ('if [ -e '+dst+' ]; then test -f '+shlex.quote(destination+'/'+completion_marker)+' || '
                                'test "$(cat '+dst+'/TRANSFER_IN_PROGRESS 2>/dev/null)" = '+marker+'; '
                                'else mkdir -p '+dst+' && printf %s '+marker+' > '+dst+'/TRANSFER_IN_PROGRESS; fi')
                     if remote(peer, command, log).returncode:
@@ -89,7 +101,7 @@ def main():
                         if remote(peer, verify, log).returncode == 0:
                             continue
                         # A completed directory is immutable, even when its hashes differ.
-                        allowed = 'test ! -e '+dst+'/DOWNLOAD_COMPLETE && test "$(cat '+dst+'/TRANSFER_IN_PROGRESS)" = '+marker
+                        allowed = 'test ! -e '+shlex.quote(destination+'/'+completion_marker)+' && test "$(cat '+dst+'/TRANSFER_IN_PROGRESS)" = '+marker
                         if remote(peer, allowed, log).returncode:
                             raise RuntimeError('Refusing to overwrite existing completed model')
                         remote(peer, 'mkdir -p '+shlex.quote(str(Path(destination+'/'+name).parent)), log)
@@ -104,7 +116,7 @@ def main():
                         else:
                             raise RuntimeError('SCP/hash failed: '+name)
                     # Publish the completion marker only after all assets verify.
-                    for name in ['SHA256SUMS', 'download_manifest.json', 'DOWNLOAD_COMPLETE']:
+                    for name in metadata_files:
                         r = subprocess.run(['scp', *legacy, *options(peer), '-P', str(peer[2]), str(source/name),
                             'zhangjinhao@'+peer[1]+':'+destination+'/'], stdin=subprocess.DEVNULL, stdout=log, stderr=log, timeout=120)
                         if r.returncode:

@@ -1,0 +1,29 @@
+{
+  "source_directory": "/home/zhangjinhao/quantization/models/Qwen3-14B-AWQ",
+  "task_directory": "/home/zhangjinhao/.cache/moqe-awq-transfer",
+  "report_directory": "/home/zhangjinhao/LLM-Serving-System/artifacts/model-distribution/awq",
+  "workers": 2,
+  "task_name": "moqe-awq-transfer",
+  "source_ip": "192.168.162.24",
+  "completion_marker": "QUANTIZATION_COMPLETE",
+  "manifest_name": "quantization_manifest.json",
+  "metadata_files": [
+    "quantization_manifest.json",
+    "QUANTIZATION_COMPLETE"
+  ],
+  "download_report": "/home/zhangjinhao/LLM-Serving-System/artifacts/model-distribution/awq/source-check.json",
+  "peers": [
+    [
+      "s5000-01",
+      "192.168.162.97",
+      22,
+      "172.22.162.97"
+    ],
+    [
+      "iluvatar150-02",
+      "192.168.162.60",
+      14735,
+      "[172.22.162.60]:14735"
+    ]
+  ]
+}

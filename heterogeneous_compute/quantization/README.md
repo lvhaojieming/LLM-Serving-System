@@ -25,6 +25,14 @@ python3 /workspace/heterogeneous_compute/quantization/run.py \
 
 模型位于宿主机 `/home/zhangjinhao/quantization/models/`；日志位于 `logs/awq.log`、`logs/gptq.log`，退出码在同名 `.exit` 文件。容器中统一挂载为 `/quantization/`。原始权重挂载只读。
 
+跨厂商分发已有标准 AWQ 使用 `configs/awq_distribution.json` 和
+`shared/distribute_model.py`，从 `.24` 通过内网 SCP 到摩尔 `.97`、天数 `.60` 的
+`~/models/Qwen3-14B-AWQ`。复用 `quantization_manifest.json` 中的逐文件 SHA256，
+全部校验通过后才复制 `QUANTIZATION_COMPLETE`；已有完成目录不覆盖。
+分发使用限定源 IP 的临时 SSH 授权，结束自动移除授权和专用私钥。
+这份权重是本项目自量化的标准 AWQ GEMM W4A16/group128，不能标作 Qwen 官方
+发布权重；分发完成也不等于目标厂商原生 AWQ 推理或测速已通过。
+
 Transformers 5 导出时可能重新序列化 tokenizer。发布先确认模型词表、merges、特殊 token ID 和所有校准输入的 token ID 一致，再恢复原始 tokenizer 文件。已保存但未发布的模型可用同一命令加 `--publish-only` 完成验证与发布，不重复量化。补充发布日志与退出码为 `logs/<algorithm>.publish.log/.exit`；最终完成标志以正式模型目录中的 `QUANTIZATION_COMPLETE` 为准，不能仅看旧进程的退出码。
 
 输出先写 `.incomplete`，检查量化配置、280 个 INT32 packed Linear、浮点 LM head 和 tokenizer 一致性后发布正式目录，保存逐文件哈希与依赖版本。`QUANTIZATION_COMPLETE` 只表示权重生成及结构验证完成，不表示推理速度、精度或后端加载已经验收。禁止覆盖已有模型与未完成输出。
