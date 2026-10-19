@@ -1,0 +1,91 @@
+{
+  "model": "Qwen3-14B-AWQ",
+  "model_path": "/models/Qwen3-14B-AWQ",
+  "quantization": "awq",
+  "dtype": "float16",
+  "tp": 2,
+  "pp": 1,
+  "max_model_len": 4096,
+  "max_num_seqs": 16,
+  "max_num_batched_tokens": 4096,
+  "gpu_memory_utilization": 0.6,
+  "enforce_eager": true,
+  "prefix_caching": false,
+  "resource_limits_enabled": false,
+  "weight_provenance": "Existing project-generated standard AWQ GEMM/group128; not Qwen-published AWQ weights",
+  "benchmark": {
+    "lengths": [
+      [
+        256,
+        128
+      ],
+      [
+        2048,
+        128
+      ],
+      [
+        256,
+        1024
+      ]
+    ],
+    "concurrencies": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "num_prompts": 200,
+    "warmups": 3,
+    "seed": 20261010
+  },
+  "vendors": {
+    "musa": {
+      "ssh_alias": "s5000-01",
+      "host": "192.168.162.97",
+      "container": "heteroserve-musa",
+      "devices": [
+        6,
+        7
+      ],
+      "port": 18497,
+      "result_dir": "/workspace/artifacts/baselines/native-awq/musa",
+      "kernel_path": "Vendor AWQLinearMethod: awq_dequantize_triton + FP16 torch.matmul; INT4 stored weights, not fused INT4 GEMM",
+      "env": {
+        "MUSA_VISIBLE_DEVICES": "6,7",
+        "MTHREADS_VISIBLE_DEVICES": "6,7",
+        "VLLM_USE_V1": "0",
+        "MCCL_IB_DISABLE": "1",
+        "MCCL_NET": "Socket",
+        "MCCL_P2P_DISABLE": "1",
+        "MCCL_SHM_DISABLE": "1",
+        "GLOO_SOCKET_IFNAME": "ens18f0",
+        "OMP_NUM_THREADS": "4"
+      }
+    },
+    "iluvatar": {
+      "ssh_alias": "iluvatar150-02",
+      "host": "192.168.162.60",
+      "container": "heteroserve-iluvatar-pp",
+      "devices": [
+        2,
+        3
+      ],
+      "port": 18460,
+      "result_dir": "/workspace/artifacts/baselines/native-awq/iluvatar",
+      "kernel_path": "Vendor AWQLinearMethod -> cuinfer awq_gemm; Torch fallback disabled for awq_gemm",
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "2,3",
+        "IX_VISIBLE_DEVICES": "2,3",
+        "NCCL_IB_DISABLE": "1",
+        "NCCL_CUMEM_ENABLE": "0",
+        "NCCL_SOCKET_IFNAME": "ens1f0np0",
+        "GLOO_SOCKET_IFNAME": "ens1f0np0",
+        "VLLM_NCCL_SO_PATH": "/usr/local/corex/lib64/libixsysnccl.so",
+        "KERNEL_BACKEND": "awq_gemm:cuinfer",
+        "KERNEL_DISABLED_BACKEND": "torch:awq_gemm",
+        "OMP_NUM_THREADS": "4"
+      }
+    }
+  }
+}

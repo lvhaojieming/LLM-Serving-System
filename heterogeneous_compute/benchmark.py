@@ -22,7 +22,7 @@ def request(endpoint, body):
         return json.load(response)
 
 
-def acceptance(endpoint, directory):
+def acceptance(endpoint, directory, served_model='Qwen3-14B', require_kv_state=True):
     cases = [('2+3等于多少？只输出数字。', '5'),
              ('法国的首都是哪里？只回答城市名。', '巴黎'),
              ('What is 7 minus 4? Reply with only the digit.', '3')]
@@ -30,7 +30,7 @@ def acceptance(endpoint, directory):
     def check(case):
         prompt, expected = case
         started = time.perf_counter()
-        response = request(endpoint, dict(model='Qwen3-14B',
+        response = request(endpoint, dict(model=served_model,
             messages=[dict(role='user', content=prompt)], temperature=0, max_tokens=16,
             chat_template_kwargs=dict(enable_thinking=False)))
         actual = response['choices'][0]['message']['content'].strip()
@@ -44,9 +44,11 @@ def acceptance(endpoint, directory):
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         concurrent_rows = list(pool.map(check, cases))
     with urllib.request.urlopen(endpoint+'/health', timeout=10) as response:
-        health = json.load(response)
+        payload = response.read()
+        health = json.loads(payload) if payload else dict(http_status=response.status)
     report = dict(passed=all(row['passed'] for row in rows+concurrent_rows)
-                  and health['kv_owners'] == 0 and health['active_requests'] == 0,
+                  and (not require_kv_state or
+                       (health['kv_owners'] == 0 and health['active_requests'] == 0)),
                   sequential=rows, concurrent=concurrent_rows, health_after=health,
                   scope='Six exact-answer smoke checks; not general model quality or batch invariance')
     (directory/'acceptance.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
@@ -75,9 +77,85 @@ def summarize(data, count, output_tokens, previous_inputs):
     return {key: data[key] for key in metrics if key in data}
 
 
+def benchmark_command(endpoint, model_path, served_model, input_tokens, output_tokens,
+                      count, warmups, concurrency, seed, output):
+    return ['vllm', 'bench', 'serve', '--backend', 'vllm',
+        '--endpoint', '/v1/completions', '--base-url', endpoint,
+        '--model', model_path, '--tokenizer', model_path,
+        '--served-model-name', served_model, '--dataset-name', 'random',
+        '--random-input-len', str(input_tokens), '--random-output-len', str(output_tokens),
+        '--random-range-ratio', '0.0', '--num-prompts', str(count), '--num-warmups', str(warmups),
+        '--max-concurrency', str(concurrency), '--request-rate', 'inf',
+        '--ignore-eos', '--temperature', '0', '--seed', str(seed),
+        '--percentile-metrics', 'ttft,tpot,itl,e2el', '--metric-percentiles', '50,95,99',
+        '--save-result', '--save-detailed', '--result-dir', str(output.parent),
+        '--result-filename', output.name]
+
+
+def native_matrix(config, vendor, config_path):
+    """Measure native vendor servers using the same installed official client."""
+    target = config['vendors'][vendor]
+    settings = config['benchmark']
+    endpoint = f"http://{target['host']}:{target['port']}"
+    directory = Path(target['result_dir'])/'performance'
+    directory.mkdir(parents=True, exist_ok=True)
+    marker = directory/'status.json'
+    with marker.open('x') as stream:
+        stream.write('{}')
+    state = dict(status='accepting_model', started_at=datetime.now(timezone.utc).isoformat(),
+                 vendor=vendor, model=config['model'], tp=config['tp'], pp=config['pp'],
+                 total_devices=len(target['devices']), dtype=config['dtype'],
+                 quantization=config['quantization'], kernel_path=target['kernel_path'],
+                 weight_provenance=config['weight_provenance'], benchmark=settings,
+                 client_vllm=importlib.metadata.version('vllm'),
+                 config_sha256=hashlib.sha256(config_path.read_bytes()).hexdigest(),
+                 runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                 workload='synthetic fixed-length random tokens; not ShareGPT', cases={})
+
+    def save(**updates):
+        state.update(updates)
+        temporary = marker.with_suffix('.tmp')
+        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+        temporary.replace(marker)
+        print(json.dumps(updates, ensure_ascii=False), flush=True)
+
+    save()
+    try:
+        acceptance(endpoint, directory, config['model'], require_kv_state=False)
+        (directory/'config.json').write_text(json.dumps(config, indent=2))
+        for input_tokens, output_tokens in settings['lengths']:
+            inputs = None
+            for concurrency in settings['concurrencies']:
+                label = f'random-i{input_tokens}-o{output_tokens}-c{concurrency}'
+                output = directory/(label+'.json')
+                if output.exists():
+                    raise RuntimeError('Refusing to overwrite retained benchmark results')
+                command = benchmark_command(endpoint, config['model_path'], config['model'],
+                    input_tokens, output_tokens, settings['num_prompts'], settings['warmups'],
+                    concurrency, settings['seed'], output)
+                (directory/(label+'-command.json')).write_text(json.dumps(command, indent=2))
+                save(status='running', current_case=label, command=command)
+                with (directory/(label+'.log')).open('w') as log:
+                    subprocess.run(command, stdout=log, stderr=log, check=True)
+                data = json.loads(output.read_text())
+                if len(data['input_lens']) != settings['num_prompts'] or any(
+                        n != input_tokens for n in data['input_lens']):
+                    raise RuntimeError('Benchmark fixed input length mismatch')
+                state['cases'][label] = summarize(data, settings['num_prompts'], output_tokens, inputs)
+                inputs = data['input_lens']
+                save(completed_cases=len(state['cases']))
+        save(status='complete', completed_at=datetime.now(timezone.utc).isoformat(),
+             validation='All requests passed; fixed inputs/outputs; throughput recomputed')
+        (directory/'summary.json').write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    except Exception as error:
+        save(status='failed', error=str(error))
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--vendor', choices=['musa', 'iluvatar'])
     parser.add_argument('--concurrencies', type=int, nargs='+', default=[1, 4, 8])
     parser.add_argument('--num-prompts', type=int, default=200)
     parser.add_argument('--input-tokens', type=int, default=256)
@@ -85,6 +163,9 @@ def main():
     parser.add_argument('--seed', type=int, default=20261010)
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
+    if args.vendor:
+        native_matrix(config, args.vendor, args.config)
+        return
     endpoint = f"http://{config['master']}:{config['execution']['api_port']}"
     directory = Path(config['execution']['result_dir'])/'performance'
     directory.mkdir(parents=True, exist_ok=True)
@@ -121,19 +202,9 @@ def main():
             output = directory/(label+'.json')
             if output.exists():
                 raise RuntimeError('Refusing to overwrite retained benchmark results')
-            command = ['vllm', 'bench', 'serve', '--backend', 'vllm',
-                '--endpoint', '/v1/completions', '--base-url', endpoint,
-                '--model', config['execution']['model_path'],
-                '--tokenizer', config['execution']['model_path'],
-                '--served-model-name', 'Qwen3-14B', '--dataset-name', 'random',
-                '--random-input-len', str(args.input_tokens),
-                '--random-output-len', str(args.output_tokens), '--random-range-ratio', '0.0',
-                '--num-prompts', str(args.num_prompts), '--num-warmups', '3',
-                '--max-concurrency', str(concurrency), '--request-rate', 'inf',
-                '--ignore-eos', '--temperature', '0', '--seed', str(args.seed),
-                '--percentile-metrics', 'ttft,tpot,itl,e2el', '--metric-percentiles', '50,95,99',
-                '--save-result', '--save-detailed', '--result-dir', str(directory),
-                '--result-filename', output.name]
+            command = benchmark_command(endpoint, config['execution']['model_path'], 'Qwen3-14B',
+                args.input_tokens, args.output_tokens, args.num_prompts, 3,
+                concurrency, args.seed, output)
             (directory/(label+'-command.json')).write_text(json.dumps(command, indent=2))
             save(status='running', current_concurrency=concurrency, command=command)
             with (directory/(label+'.log')).open('w') as log:

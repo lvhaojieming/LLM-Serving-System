@@ -229,3 +229,56 @@ control. The current configuration writes new results to
 `artifacts/baselines/cross-vendor-pp/performance-continuous/` and preserves the old
 measurements. Reference attention and CPU staging remain part of both paths.
 Only completed official benchmark results establish throughput or latency changes.
+
+
+## Native AWQ W4A16 baseline
+
+`configs/native_awq.json` defines separate single-node TP2/PP1 baselines:
+Moore `.97`, physical devices 6/7, port 18497; Iluvatar `.60`, logical devices
+2/3, port 18460. Reuse `heteroserve-musa` and `heteroserve-iluvatar-pp`.
+The copied model is the existing project-generated Qwen3-14B AWQ GEMM,
+4-bit/group128/zero-point checkpoint, not Qwen-published AWQ weights.
+Both use FP16 activations and the unmodified installed vendor vLLM plugin.
+Moore's installed plugin dequantizes packed INT4 weights then calls FP16
+`torch.matmul`; this is not fused INT4 GEMM. Iluvatar forces
+`KERNEL_BACKEND=awq_gemm:cuinfer` and disables `torch:awq_gemm` fallback.
+The installed engines differ: Moore vLLM 0.9.3 development build versus
+Iluvatar 0.23.0. Results describe these complete software stacks.
+
+Server arguments are `vllm serve /models/Qwen3-14B-AWQ
+--served-model-name Qwen3-14B-AWQ --quantization awq --dtype half
+--tensor-parallel-size 2 --pipeline-parallel-size 1
+--distributed-executor-backend mp --max-model-len 4096 --max-num-seqs 16
+--max-num-batched-tokens 4096 --gpu-memory-utilization 0.60
+--enforce-eager --no-enable-prefix-caching --seed 20261010`, plus the
+configured host/port and environment. Moore also requires `--block-size 32`.
+Do not relaunch over an existing service. Runtime process arguments, package
+versions and vendor AWQ source hashes are retained in each server's
+`/workspace/artifacts/baselines/native-awq/<vendor>/deployment.json`.
+
+Use the existing Iluvatar .60 container's official vLLM 0.23.0 benchmark
+client for both endpoints, with separate processes/result directories:
+
+```bash
+python3 -u /workspace/heterogeneous_compute/benchmark.py \
+ --config /workspace/heterogeneous_compute/configs/native_awq.json --vendor iluvatar
+python3 -u /workspace/heterogeneous_compute/benchmark.py \
+ --config /workspace/heterogeneous_compute/configs/native_awq.json --vendor musa
+```
+
+The client first requires six exact-answer smoke checks and HTTP health.
+The 15 cases per vendor use fixed input/output lengths 256/128, 2048/128,
+256/1024 and concurrency 1/2/4/8/16; 200 requests, three warmups, seed
+20261010, temperature zero and ignored EOS. `--random-range-ratio 0.0`
+ensures fixed lengths in this client. Raw results, commands, acceptance,
+status and summaries stay under the client's
+`artifacts/baselines/native-awq/<vendor>/performance/`. Exclusive status
+markers prevent duplicate runs; no existing result is overwritten.
+Validation requires all requests successful, exact input/output token counts,
+identical input lengths across concurrency, recomputed output throughput and
+ordered latency percentiles. Summaries contain output throughput and
+TTFT/TPOT mean/P95/P99. The matrix was started on 2026-10-19; completed
+metrics must come from validated case JSON, not live progress estimates.
+Other services remain running on separate devices, so these are shared-host
+measurements rather than isolated-host hardware limits. No containers or
+limits were changed and no model/data copies were created by the benchmark.
