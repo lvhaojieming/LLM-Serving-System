@@ -468,5 +468,11 @@ IDs; prior warmup, failed captures and unrelated benchmark windows are
 excluded. Both TP lanes had127 conservative overlapping stage windows,
 with a maximum about27.86 ms and packed batch size4. These are host stage
 execution windows including dispatch/native TP, not GPU kernel profiling.
-The formal200-request cases are dispatched separately and remain pending
-until their case files pass validation. AWQ continues unchanged.
+The separate formal200-request cases completed800/800 requests on2026-10-19.
+Output throughput for concurrency1/2/4/8 was20.400/30.344/56.374/94.511
+tokens/s; mean TTFT was196.73/249.29/365.22/524.64 ms. Fixed output lengths,
+identical case input sequences, latency percentile ordering and throughput
+recomputation passed. These speed checks do not resolve the strict text
+invariance limitation. The completed matrix is retained in the same result
+summary. Moore AWQ remaining speed tests were cancelled at the user request;
+completed AWQ cases and its model service were retained.
