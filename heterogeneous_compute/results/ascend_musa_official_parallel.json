@@ -1,0 +1,212 @@
+{
+  "configuration": "heterogeneous_compute/configs/ascend_musa.json",
+  "model": "Qwen/Qwen3-14B",
+  "dtype": "bfloat16",
+  "tp": 2,
+  "pp": 2,
+  "total_devices": 4,
+  "execution_mode": "piecewise_mlp_graph",
+  "transport": "CPU-staged TCP; FlagCX not enabled",
+  "scope": "Official vendor vLLM local TP and model ops; official vendor attention; MLP compute-island graphs (attention/KV/PP outside graphs); project cross-node scheduling adapter; CPU-staged TCP PP",
+  "acceptance": {
+    "functional_passed": true,
+    "strict_passed": false,
+    "batch_invariance_passed": false,
+    "native_text_matched_cases": 6,
+    "total_native_cases": 7,
+    "graph_evidence": [
+      {
+        "lane": 0,
+        "local": {
+          "mode": "piecewise_mlp_graph",
+          "modules": 20,
+          "captures": 80,
+          "replays": 4700,
+          "uncaptured_calls": 280
+        },
+        "peer": {
+          "mode": "piecewise_mlp_graph",
+          "modules": 20,
+          "captures": 80,
+          "replays": 4700,
+          "uncaptured_calls": 280
+        }
+      },
+      {
+        "lane": 1,
+        "local": {
+          "mode": "piecewise_mlp_graph",
+          "modules": 20,
+          "captures": 80,
+          "replays": 4700,
+          "uncaptured_calls": 280
+        },
+        "peer": {
+          "mode": "piecewise_mlp_graph",
+          "modules": 20,
+          "captures": 80,
+          "replays": 4700,
+          "uncaptured_calls": 280
+        }
+      }
+    ],
+    "overlap": [
+      {
+        "lane": 0,
+        "clock_uncertainty_ms": 0.06993720307946205,
+        "clock_assumption": "Stable monotonic offset during this short acceptance; RTT uncertainty, drift not measured",
+        "overlapping_windows": 127,
+        "conservative_max_overlap_ms": 27.839595451951027,
+        "scope": "Current acceptance stream request IDs only",
+        "max_packed_batch_size": 4
+      },
+      {
+        "lane": 1,
+        "clock_uncertainty_ms": 0.0687725841999054,
+        "clock_assumption": "Stable monotonic offset during this short acceptance; RTT uncertainty, drift not measured",
+        "overlapping_windows": 127,
+        "conservative_max_overlap_ms": 27.864553034305573,
+        "scope": "Current acceptance stream request IDs only",
+        "max_packed_batch_size": 4
+      }
+    ],
+    "chunked_prefill_passed": true,
+    "cancellation_passed": true,
+    "tp_lane_tokens_match": true
+  },
+  "short_benchmark": {
+    "requests_per_case": 12,
+    "input_tokens": 256,
+    "output_tokens": 64,
+    "seed": 20261010,
+    "concurrencies": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "cases": {
+      "1": {
+        "completed": 12,
+        "failed": 0,
+        "duration": 40.07182106608525,
+        "request_throughput": 0.2994623074456726,
+        "output_throughput": 19.165587676523046,
+        "total_token_throughput": 95.82793838261523,
+        "mean_ttft_ms": 196.40810484997928,
+        "p50_ttft_ms": 195.70386107079685,
+        "p95_ttft_ms": 201.2758164666593,
+        "p99_ttft_ms": 202.05699359998107,
+        "mean_tpot_ms": 49.854914962668865,
+        "p50_tpot_ms": 50.01910515720883,
+        "p95_tpot_ms": 51.68169616418521,
+        "p99_tpot_ms": 52.48655090411564,
+        "mean_itl_ms": 49.854917992546994,
+        "p50_itl_ms": 49.9084135517478,
+        "p95_itl_ms": 54.11238770466298,
+        "p99_itl_ms": 55.31394083518535,
+        "mean_e2el_ms": 3337.2677474981174,
+        "p50_e2el_ms": 3346.368811558932,
+        "p95_e2el_ms": 3453.0320220394055,
+        "p99_e2el_ms": 3501.93477564957
+      },
+      "2": {
+        "completed": 12,
+        "failed": 0,
+        "duration": 28.02293720887974,
+        "request_throughput": 0.4282206362078816,
+        "output_throughput": 27.40612071730442,
+        "total_token_throughput": 137.03060358652212,
+        "mean_ttft_ms": 249.049379529121,
+        "p50_ttft_ms": 263.53153586387634,
+        "p95_ttft_ms": 287.426296970807,
+        "p99_ttft_ms": 287.68821626435965,
+        "mean_tpot_ms": 69.86112467065041,
+        "p50_tpot_ms": 70.59648049448336,
+        "p95_tpot_ms": 71.75325229394413,
+        "p99_tpot_ms": 72.13199262743787,
+        "mean_itl_ms": 69.86112730200625,
+        "p50_itl_ms": 70.48238208517432,
+        "p95_itl_ms": 73.96198471542448,
+        "p99_itl_ms": 76.64640794973822,
+        "mean_e2el_ms": 4650.300233780096,
+        "p50_e2el_ms": 4696.657476015389,
+        "p95_e2el_ms": 4763.792063877918,
+        "p99_e2el_ms": 4779.273833674379
+      },
+      "4": {
+        "completed": 12,
+        "failed": 0,
+        "duration": 15.216175444889814,
+        "request_throughput": 0.7886344399393784,
+        "output_throughput": 50.47260415612022,
+        "total_token_throughput": 252.3630207806011,
+        "mean_ttft_ms": 380.06039526468766,
+        "p50_ttft_ms": 430.3650129586458,
+        "p95_ttft_ms": 480.01106744632125,
+        "p99_ttft_ms": 480.03369888290763,
+        "mean_tpot_ms": 74.14338739266097,
+        "p50_tpot_ms": 73.94505068585869,
+        "p95_tpot_ms": 76.65289055578234,
+        "p99_tpot_ms": 77.68409182620604,
+        "mean_itl_ms": 74.14339006959742,
+        "p50_itl_ms": 73.50576110184193,
+        "p95_itl_ms": 76.89717912580818,
+        "p99_itl_ms": 79.17433769907804,
+        "mean_e2el_ms": 5051.093801002328,
+        "p50_e2el_ms": 5089.093585498631,
+        "p95_e2el_ms": 5124.558279686607,
+        "p99_e2el_ms": 5124.688375820406
+      },
+      "8": {
+        "completed": 12,
+        "failed": 0,
+        "duration": 10.713151088915765,
+        "request_throughput": 1.1201186187335357,
+        "output_throughput": 71.68759159894628,
+        "total_token_throughput": 358.4379579947314,
+        "mean_ttft_ms": 633.5649831065288,
+        "p50_ttft_ms": 639.1982841305435,
+        "p95_ttft_ms": 895.7320319721475,
+        "p99_ttft_ms": 895.9309640945867,
+        "mean_tpot_ms": 76.87995081124383,
+        "p50_tpot_ms": 77.62291403265581,
+        "p95_tpot_ms": 81.07524483228131,
+        "p99_tpot_ms": 81.07575272121245,
+        "mean_itl_ms": 76.8799532479582,
+        "p50_itl_ms": 75.67075220867991,
+        "p95_itl_ms": 82.11810584180057,
+        "p99_itl_ms": 122.26030160672963,
+        "mean_e2el_ms": 5477.00188421489,
+        "p50_e2el_ms": 5746.793081983924,
+        "p95_e2el_ms": 5785.964281088673,
+        "p99_e2el_ms": 5786.186210582964
+      }
+    },
+    "completed_at": "2026-10-19T10:12:35.776594+00:00"
+  },
+  "formal_benchmark": {
+    "requests_per_case": 200,
+    "concurrencies": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "status": "dispatched; results pending",
+    "remote_result_dir": "/workspace/artifacts/baselines/ascend-musa/official-tp-graph/performance"
+  },
+  "caveats": [
+    "Local TP uses official GroupCoordinator and NPUCommunicator/MusaCommunicator; cross-node scheduler is project code.",
+    "MLP graph capture only; attention, KV, large prefill and PP remain outside graphs.",
+    "Stage execution-window overlap is not GPU-kernel profiler evidence; monotonic clock drift not measured.",
+    "Strict free-text/batch invariance failed; 6/7 native cases match. Functional acceptance is separate.",
+    "Shared-host tests with AWQ preserved on other devices; native reference services share devices but remain idle during pipeline benchmark.",
+    "Not the full length/concurrency baseline matrix: this run is 256/64, concurrency 1/2/4/8."
+  ],
+  "reproduction": {
+    "command": "python heterogeneous_compute/manage.py benchmark --ssh-config <ssh-config> --config heterogeneous_compute/configs/ascend_musa.json",
+    "artifacts": "artifacts/baselines/ascend-musa/official-tp-graph",
+    "config_sha256": "79d9b0871f4bfb66e9c0ed9f2e7e5e6fe0b39cfab35fc4e60faf65174f13eb69"
+  }
+}

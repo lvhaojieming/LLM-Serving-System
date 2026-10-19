@@ -4,8 +4,6 @@
   "tp": 2,
   "pp": 2,
   "resource_limits_enabled": false,
-  "status": "batched_protocol_v3_acceptance_pending",
-  "model_inference_verified": true,
   "master": "192.168.162.23",
   "port": 29650,
   "stages": [
@@ -34,7 +32,8 @@
         "HCCL_NPU_SOCKET_PORT_RANGE": "60700-60731",
         "HCCL_IF_BASE_PORT": "60800",
         "VLLM_USE_V1": "1",
-        "OMP_NUM_THREADS": "2"
+        "OMP_NUM_THREADS": "2",
+        "ASCEND_RT_VISIBLE_DEVICES": "0,1"
       }
     },
     {
@@ -61,10 +60,9 @@
         "VLLM_USE_V1": "0",
         "OMP_NUM_THREADS": "2",
         "MCCL_IB_DISABLE": "1",
-        "MCCL_NET": "Socket",
         "MCCL_DEBUG": "WARN",
-        "MCCL_P2P_DISABLE": "1",
-        "MCCL_SHM_DISABLE": "1"
+        "MUSA_VISIBLE_DEVICES": "0,1",
+        "MTHREADS_VISIBLE_DEVICES": "0,1"
       }
     }
   ],
@@ -80,14 +78,13 @@
     ]
   ],
   "probe": "heterogeneous_compute/probes/communication_probe.py",
-  "results": "artifacts/baselines/cross-vendor-pp/isolated-ports",
-  "next_requirement": "Batch-size numerical invariance and broader quality validation pending; native attention, graphs and performance tuning remain separate",
+  "results": "artifacts/baselines/ascend-musa/official-tp-graph",
   "execution": {
     "model_path": "/models/Qwen3-14B",
     "tp_port": 29661,
     "pp_port": 29662,
     "max_model_len": 2048,
-    "result_dir": "/workspace/artifacts/baselines/cross-vendor-pp/batched",
+    "result_dir": "/workspace/artifacts/baselines/ascend-musa/official-tp-graph",
     "requests": [
       {
         "id": "math-first",
@@ -127,18 +124,27 @@
     ],
     "mode": "http",
     "api_port": 18230,
-    "scope": "Custom vLLM-component executor; batched mixed attention and LM head; bounded asynchronous CPU-staged PP; native local TP",
+    "scope": "Official vendor vLLM local TP and model ops; official vendor attention; MLP compute-island graphs (attention/KV/PP outside graphs); project cross-node scheduling adapter; CPU-staged TCP PP",
     "scheduler": "continuous",
     "max_active_requests": 8,
     "microbatch_size": 4,
     "max_inflight_batches": 2,
     "max_batch_tokens": 1024,
-    "prefill_chunk_tokens": 512
+    "prefill_chunk_tokens": 512,
+    "tp_communicator": "vllm",
+    "attention_backend": "vendor",
+    "execution_mode": "piecewise_mlp_graph",
+    "graph_max_tokens": 4,
+    "transport": "tcp"
   },
   "validation": {
     "references": {
       "ascend": "http://127.0.0.1:18023",
       "musa": "http://192.168.162.97:18097"
     }
+  },
+  "benchmark_client": {
+    "ssh_alias": "iluvatar150-02",
+    "container": "heteroserve-iluvatar-pp"
   }
 }

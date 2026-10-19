@@ -18,9 +18,10 @@ PROBE_ENTRY = '/workspace/heterogeneous_compute/flagcx_transport.py'
 
 def snapshot(ssh_config, config):
     """Retain source/config identity and reused container/package versions."""
-    names = ['pipeline_execution.py', 'scheduling.py']
+    names = ['pipeline_execution.py', 'scheduling.py', 'graph_execution.py',
+             'manage.py', 'benchmark.py', 'validate.py']
     if config['execution'].get('transport') == 'flagcx':
-        names += ['manage.py', 'benchmark.py', 'flagcx_transport.py',
+        names += ['flagcx_transport.py',
                   'platforms/flagcx/bridge.cc', 'platforms/flagcx/build.sh']
     sources = [ROOT/'heterogeneous_compute'/name for name in names]
     nodes = []
@@ -79,15 +80,17 @@ def main():
     elif args.action == 'benchmark':
         if any(len(rows) != config['tp'] for rows in states):
             raise SystemExit('All model ranks must be running before benchmark acceptance.')
-        client = config['stages'][-1]
+        client = config.get('benchmark_client', config['stages'][-1])
         entry = '/workspace/heterogeneous_compute/benchmark.py'
         marker = config['execution']['result_dir']+'/performance/status.json'
         remote(args.ssh_config, client['ssh_alias'], shlex.join([
             'docker', 'exec', client['container'], 'test', '!', '-e', marker]))
-        subprocess.run(['scp', '-O', '-F', str(args.ssh_config),
-            str(ROOT/'heterogeneous_compute/benchmark.py'),
-            client['ssh_alias']+':'+REMOTE+'/heterogeneous_compute/benchmark.py'], check=True)
-        body = (shlex.join(['python3', '-u', entry, '--config', remote_config])+' > '+
+        for source, relative in [(ROOT/'heterogeneous_compute/benchmark.py', 'heterogeneous_compute/benchmark.py'),
+                                 (args.config, relative_config)]:
+            subprocess.run(['scp', '-O', '-F', str(args.ssh_config), str(source),
+                client['ssh_alias']+':'+REMOTE+'/'+relative], check=True)
+        body = ('mkdir -p '+shlex.quote(config['execution']['result_dir'])+'; exec '+
+                shlex.join(['python3', '-u', entry, '--config', remote_config])+' > '+
                 shlex.quote(config['execution']['result_dir']+'/benchmark.log')+' 2>&1')
         remote(args.ssh_config, client['ssh_alias'], shlex.join([
             'docker', 'exec', '-d', client['container'], 'bash', '-lc', body]))
@@ -137,6 +140,7 @@ def main():
             remote(args.ssh_config, spec['ssh_alias'],
                    shlex.join(['mkdir', '-p', REMOTE+'/heterogeneous_compute/configs']))
             for source, destination in [(ROOT/'heterogeneous_compute/pipeline_execution.py', 'heterogeneous_compute/pipeline_execution.py'),
+                                        (ROOT/'heterogeneous_compute/graph_execution.py', 'heterogeneous_compute/graph_execution.py'),
                                         (ROOT/'heterogeneous_compute/scheduling.py', 'heterogeneous_compute/scheduling.py'),
                                         (ROOT/'heterogeneous_compute/flagcx_transport.py', 'heterogeneous_compute/flagcx_transport.py'),
                                         (args.config, relative_config)]:

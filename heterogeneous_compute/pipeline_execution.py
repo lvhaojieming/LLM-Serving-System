@@ -16,6 +16,7 @@ import threading
 import uuid
 import signal
 import select
+from functools import lru_cache
 from pathlib import Path
 if __package__:
     from .scheduling import RequestState, BatchState, ContinuousScheduler
@@ -252,9 +253,33 @@ class ParallelGroup:
         return torch.cat(pieces, dim=dim)
 
 
+@lru_cache(maxsize=16)
+def npu_causal_mask(device):
+    import torch
+    return torch.triu(torch.ones((2048, 2048), dtype=torch.bool, device=device), diagonal=1)
+
+
 def vendor_attention(pieces, scale, device_type):
     """Use installed official vendor kernels; adapt layouts, never replace kernels."""
     import torch
+    if device_type == 'npu':
+        import torch_npu
+        query_lengths, key_lengths = [], []
+        for q, k, _, _ in pieces:
+            query_lengths.append(q.shape[1]+(query_lengths[-1] if query_lengths else 0))
+            key_lengths.append(k.shape[1]+(key_lengths[-1] if key_lengths else 0))
+        # The vendor TND kernel implements independent variable-length requests
+        # and bottom-right causal alignment for chunks with existing KV.
+        mask = npu_causal_mask(pieces[0][0].device)
+        output = torch_npu.npu_fusion_attention(
+            torch.cat([p[0].transpose(0, 1) for p in pieces]).contiguous(),
+            torch.cat([p[1].transpose(0, 1) for p in pieces]).contiguous(),
+            torch.cat([p[2].transpose(0, 1) for p in pieces]).contiguous(),
+            head_num=pieces[0][0].shape[0], input_layout='TND', scale=scale,
+            keep_prob=1.0, sparse_mode=3, atten_mask=mask,
+            actual_seq_qlen=query_lengths, actual_seq_kvlen=key_lengths,
+            pre_tockens=2147483647, next_tockens=0)[0]
+        return output.reshape(output.shape[0], -1)
     if device_type == 'cuda':
         from vllm_iluvatar.attention.flash_attn_interface import flash_attn_varlen_func
         q_lengths = [p[0].shape[1] for p in pieces]
@@ -273,7 +298,7 @@ def vendor_attention(pieces, scale, device_type):
             softmax_scale=scale, causal=True)
         return output.reshape(output.shape[0], -1)
     if device_type != 'musa':
-        raise ValueError('Official attention adapter supports musa and iluvatar cuda only')
+        raise ValueError('Official attention adapter supports npu, musa and iluvatar cuda only')
     # This installed MUSA flash op uses top-left causal alignment. Decode sees
     # all existing KV; cached multi-token chunks right-align Q by left-padding.
     groups = {}
@@ -364,12 +389,21 @@ def load_stage(config, stage, lane):
     if tp_communicator not in {'torch', 'vllm'}:
         raise ValueError('Unknown configured TP communicator')
     official_tp = tp_communicator == 'vllm'
+    execution_mode = config['execution'].get('execution_mode', 'eager')
+    if execution_mode not in {'eager', 'piecewise_mlp_graph'}:
+        raise ValueError('Unknown configured execution mode')
     args = EngineArgs(model=config['execution']['model_path'], dtype='bfloat16',
                       tensor_parallel_size=2, pipeline_parallel_size=2,
                       max_model_len=config['execution']['max_model_len'],
-                      enforce_eager=True, disable_custom_all_reduce=not official_tp,
+                      enforce_eager=execution_mode == 'eager', disable_custom_all_reduce=not official_tp,
                       enable_prefix_caching=False)
     vconfig = args.create_engine_config()
+    if execution_mode == 'piecewise_mlp_graph':
+        # The installed engines have incompatible whole-engine graph runners.
+        # Capture the official MLP+local TP path via the vendor graph APIs;
+        # dynamic attention/KV and cross-node transport remain outside graphs.
+        from vllm.config import CompilationLevel
+        vconfig.compilation_config.level = CompilationLevel.NO_COMPILATION
     from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
     torch.set_default_dtype(torch.bfloat16)
     with set_current_vllm_config(vconfig), torch.device(device):
@@ -378,6 +412,9 @@ def load_stage(config, stage, lane):
             parallel_state._TP = parallel_state.init_model_parallel_group(
                 [list(range(config['tp']))], local_rank=lane,
                 backend=spec['tp_backend'], group_name='tp')
+            if spec['device'] == 'npu':
+                parallel_state._DP = parallel_state.init_model_parallel_group(
+                    [[0], [1]], local_rank=lane, backend=spec['tp_backend'], group_name='dp')
         model = Qwen3ForCausalLM(vllm_config=vconfig)
     from safetensors import safe_open
     start, end = model.model.start_layer, model.model.end_layer
@@ -409,6 +446,21 @@ def load_stage(config, stage, lane):
             module.forward = module.forward_native
     state = BatchState(config['execution'].get('max_active_requests', 8))
     state.attention_backend = backend
+    state.vllm_config = vconfig
+    state.execution_mode = execution_mode
+    state.official_tp = official_tp
+    state.graph_runners = []
+    if execution_mode == 'piecewise_mlp_graph':
+        if __package__:
+            from .graph_execution import MLPGraphRunner
+        else:
+            from graph_execution import MLPGraphRunner
+        for index in range(start, end):
+            module = model.model.layers[index].mlp
+            runner = MLPGraphRunner(module.forward, device, vconfig,
+                                    max_tokens=config['execution'].get('graph_max_tokens', 4))
+            module.forward = runner
+            state.graph_runners.append(runner)
     for index in range(start, end):
         attention = model.model.layers[index].self_attn
 
@@ -421,8 +473,39 @@ def load_stage(config, stage, lane):
     print(json.dumps(dict(event='stage_loaded', stage=stage, lane=lane,
                           start_layer=start, end_layer=end,
                           parameter_bytes=sum(p.numel()*p.element_size() for p in model.parameters()),
+                          tp_implementation=type(parallel_state._TP).__module__+'.'+type(parallel_state._TP).__name__,
+                          tp_device_communicator=type(getattr(parallel_state._TP, 'device_communicator', None)).__module__+'.'+type(getattr(parallel_state._TP, 'device_communicator', None)).__name__,
+                          attention_backend=backend, execution_mode=execution_mode,
                           torch=torch.__version__)), flush=True)
     return model, state, device, cpu_group
+
+
+def model_forward(model, state, device, *args):
+    """Provide the installed Ascend plugin's official per-forward context."""
+    if device.type == 'npu' and state.attention_backend == 'vendor':
+        from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+        with set_ascend_forward_context(None, state.vllm_config,
+                num_tokens=sum(s['length'] for s in state.segments),
+                with_prefill=any(s['past'] == 0 or s['length'] > 1 for s in state.segments),
+                model_instance=model):
+            return model(*args)
+    return model(*args)
+
+
+def graph_stats(state):
+    return dict(mode=state.execution_mode, modules=len(state.graph_runners),
+                captures=sum(r.captures for r in state.graph_runners),
+                replays=sum(r.replays for r in state.graph_runners),
+                uncaptured_calls=sum(r.uncaptured_calls for r in state.graph_runners))
+
+
+def synchronize_tp_inputs(state, cpu_group):
+    if state.official_tp:
+        from vllm.distributed import get_tp_group
+        get_tp_group().barrier()  # Official CPU-group barrier; never a GPU barrier.
+    else:
+        import torch.distributed as dist
+        dist.monitored_barrier(group=cpu_group, timeout=datetime.timedelta(seconds=180))
 
 
 def open_channel(config, stage, lane):
@@ -914,10 +997,10 @@ def execute_continuous(config, stage, lane):
                     if set(tensors) != {'hidden_states', 'residual'} or any(tuple(t.shape) != expected for t in tensors.values()):
                         raise ValueError('PP activations disagree with packed positions')
                     state.install(segments)
-                    started = time.perf_counter()
-                    begin,end=accelerator.Event(enable_timing=True),accelerator.Event(enable_timing=True)
-                    begin.record()
-                    hidden = model(None, torch.tensor(positions, dtype=torch.int64, device=device), IntermediateTensors(tensors))
+                    # Prepare GPU metadata before either local rank can enqueue
+                    # collectives. Synchronous list-to-device conversions after
+                    # a peer launches a waiting collective can deadlock MUSA.
+                    position_tensor = torch.tensor(positions, dtype=torch.int64, device=device)
                     offset, sample_rows, owners = 0, [], []
                     samples = {s['request_id']:None for s in segments}
                     for segment in segments:
@@ -925,8 +1008,14 @@ def execute_continuous(config, stage, lane):
                         if segment['sample_token']:
                             sample_rows.append(offset-1)
                             owners.append(segment['request_id'])
+                    sample_indices = torch.tensor(sample_rows, dtype=torch.int64, device=device)
+                    synchronize_tp_inputs(state, cpu_group)
+                    started = time.perf_counter()
+                    begin,end=accelerator.Event(enable_timing=True),accelerator.Event(enable_timing=True)
+                    begin.record()
+                    hidden = model_forward(model, state, device, None, position_tensor, IntermediateTensors(tensors))
                     if sample_rows:
-                        logits = torch.nn.functional.linear(hidden[sample_rows], model.lm_head.weight).float()
+                        logits = torch.nn.functional.linear(hidden.index_select(0, sample_indices), model.lm_head.weight).float()
                         from vllm.distributed import get_tp_group
                         logits = get_tp_group().all_gather(logits)[:, :model.config.vocab_size]
                         samples.update(zip(owners, logits.argmax(-1).tolist()))
@@ -934,14 +1023,15 @@ def execute_continuous(config, stage, lane):
                     end.synchronize()
                     ended = time.perf_counter()
                     trace.write(event='execution', batch_id=packet['batch_id'], start=started, end=ended,
-                                device_ms=begin.elapsed_time(end),batch_size=len(segments), tokens=len(positions))
+                                device_ms=begin.elapsed_time(end),batch_size=len(segments), tokens=len(positions),
+                                graphs=graph_stats(state))
                     outcomes={s['request_id']:dict(next_token=samples[s['request_id']],step_id=s['step_id'],
                         finished=samples[s['request_id']] is not None and (s['step_id']+1>=s['max_tokens']
                             or (not s['ignore_eos'] and samples[s['request_id']] in {151643,151645})),
                         sampling=s['sampling']) for s in segments}
                     channel.send(dict(op='completed_batch', batch_id=packet['batch_id'],step_id=packet['step_id'],
                                       request_order=packet['request_order'],samples=samples,results=outcomes,
-                                      start=started, end=ended))
+                                      start=started, end=ended, graphs=graph_stats(state)))
             else:
                 from transformers import AutoTokenizer
                 tokenizer = AutoTokenizer.from_pretrained(config['execution']['model_path'], local_files_only=True)
@@ -1011,12 +1101,16 @@ def execute_continuous(config, stage, lane):
                         receiver.expect(command)
                         positions = [p for s in command['segments'] for p in s['positions']]
                         tokens = [t for s in command['segments'] for t in s['input_token_ids']]
+                        token_tensor = torch.tensor(tokens, dtype=torch.int64, device=device)
+                        position_tensor = torch.tensor(positions, dtype=torch.int64, device=device)
+                        synchronize_tp_inputs(state, cpu_group)
                         started = time.perf_counter()
                         starts[command['batch_id']] = started
                         begin,end = accelerator.Event(enable_timing=True),accelerator.Event(enable_timing=True)
                         begin.record()
-                        intermediate = model(torch.tensor(tokens, dtype=torch.int64, device=device),
-                                             torch.tensor(positions, dtype=torch.int64, device=device))
+                        intermediate = model_forward(model, state, device, token_tensor, position_tensor)
+                        if state.graph_runners:
+                            trace.write(event='graph_execution', batch_id=command['batch_id'], graphs=graph_stats(state))
                         end.record()
                         sender.send(command, dict(hidden_states=intermediate['hidden_states'], residual=intermediate['residual']),
                                     events=(begin,end),started=started)
@@ -1031,6 +1125,7 @@ def execute_continuous(config, stage, lane):
                                 raise RuntimeError('TP lanes disagree on feedback')
                             response = own
                         if response['op'] == 'completed_batch':
+                            lifecycle['peer_graphs'] = response.get('graphs')
                             elapsed = time.perf_counter()-starts.pop(response['batch_id'])
                             finished = scheduler.complete(response['batch_id'], response['samples'], elapsed, eos_ids,
                                                           canceled_ids=command['canceled'])
@@ -1061,7 +1156,7 @@ def execute_continuous(config, stage, lane):
                     else:
                         raise ValueError('Unknown scheduler operation')
                     lifecycle.update(active_requests=len(scheduler.active), inflight_batches=len(scheduler.inflight),
-                        kv_owners=len(state.requests), **scheduler.stats)
+                        kv_owners=len(state.requests), graphs=graph_stats(state), **scheduler.stats)
                 (directory/f'stage0-lane{lane}.json').write_text(json.dumps(dict(stage=0, lane=lane, scheduler='continuous',
                     stats=scheduler.stats, requests=rows, caches_after_release=len(state.requests)), ensure_ascii=False, indent=2))
     finally:

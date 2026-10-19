@@ -383,3 +383,90 @@ also owns memory on Ascend and Moore devices0/1, although idle at dispatch.
 Other-node workloads, AWQ and the new FlagCX pipeline remain running. Never
 label this comparison isolated hardware peak performance or conflate the
 single-node two-device instances with the cross-node four-device instance.
+
+
+## Ascend + Moore official TP and compute-island graphs
+
+`configs/ascend_musa.json` reuses Ascend .23 logical devices0/1 and Moore
+.97 physical devices0/1 in the original containers. It selects official
+vLLM `GroupCoordinator` and each platform's installed `NPUCommunicator`
+(HCCL) / `MusaCommunicator` for local TP2. The previous project
+`ParallelGroup` reduction implementation is retained only for explicit
+reference configurations. The actual class names are logged at stage load.
+Moore local P2P/SHM and network selection use vendor defaults. No vendor
+library is patched and no container/environment/image is rebuilt.
+
+Both stages use official vendor attention. Ascend uses the installed
+`torch_npu.npu_fusion_attention` TND kernel with independent cumulative
+request lengths and bottom-right causal masking; Moore uses its installed
+flash-attention op. The numerical tests include unequal request lengths,
+existing histories, one-token decode and mixed chunks. KV ownership,
+continuous admission and two in-flight microbatches reuse the existing
+scheduler and protocol. Cross-node PP remains CPU-staged TCP in this
+configuration; it is not FlagCX or RDMA.
+
+`execution_mode=piecewise_mlp_graph` captures the installed model's whole
+MLP **including official local TP reduction**, using Ascend's installed
+`ACLGraphWrapper` and MUSA's official `MUSAGraph`/allreduce capture context.
+The adapter supplies stable input buffers and retains captured output
+storage; each returned result owns storage to protect another in-flight
+microbatch. Graph capture is followed by an actual replay before returning
+the first live output. Tests check the first result against direct compute,
+changed-input replay, and preservation of the previous result. Runtime
+counters record actual captures/replays per stage and TP lane.
+This is an explicitly scoped compute-island graph mode: microbatch token
+counts1..4 are captured; larger prefill, attention/KV and TCP remain outside
+graphs. It is not an unmodified vLLM Engine or a whole-model graph. A
+failed graph capture fails the run; it does not silently switch to eager.
+
+Use the existing `manage.py start/stop/status` and `validate.py --config
+heterogeneous_compute/configs/ascend_musa.json` entries. The graph-aware
+acceptance requires captured graphs to replay on all four ranks in addition
+to lane token agreement, streamed token counts, refill, cancellation/KV
+release and conservative inter-stage execution-window overlap. Strict
+native text/batch invariance remains a separate reported requirement.
+Results go to `artifacts/baselines/ascend-musa/official-tp-graph/`; previous
+reference results stay in their original directories. The separate
+`benchmark_client` reuses .60's existing official vLLM0.23.0 client container,
+so no incompatible .97 vLLM0.9.3 benchmark CLI is used. Speed cases run
+sequentially at concurrency1/2/4/8 while AWQ remains running on other cards.
+
+
+Local TP input preparation uses official GroupCoordinator's CPU-group
+barrier after GPU positions, token inputs and sampling-row indices have been
+prepared. No list-to-device sampling index conversion is left between
+forward collectives and logits. This prevents one rank from allocating
+synchronous GPU metadata while its peer has already queued collectives for
+the same batch. It is a local TP rendezvous; the two PP stages retain
+independent microbatches and asynchronous transport. Failed graph-extension
+initialization, first-live-capture output and input-allocation/TP-stall
+checks are retained as scoped diagnostic artifacts and do not count as
+successful performance results.
+
+
+Native-reference comparisons are executed backend by backend, retaining
+concurrent requests within each backend. The Ascend-Moore adapter shares
+physical devices with its native reference services; simultaneous requests
+across these independent collective groups caused a reference service to
+stall. Never overlap reference GPU load with pipeline GPU load on the same
+devices. The affected Moore native reference was restored with its original
+argv/environment and unchanged container; the restart diagnostic is retained.
+Runtime acceptance/status belongs in result artifacts, not configuration
+claims such as `model_inference_verified`.
+
+
+The retained short-run result is `results/ascend_musa_official_parallel.json`:
+48/48 requests completed (12 per concurrency, input256/output64). Output
+throughput for concurrency1/2/4/8 was19.166/27.406/50.473/71.688 tokens/s;
+mean TTFT was196.41/249.05/380.06/633.56 ms. This is a short validation,
+not the 200-request formal baseline or the full length matrix.
+Functional acceptance passed (streaming, refill, independent KV, chunked
+prefill, cancellation and graph replay on all four ranks). Strict acceptance
+remains false:6/7 native text comparisons match and batch invariance is not
+established. Overlap evidence is restricted to the current12 stream request
+IDs; prior warmup, failed captures and unrelated benchmark windows are
+excluded. Both TP lanes had127 conservative overlapping stage windows,
+with a maximum about27.86 ms and packed batch size4. These are host stage
+execution windows including dispatch/native TP, not GPU kernel profiling.
+The formal200-request cases are dispatched separately and remain pending
+until their case files pass validation. AWQ continues unchanged.

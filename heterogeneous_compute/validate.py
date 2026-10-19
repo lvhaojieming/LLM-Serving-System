@@ -21,9 +21,14 @@ def request(item, name):
     return dict(id=item['id'], backend=name, response=response,
                 client_seconds=time.monotonic()-started)
 items = CONFIG['execution']['requests']
-with concurrent.futures.ThreadPoolExecutor(max_workers=len(items)*len(urls)) as pool:
-    futures = [pool.submit(request, item, name) for item in items for name in urls]
-    rows = [f.result() for f in concurrent.futures.as_completed(futures)]
+rows = []
+# Native references can share the same physical devices as this executor.
+# Keep concurrency within each backend, but finish one backend before the
+# next: competing GPU collective groups can otherwise block one another.
+for name in urls:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(items)) as pool:
+        futures = [pool.submit(request, item, name) for item in items]
+        rows.extend(f.result() for f in concurrent.futures.as_completed(futures))
 comparisons = []
 for item in items:
     texts = {r['backend']:r['response']['choices'][0]['message']['content']
@@ -122,6 +127,7 @@ if CONFIG['execution'].get('scheduler') == 'continuous':
         headers={'Content-Type':'application/json'})
     native_text = json.load(urllib.request.urlopen(native_query, timeout=180))['choices'][0]['text']
     overlaps = []
+    graph_evidence = []
     for lane in range(2):
         timeline = [json.loads(line) for line in (directory/('timeline-stage0-lane%s.jsonl'%lane)).read_text().splitlines()]
         session_start=max(i for i,r in enumerate(timeline) if r['event']=='clock_calibration')
@@ -129,13 +135,24 @@ if CONFIG['execution'].get('scheduler') == 'continuous':
         calibration = timeline[0]
         local = [r for r in timeline if r['event']=='execution']
         peer = [r for r in timeline if r['event']=='peer_execution']
+        local_graphs = [r['graphs'] for r in timeline if r['event']=='graph_execution']
+        peer_graphs = [r['graphs'] for r in peer if 'graphs' in r]
+        graph_evidence.append(dict(lane=lane, local=local_graphs[-1] if local_graphs else None,
+                                   peer=peer_graphs[-1] if peer_graphs else None))
+        # Restrict evidence to this acceptance's stream requests. Earlier warmup,
+        # capture failures or unrelated benchmark windows cannot prove overlap.
+        stream_batches = {r['batch_id'] for r in peer if r.get('request_order')
+                          and set(r['request_order']).issubset(stream_ids)}
+        local = [r for r in local if r['batch_id'] in stream_batches]
+        peer = [r for r in peer if r['batch_id'] in stream_batches]
         lower_bounds = [max(0,min(a['end'], b['end']-calibration['offset']-calibration['uncertainty'])-
                              max(a['start'], b['start']-calibration['offset']+calibration['uncertainty']))
                         for a in local for b in peer if a['batch_id']!=b['batch_id']]
         overlaps.append(dict(lane=lane, clock_uncertainty_ms=calibration['uncertainty']*1000,
             clock_assumption='Stable monotonic offset during this short acceptance; RTT uncertainty, drift not measured',
             overlapping_windows=sum(x>0 for x in lower_bounds), conservative_max_overlap_ms=max(lower_bounds,default=0)*1000,
-            max_packed_batch_size=max(r['batch_size'] for r in local)))
+            scope='Current acceptance stream request IDs only',
+            max_packed_batch_size=max((r['batch_size'] for r in local), default=0)))
     stream_ok = all(r['done'] and len(r['events'])==r['maximum'] and r['usage']['completion_tokens']==r['maximum']
                     and r['events'][-1]['finish_reason']=='length' and r['events'][0]['seconds']<r['events'][-1]['seconds']
                     for r in streams)
@@ -143,12 +160,18 @@ if CONFIG['execution'].get('scheduler') == 'continuous':
     early = min(streams,key=lambda r:r['maximum'])
     latest = max(streams,key=lambda r:r['maximum'])
     refilled = any(s['admitted_requests']>admitted_before+8 and s['active_requests']>0 for s in snapshots)
+    graphs_required = CONFIG['execution'].get('execution_mode', 'eager') != 'eager'
+    graphs_passed = all(g[stage] and g[stage]['captures']>0 and g[stage]['replays']>0
+                        for g in graph_evidence for stage in ['local','peer'])
     continuous_passed = (stream_ok and lane_match and refilled and chunked_ok and cancel_ok and
+        (not graphs_required or graphs_passed) and
         all(r['overlapping_windows']>0 and r['max_packed_batch_size']>1 for r in overlaps) and
         health['max_inflight_batches']==2 and not health['active_requests'] and not health['kv_owners'])
     continuous = dict(passed=continuous_passed, requests=12, streams=streams, tp_lane_tokens_match=lane_match,
         token_prefixes_match=token_prefixes_match, native_64token_text_match=all(r['text']==native_text for r in streams if r['maximum']==64),
-        overlap=overlaps, scope='Stage execution window overlap, including dispatch and native TP; not a GPU kernel profiler',
+        overlap=overlaps, graph_evidence=graph_evidence,
+        graph_replay_required=graphs_required, graph_replay_passed=graphs_passed,
+        scope='Stage execution window overlap, including dispatch and native TP; not a GPU kernel profiler',
         health_after=health, refilled_before_all_requests_finished=refilled,
         max_observed_active=max(s['active_requests'] for s in snapshots),
         max_observed_queued=max(s['queue'] for s in snapshots),

@@ -17,12 +17,72 @@ from heterogeneous_compute.manage import processes
 from heterogeneous_compute.benchmark import summarize
 
 class PipelineExecutionTests(unittest.TestCase):
+    def test_overlap_evidence_excludes_unrelated_requests_and_old_windows(self):
+        import tempfile
+        import textwrap
+        from pathlib import Path
+        from heterogeneous_compute.validate import PROGRAM
+        block = textwrap.dedent(PROGRAM[PROGRAM.index('    overlaps = []'):PROGRAM.index('    stream_ok = ')])
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            rows = [dict(event='clock_calibration', offset=0, uncertainty=.001)]
+            for batch, start, end, owners in [(1, 0, 1, ['active']), (2, .5, 1.5, ['active']),
+                                               (3, 0, 1000, ['unrelated'])]:
+                rows.extend([dict(event='execution', batch_id=batch, start=start, end=end, batch_size=2),
+                             dict(event='peer_execution', batch_id=batch, start=start, end=end,
+                                  request_order=owners)])
+            for lane in range(2):
+                (directory / f'timeline-stage0-lane{lane}.jsonl').write_text(
+                    '\n'.join(json.dumps(r) for r in rows), encoding='utf-8')
+            namespace = dict(directory=directory, stream_ids={'active'}, json=json)
+            exec(block, namespace)
+            for row in namespace['overlaps']:
+                self.assertEqual(row['overlapping_windows'], 2)
+                self.assertAlmostEqual(row['conservative_max_overlap_ms'], 499)
+            namespace['stream_ids'] = {'absent'}
+            exec(block, namespace)
+            self.assertTrue(all(r['overlapping_windows'] == 0 and r['max_packed_batch_size'] == 0
+                                for r in namespace['overlaps']))
+    @unittest.skipUnless(os.environ.get('HETEROSERVE_TEST_DEVICE', '').startswith(('npu', 'musa')),
+                         'Explicit retained NPU/MUSA device required')
+    def test_graph_replay_updates_inputs_and_preserves_previous_microbatch_output(self):
+        import torch
+        from heterogeneous_compute.graph_execution import MLPGraphRunner
+        device = os.environ['HETEROSERVE_TEST_DEVICE']
+        if device.startswith('npu'):
+            import torch_npu
+            from vllm.engine.arg_utils import EngineArgs
+            from vllm.forward_context import set_forward_context
+            config = EngineArgs(model='/models/Qwen3-14B', dtype='bfloat16').create_engine_config()
+            context = set_forward_context(None, config)
+        else:
+            import torch_musa
+            from contextlib import nullcontext
+            config, context = None, nullcontext()
+        torch.manual_seed(13)
+        weight = torch.randn(128,128,dtype=torch.bfloat16,device=device)
+        forward = lambda x: torch.nn.functional.silu(x @ weight)
+        x = torch.randn(2,128,dtype=torch.bfloat16,device=device)
+        group = SimpleNamespace(device_communicator=SimpleNamespace(ca_comm=None))
+        with patch('vllm.distributed.get_tp_group', return_value=group), context:
+            runner = MLPGraphRunner(forward, torch.device(device), config)
+            first = runner(x)
+            torch.testing.assert_close(first,forward(x),rtol=.025,atol=.025)
+            retained = first.clone()
+            second = runner(x*2)
+            torch.testing.assert_close(second,forward(x*2),rtol=.025,atol=.025)
+            torch.testing.assert_close(first,retained,rtol=0,atol=0)
+            self.assertEqual(runner.stats()['captures'],1)
+            self.assertEqual(runner.stats()['replays'],2)
+
     @unittest.skipUnless(os.environ.get('HETEROSERVE_TEST_DEVICE'), 'Explicit retained vendor device required')
     def test_official_attention_matches_reference_with_independent_cached_requests(self):
         import torch
         device = os.environ['HETEROSERVE_TEST_DEVICE']
         if device.startswith('musa'):
             import torch_musa
+        elif device.startswith('npu'):
+            import torch_npu
         torch.manual_seed(7)
         attention = SimpleNamespace(head_dim=128, num_heads=20, num_kv_heads=4, scaling=128**-.5)
         reference, vendor = BatchState(2), BatchState(2)
