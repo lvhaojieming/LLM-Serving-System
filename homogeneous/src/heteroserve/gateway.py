@@ -1,4 +1,4 @@
-"""Learned expert selection above Kubernetes pool Services.
+"""Explicit pool forwarding with optional learned expert selection.
 
 Routing validation and response-model rewriting are migrated from
 MLsys_inference. Kubernetes and the official L2 Router own replica lifecycle.
@@ -25,12 +25,27 @@ log = logging.getLogger("heteroserve.gateway")
 
 
 def validate(config):
-    settings = RouterSettings(**config["router"])
-    if set(settings.expert_mapping.values()) != set(config["pools"]):
+    learned = config.get("learned_routing", {})
+    if not isinstance(learned, dict) or type(learned.get("enabled", True)) is not bool:
+        raise ValueError("learned_routing.enabled must be boolean")
+    pools = config.get("pools")
+    if not isinstance(pools, dict) or not pools or any(not isinstance(name, str) or not name or name == "auto" for name in pools):
+        raise ValueError("Gateway requires named pools; auto is reserved for learned routing")
+    settings = RouterSettings(**config["router"]) if learned.get("enabled", True) else None
+    if settings is not None and set(settings.expert_mapping.values()) != set(pools):
         raise ValueError("Every checkpoint expert must have an explicit pool entry")
-    for pool in config["pools"].values():
+    for pool in pools.values():
+        if not isinstance(pool, dict) or not isinstance(pool.get("model"), str) or not pool["model"]:
+            raise ValueError("Every pool requires an expected model identity")
         if pool.get("enabled", True) and (not isinstance(pool.get("base_url"), str) or not pool["base_url"].startswith("http://")):
             raise ValueError("Enabled pools need an internal HTTP Service URL")
+        health_path = pool.get("health_path", "/ready")
+        if not isinstance(health_path, str) or not health_path.startswith("/") or health_path.startswith("//") or any(c in health_path for c in "?#"):
+            raise ValueError("Pool health_path must be an absolute path on its configured service")
+        if type(pool.get("verify_model_identity", False)) is not bool:
+            raise ValueError("Pool verify_model_identity must be boolean")
+        if pool.get("task", "generate") not in {"generate", "embed"}:
+            raise ValueError("Pool task must be generate or embed")
     if type(config.get("max_inflight", 16)) is not int or config.get("max_inflight", 16) < 1:
         raise ValueError("Gateway requires a positive request budget")
     return settings
@@ -38,14 +53,15 @@ def validate(config):
 
 def create_app(config, transport=None, router_runtime=None):
     settings = validate(config)
+    learned_enabled = settings is not None
     state = {"inflight": 0, "draining": False, "router_calls": 0, "rejected": 0}
-    runtime = router_runtime
+    runtime = router_runtime if learned_enabled else None
     routing_slot = asyncio.Semaphore(1)
 
     @asynccontextmanager
     async def lifespan(app):
         nonlocal runtime
-        if runtime is None:
+        if learned_enabled and runtime is None:
             if config.get("router_service"):
                 from .routing.client import RemoteRouterClient
                 runtime = RemoteRouterClient(settings, config["router_service"], httpx.AsyncClient(timeout=30, trust_env=False))
@@ -69,28 +85,41 @@ def create_app(config, transport=None, router_runtime=None):
 
     @app.get("/ready")
     async def ready():
-        if runtime is None or state["draining"]:
-            raise HTTPException(503, "learned gateway is unavailable")
+        if state["draining"] or (learned_enabled and runtime is None):
+            raise HTTPException(503, "gateway is unavailable")
         healthy = []
         for name, pool in config["pools"].items():
             if not pool.get("enabled", True):
                 continue
             try:
-                response = await app.state.client.get(pool["base_url"].removesuffix("/v1") + "/ready", timeout=3)
-                if response.status_code == 200:
-                    healthy.append(name)
-            except httpx.HTTPError:
+                base_url = pool["base_url"].rstrip("/")
+                response = await app.state.client.get(base_url.removesuffix("/v1") + pool.get("health_path", "/ready"), timeout=3)
+                if response.status_code != 200:
+                    continue
+                if pool.get("verify_model_identity", False):
+                    response = await app.state.client.get(base_url + "/models", timeout=3)
+                    if response.status_code != 200:
+                        continue
+                    data = response.json()
+                    models = data.get("data") if isinstance(data, dict) else None
+                    if not isinstance(models, list) or not any(isinstance(model, dict) and model.get("id") == pool["model"] for model in models):
+                        continue
+                healthy.append(name)
+            except (httpx.HTTPError, ValueError):
                 pass
         if healthy:
-            l1_ready = await runtime.ready() if getattr(runtime, "remote", False) else True
+            l1_ready = (await runtime.ready() if getattr(runtime, "remote", False) else True) if learned_enabled else None
+            coverage_complete = len(healthy) == len(config["pools"])
             return {"ready": True, "ready_experts": healthy,
+                    "learned_routing_enabled": learned_enabled,
+                    "expert_coverage_complete": coverage_complete,
                     "l1_router_ready": l1_ready,
-                    "auto_expert_coverage_complete": l1_ready and len(healthy) == len(config["pools"])}
+                    "auto_expert_coverage_complete": learned_enabled and l1_ready and coverage_complete}
         raise HTTPException(503, "no ready downstream expert pool")
 
     @app.get("/v1/models")
     async def models():
-        ids = ["auto"] + [key for key, pool in config["pools"].items() if pool.get("enabled", True)]
+        ids = (["auto"] if learned_enabled else []) + [key for key, pool in config["pools"].items() if pool.get("enabled", True)]
         return {"object": "list", "data": [{"id": key, "object": "model", "owned_by": "heteroserve"} for key in ids]}
 
     @app.get("/metrics")
@@ -110,8 +139,10 @@ def create_app(config, transport=None, router_runtime=None):
             await asyncio.sleep(.05)
         return {"draining": True, "remaining_requests": state["inflight"]}
 
+    @app.post("/v1/embeddings")
     @app.post("/v1/chat/completions")
     async def chat(request: Request):
+        embedding = request.url.path == "/v1/embeddings"
         entered = time.perf_counter()
         if state["draining"]:
             raise HTTPException(503, "gateway is draining")
@@ -148,12 +179,21 @@ def create_app(config, transport=None, router_runtime=None):
             if not isinstance(payload, dict):
                 raise HTTPException(400, "request must be a JSON object")
             requested = payload.get("model")
-            if not isinstance(requested, str) or requested not in {"auto", *config["pools"]}:
-                raise HTTPException(400, "model must name auto or a configured expert")
+            allowed = set(config["pools"])
+            if learned_enabled:
+                allowed.add("auto")
+            if not isinstance(requested, str) or requested not in allowed:
+                raise HTTPException(400, "model must name a configured expert" + (" or auto" if learned_enabled else ""))
+            task = config["pools"].get(requested, {}).get("task", "generate")
+            if (embedding and (requested == "auto" or task != "embed")) or (not embedding and task != "generate"):
+                raise HTTPException(400, "model does not support this endpoint")
             if not isinstance(payload.get("stream", False), bool):
                 raise HTTPException(400, "stream must be boolean")
             messages = payload.get("messages")
-            if not isinstance(messages, list) or not messages:
+            if embedding:
+                if payload.get("stream", False) or not isinstance(payload.get("input"), (str, list)) or not payload["input"]:
+                    raise HTTPException(400, "embeddings require nonempty input and do not support streaming")
+            elif not isinstance(messages, list) or not messages:
                 raise HTTPException(400, "messages must be a nonempty list")
             selected = requested
             if requested == "auto":
@@ -190,7 +230,8 @@ def create_app(config, transport=None, router_runtime=None):
                 raise HTTPException(503, "router selected an undeployed expert; automatic fallback is disabled")
             payload["model"] = pool["model"]
             dispatch_started = time.perf_counter()
-            upstream = await app.state.client.send(app.state.client.build_request("POST", pool["base_url"].rstrip("/") + "/chat/completions",
+            endpoint = "/embeddings" if embedding else "/chat/completions"
+            upstream = await app.state.client.send(app.state.client.build_request("POST", pool["base_url"].rstrip("/") + endpoint,
                 json=payload, headers={"x-request-id": trace}), stream=True)
             gateway_headers_ms = (time.perf_counter() - entered) * 1000
             headers = {"x-request-id": trace, "x-moqe-expert": selected}
@@ -231,6 +272,8 @@ def create_app(config, transport=None, router_runtime=None):
             value = upstream.json()
             value["model"] = requested
             return JSONResponse(value, headers=headers)
+        except httpx.TimeoutException as exc:
+            raise HTTPException(504, "expert pool request timed out") from exc
         except httpx.HTTPError as exc:
             raise HTTPException(502, "expert pool is unavailable") from exc
         finally:

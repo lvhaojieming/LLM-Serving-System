@@ -65,7 +65,8 @@ def model_files(model, revision):
         files.append({"path": item["Path"], "size": size, "sha256": checksum,
                       "url": "https://modelscope.cn/api/v1/models/" + model + "/repo?" + query})
     names = [item["path"] for item in files]
-    if len(names) != len(set(names)) or not {"config.json", "model.safetensors.index.json", "tokenizer.json"} <= set(names):
+    if (len(names) != len(set(names)) or not {"config.json", "tokenizer.json"} <= set(names)
+            or not {"model.safetensors.index.json", "model.safetensors"}.intersection(names)):
         raise ValueError("Repository assets are duplicated or incomplete")
     return sorted(files, key=lambda item: (-item["size"], item["path"]))
 
@@ -114,7 +115,19 @@ def verify_weights(destination, quantization='none'):
         raise ValueError('Expected the requested W4A16 group128 checkpoint')
     elif quantization == 'gptq' and (quant.get('desc_act') or quant.get('checkpoint_format', 'gptq') != 'gptq'):
         raise ValueError('Existing adapters require legacy GPTQ without activation ordering')
-    index = json.loads((destination / "model.safetensors.index.json").read_text(encoding="utf-8"))
+    index_path = destination / "model.safetensors.index.json"
+    if index_path.exists():
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    else:
+        # Small embedding models use a single safetensors file without an index.
+        path = destination / "model.safetensors"
+        with path.open("rb") as stream:
+            length = struct.unpack("<Q", stream.read(8))[0]
+            if not 2 <= length <= min(128 * 1024 * 1024, path.stat().st_size - 8):
+                raise ValueError("Invalid safetensors header")
+            header = json.loads(stream.read(length))
+        index = {"weight_map": {k: path.name for k in header if k != "__metadata__"},
+                 "metadata": {"total_size": path.stat().st_size - 8 - length}}
     mapping = index["weight_map"]
     seen, dtypes, parameters, tensor_bytes, packed, schema = set(), {}, 0, 0, 0, {}
     for name in sorted(set(mapping.values())):

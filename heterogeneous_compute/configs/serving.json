@@ -1,0 +1,24 @@
+{
+  "resource_limits_enabled": false,
+  "result_dir": "artifacts/serving",
+  "gateway": {"host": "0.0.0.0", "port": 18600, "address": "192.168.162.60", "max_inflight": 32, "timeout_seconds": 180},
+  "router": {"host": "127.0.0.1", "port": 18601, "policy": "power_of_two", "runtime": "/workspace/artifacts/runtime/vllm-router", "version": "0.1.15"},
+  "backends": {
+    "ascend-awq": {"model": "Qwen3-14B-AWQ", "base_url": "http://192.168.162.24:18424/v1", "health_path": "/health", "verify_model_identity": true},
+    "musa-awq": {"model": "Qwen3-14B-AWQ", "base_url": "http://192.168.162.97:18497/v1", "health_path": "/health", "verify_model_identity": true},
+    "iluvatar-awq": {"model": "Qwen3-14B-AWQ", "base_url": "http://192.168.162.60:18460/v1", "health_path": "/health", "verify_model_identity": true},
+    "embedding": {"model": "Qwen3-Embedding-0.6B", "base_url": "http://192.168.162.24:18427/v1", "health_path": "/health", "verify_model_identity": true, "task": "embed"}
+  },
+  "services": {
+    "ascend-awq": {"node": "ascend910c-02", "container": "heteroserve-ascend-w4", "driver": "ascend-int4", "config": "heterogeneous_compute/quantization/deployment.json", "cudagraph_metrics": true},
+    "embedding": {
+      "node": "ascend910c-02", "container": "heteroserve-ascend-w4", "driver": "embedding",
+      "model_path": "/quantization/models/Qwen3-Embedding-0.6B",
+      "source": {"model": "Qwen/Qwen3-Embedding-0.6B", "revision": "dd3e37eb506b3addbd930037796e25d349ae9010", "provider": "modelscope.cn"},
+      "argv": ["python3", "-m", "vllm.entrypoints.cli.main", "serve", "/quantization/models/Qwen3-Embedding-0.6B", "--served-model-name", "Qwen3-Embedding-0.6B", "--runner", "pooling", "--host", "192.168.162.24", "--port", "18427", "--dtype", "bfloat16", "--max-model-len", "2048", "--max-num-seqs", "16", "--max-num-batched-tokens", "2048", "--gpu-memory-utilization", "0.15", "--no-enable-prefix-caching", "--seed", "20261010"],
+      "env": {"ASCEND_RT_VISIBLE_DEVICES": "2", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "VLLM_NO_USAGE_STATS": "1", "OMP_NUM_THREADS": "4", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"}
+    },
+    "router": {"node": "iluvatar150-02", "container": "heteroserve-iluvatar-pp", "driver": "router"},
+    "gateway": {"node": "iluvatar150-02", "container": "heteroserve-iluvatar-pp", "driver": "gateway"}
+  }
+}

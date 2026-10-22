@@ -114,9 +114,12 @@ class AscendInt4LinearMethod(LinearMethodBase):
     def apply(self, layer, x, bias=None):
         result = matmul(x.reshape(-1,x.shape[-1]).contiguous(),layer.qweight,layer.scales,
                         layer.qzeros,self.quant_config.group_size,bias)
-        if self.calls == 0:
-            print(json.dumps(dict(event='w4a16_operator_executed',algorithm=self.quant_config.kind,
-                                  tp_rank=get_tensor_model_parallel_rank(),tp=get_tensor_model_parallel_world_size(),
-                                  activation_dtype=str(x.dtype),packed_dtype=str(layer.qweight.dtype))),flush=True)
-        self.calls += 1
+        # Python JSON logging and mutable counters cannot enter a full Dynamo graph.
+        # Eager diagnostics remain available; graph tracing is not execution proof.
+        if not torch.compiler.is_compiling():
+            if self.calls == 0:
+                print(json.dumps(dict(event='w4a16_operator_executed',algorithm=self.quant_config.kind,
+                                      tp_rank=get_tensor_model_parallel_rank(),tp=get_tensor_model_parallel_world_size(),
+                                      activation_dtype=str(x.dtype),packed_dtype=str(layer.qweight.dtype))),flush=True)
+            self.calls += 1
         return result.reshape(x.shape[:-1]+(layer.scales.shape[-1],))

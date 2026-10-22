@@ -1,5 +1,8 @@
 # 异构算力适配
 
+统一 Gateway、官方 vLLM Router 与三厂商原生 AWQ/embedding 接入，见
+[部署与验收](serving.md)，配置入口为 `configs/serving.json`。
+
 此目录独立管理跨厂商算力适配。已完成的同构集群、扩容和路由管理位于
 `homogeneous/`，不在这里重新实现。`configs/baselines/` 保存多厂商原生基线；
 `platforms/iluvatar/` 保存天数部署与官方 benchmark 入口；`probes/` 保存通信预检。

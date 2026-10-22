@@ -83,7 +83,34 @@ def native_layers(config, algorithm):
     print(json.dumps(report),flush=True)
 
 
+def server_command(config, algorithm):
+    """Use the installed vendor graph mode unless eager is explicitly configured."""
+    spec = config['profiles'][algorithm]
+    enforce_eager = config.get('enforce_eager', False)
+    if type(enforce_eager) is not bool:
+        raise ValueError('enforce_eager must be a boolean')
+    argv = ['python3','-m','vllm.entrypoints.cli.main','serve',spec['model'],
+        '--served-model-name',spec['served_model'],'--host',config['host'],'--port',str(spec['port']),
+        '--dtype',config['dtype'],'--tensor-parallel-size',str(config['tp']),'--pipeline-parallel-size',str(config['pp']),
+        '--max-model-len',str(config['max_model_len']),'--max-num-seqs',str(config['max_num_seqs']),
+        '--max-num-batched-tokens',str(config['max_num_batched_tokens']),
+        '--gpu-memory-utilization',str(config['gpu_memory_utilization']),
+        '--no-enable-prefix-caching','--seed',str(config['benchmark']['seed'])]
+    if enforce_eager:
+        argv += ['--enforce-eager']
+    if type(config.get('cudagraph_metrics', False)) is not bool:
+        raise ValueError('cudagraph_metrics must be a boolean')
+    if config.get('cudagraph_metrics', False):
+        argv += ['--cudagraph-metrics']
+    if config['tp']>1:
+        argv += ['--distributed-executor-backend','mp']
+    if algorithm != 'fp16':
+        argv += ['--quantization','moqe_ascend_int4']
+    return argv
+
+
 def start_server(config, algorithm):
+    argv = server_command(config, algorithm)
     directory = profile_dir(config,algorithm)
     marker = directory/'server.json'
     spec = config['profiles'][algorithm]
@@ -94,17 +121,6 @@ def start_server(config, algorithm):
     env.update(config.get('env',{}))
     env['PYTHONPATH'] = '/workspace/shared/ascend_int4:/workspace'+(':'+env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
     env['MOQE_ASCEND_INT4_ADAPTER'] = '0' if algorithm == 'fp16' else '1'
-    argv = ['python3','-m','vllm.entrypoints.cli.main','serve',spec['model'],
-        '--served-model-name',spec['served_model'],'--host',config['host'],'--port',str(spec['port']),
-        '--dtype',config['dtype'],'--tensor-parallel-size',str(config['tp']),'--pipeline-parallel-size',str(config['pp']),
-        '--max-model-len',str(config['max_model_len']),'--max-num-seqs',str(config['max_num_seqs']),
-        '--max-num-batched-tokens',str(config['max_num_batched_tokens']),
-        '--gpu-memory-utilization',str(config['gpu_memory_utilization']),
-        '--enforce-eager','--no-enable-prefix-caching','--seed',str(config['benchmark']['seed'])]
-    if config['tp']>1:
-        argv += ['--distributed-executor-backend','mp']
-    if algorithm != 'fp16':
-        argv += ['--quantization','moqe_ascend_int4']
     if marker.exists():
         previous = json.loads(marker.read_text())
         stat = Path('/proc/'+str(previous['pid'])+'/stat')
@@ -179,13 +195,22 @@ def probe(config, algorithm):
     execution_lines=[json.loads(line[line.index('{'):]) for line in log.splitlines() if '"event": "w4a16_operator_executed"' in line]
     per_rank={str(rank):dict(prepared=sum(r.get('tp_rank',0)==rank for r in prepared),
                             executed=sum(r.get('tp_rank',0)==rank for r in execution_lines)) for rank in range(config['tp'])}
-    proof = algorithm=='fp16' or (len(prepared)==expected_linears and executed==expected_linears and
-            all(r['prepared']==160 and r['executed']==160 for r in per_rank.values()) and
+    graph_capture = 'Graph capturing finished' in log
+    graph_replay = 'Replaying aclgraph' in log
+    eager_proof = executed==expected_linears and all(r['executed']==160 for r in per_rank.values())
+    # Graph replay executes the captured native forward without re-entering Python
+    # diagnostics. Require real replay as well as all native packed-layer records.
+    graph_proof = not config.get('enforce_eager', False) and graph_capture and graph_replay
+    proof = algorithm=='fp16' or (len(prepared)==expected_linears and (eager_proof or graph_proof) and
+            all(r['prepared']==160 for r in per_rank.values()) and
             all(r['packed_dtype']=='torch.int32' and r['scale_dtype']=='torch.float16' and
                 r['packed_bytes']==r['k']*r['n']//2 for r in prepared))
     report = dict(algorithm=algorithm,passed=health==200 and all(r['passed'] for r in results) and proof,
                   requests=results,prepared_fused_linears=len(prepared),executed_int4_linears=executed,
                   operator_proof_passed=proof,tp=config['tp'],pp=config['pp'],per_rank=per_rank,
+                  execution_proof_method=('fp16_control' if algorithm=='fp16' else
+                    'native_packed_layers_and_acl_graph_replay' if graph_proof else 'per_layer_eager_diagnostics'),
+                  graph_capture_verified=graph_capture,graph_replay_verified=graph_replay,
                   scope='Limited real-decode acceptance; no PPL or general quality claim')
     save(profile_dir(config,algorithm)/'acceptance.json',report)
     print(json.dumps(report,ensure_ascii=False),flush=True)
@@ -210,7 +235,8 @@ def orchestrate(config,args):
         state.update(values);save(marker,state);print(json.dumps(values),flush=True)
     def remote_action(action,algorithm,required=True):
         result=ssh(args.ssh_config,config['node'],['docker','exec',config['container'],'python3',
-                    '/workspace/'+RELATIVE,'--config',CONFIG,'--action',action,'--algorithm',algorithm])
+                    '/workspace/'+RELATIVE,'--config',CONFIG,'--result-dir',config['result_dir'],
+                    '--action',action,'--algorithm',algorithm])
         if result.returncode and required:
             raise RuntimeError(action+': '+result.stderr[-2000:]+'\n'+result.stdout[-1500:])
         return result
@@ -295,8 +321,11 @@ def main():
     parser.add_argument('--action',choices=['layers','start','stop','probe','run'],required=True)
     parser.add_argument('--algorithm',choices=['awq','gptq','fp16'])
     parser.add_argument('--ssh-config',type=Path)
+    parser.add_argument('--result-dir',help='Separate this run from retained baseline logs and acceptance')
     args=parser.parse_args()
     config=json.loads(args.config.read_text(encoding='utf-8'))
+    if args.result_dir:
+        config['result_dir'] = args.result_dir
     if config['tp'] not in {1,2} or config['pp']!=1:
         raise ValueError('Current W4A16 deployment supports TP1/TP2, PP1 only')
     os.environ['ASCEND_RT_VISIBLE_DEVICES']=','.join(map(str,config.get('devices',[config.get('device',0)])))

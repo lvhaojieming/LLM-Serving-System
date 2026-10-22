@@ -1,0 +1,206 @@
+{
+  "completed_at": "2026-10-22T03:42:32.229831+00:00",
+  "scope": "Three independent native AWQ vendor instances behind one Gateway and official vLLM Router; Ascend embedding service",
+  "gateway": "http://192.168.162.60:18600",
+  "configuration": "heterogeneous_compute/configs/serving.json",
+  "tests": {
+    "passed": 67,
+    "warnings": 1,
+    "warning": "Existing Starlette/httpx TestClient deprecation"
+  },
+  "acceptance": {
+    "passed": true,
+    "ready": {
+      "ready": true,
+      "ready_experts": [
+        "ascend-awq",
+        "musa-awq",
+        "iluvatar-awq",
+        "embedding",
+        "awq"
+      ],
+      "learned_routing_enabled": false,
+      "expert_coverage_complete": true,
+      "l1_router_ready": null,
+      "auto_expert_coverage_complete": false
+    },
+    "generation": [
+      {
+        "model": "ascend-awq",
+        "json": true,
+        "sse_done": true,
+        "answer": "5"
+      },
+      {
+        "model": "musa-awq",
+        "json": true,
+        "sse_done": true,
+        "answer": "5"
+      },
+      {
+        "model": "iluvatar-awq",
+        "json": true,
+        "sse_done": true,
+        "answer": "5"
+      },
+      {
+        "model": "awq",
+        "json": true,
+        "sse_done": true,
+        "answer": "5"
+      }
+    ],
+    "official_router": {
+      "policy": "power_of_two",
+      "pooled_requests": 24,
+      "concurrency": 4,
+      "worker_dispatch_deltas": {
+        "http://192.168.162.24:18424": 6.0,
+        "http://192.168.162.60:18460": 5.0,
+        "http://192.168.162.97:18497": 13.0
+      }
+    },
+    "embedding": {
+      "count": 3,
+      "dimensions": 1024,
+      "finite": true,
+      "duplicate_consistency": true
+    },
+    "scope": "Functional acceptance only; no throughput/stability/Kubernetes or cross-vendor PP claim",
+    "completed_at": "2026-10-22T03:42:32.229831+00:00"
+  },
+  "runtime": [
+    {
+      "node": "ascend910c-02",
+      "container": "heteroserve-ascend-w4",
+      "container_id": "76e39f09b67d9307dd24c3f41dcb17dd99b16e1675ef762cfab429572e096201",
+      "image_id": "sha256:278e70fbfb115ecda382f8380070d3ebf7228b20a69cbe889e43396595a71ab4",
+      "versions": {
+        "torch": "2.10.0+cpu",
+        "torch-npu": "2.10.0.post4",
+        "vllm": "0.26.0+empty",
+        "transformers": "5.14.1"
+      },
+      "limits": {
+        "Memory": 0,
+        "NanoCpus": 0,
+        "PidsLimit": null
+      }
+    },
+    {
+      "node": "s5000-01",
+      "container": "heteroserve-musa",
+      "container_id": "a725763f7114c94a7f113a162f27d421db6b611ed008e4690c36261114de1032",
+      "image_id": "sha256:34cb8777a848bc0689118801fc720c46906b45cfab6dba95d7010601ba60b1c1",
+      "versions": {
+        "torch": "2.5.0",
+        "torch-musa": "2.5.0",
+        "vllm": "0.9.3.dev0+ga5dd03c1e.d20260309.empty",
+        "transformers": "4.52.4"
+      },
+      "limits": {
+        "Memory": 0,
+        "NanoCpus": 0,
+        "PidsLimit": null
+      }
+    },
+    {
+      "node": "iluvatar150-02",
+      "container": "heteroserve-iluvatar-pp",
+      "container_id": "a5eb6100dd54ad96957e07c13e59a06d53d4e6e4647c454a6a4ce85bb76986af",
+      "image_id": "sha256:b01fe538df482b10418548d9d43ac15a348e2e30c218c9d75eb7c12ae195dbc4",
+      "versions": {
+        "torch": "2.10.0+corex.4.5.0.20260619",
+        "vllm": "0.23.0",
+        "transformers": "5.12.1"
+      },
+      "limits": {
+        "Memory": 0,
+        "NanoCpus": 0,
+        "PidsLimit": null
+      }
+    }
+  ],
+  "execution_modes": {
+    "ascend_awq": {
+      "mode": "FULL_AND_PIECEWISE; ACL graph capture and request replay observed",
+      "evidence": [
+        "(Worker_TP0 pid=1158) INFO 10-22 03:37:49 [gpu_model_runner.py:6844] Graph capturing finished in 3 secs, took 0.39 GiB",
+        "(Worker_TP0 pid=1158) INFO 10-22 03:40:08 [acl_graph.py:249] Replaying aclgraph"
+      ]
+    },
+    "musa_awq": {
+      "mode": "eager",
+      "evidence": "Existing process argv contains --enforce-eager"
+    },
+    "iluvatar_awq": {
+      "mode": "eager",
+      "evidence": "Existing process argv contains --enforce-eager"
+    },
+    "embedding": {
+      "mode": "Vendor pooling default; no graph replay claim"
+    }
+  },
+  "embedding_model": {
+    "repository": "Qwen/Qwen3-Embedding-0.6B",
+    "revision": "dd3e37eb506b3addbd930037796e25d349ae9010",
+    "source": "modelscope.cn",
+    "destination": "/quantization/models/Qwen3-Embedding-0.6B",
+    "total_bytes": 1207489671,
+    "weights": {
+      "dtype": "bfloat16",
+      "quantized": false,
+      "quantization": "none",
+      "model_type": "qwen3",
+      "tensor_count": 310,
+      "dtype_counts": {
+        "BF16": 310
+      },
+      "parameters": 595776512,
+      "packed_linear_layers": 0,
+      "tensor_bytes": 1191553024
+    },
+    "files_sha256_verified": true,
+    "weight_file": {
+      "path": "model.safetensors",
+      "size": 1191586416,
+      "sha256": "0437e45c94563b09e13cb7a64478fc406947a93cb34a7e05870fc8dcd48e23fd"
+    }
+  },
+  "reproduction": {
+    "commands": [
+      "python heterogeneous_compute/serving.py sync --ssh-config <existing-ssh-config>",
+      "python heterogeneous_compute/serving.py start --ssh-config <existing-ssh-config>",
+      "python heterogeneous_compute/serving.py verify --ssh-config <existing-ssh-config>"
+    ],
+    "source_manifest": {
+      "git_head": "ed3df3a807531ad0033104ef83a53072735ae73b",
+      "source_sha256": {
+        "heterogeneous_compute/serving.py": "36110c79bf51a8f82cbf443f83b6bd7f9cf9c74f9a80a5dbafad7e9c9ce597db",
+        "heterogeneous_compute/configs/serving.json": "47176ee8b89adb9a476e987760ca2814c47645534c03378217bd7a73d609a51d",
+        "homogeneous/src/heteroserve/gateway.py": "a170a7f74c97492e23196b6875dde63b0e90b9fc72c937dc38951f2640b12aa4",
+        "homogeneous/src/heteroserve/routing/runtime.py": "70a89148d57df717fdd4d07abe3aab2cb69e72e4f0d6edc3cef30987a89a51b6",
+        "homogeneous/src/heteroserve/__init__.py": "07e8fe95452b56ab1a991f332b4fa6e2b7bd60c160b9a4780b7df049e8da7ccf",
+        "homogeneous/src/heteroserve/routing/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "heterogeneous_compute/__init__.py": "c015434c282daf0d6532ffa48548da6b0473994b77cdc154bfd58fa5c8d8aeaf",
+        "homogeneous/deploy/gateway.json": "2ac4c8c677d1fe47f9d4efc590dc50367fc58201bb3c5bd6bbfcdecc78960bf4",
+        "homogeneous/tests/test_gateway.py": "ffebf88c513522108549ac8256ddc0b7133bbcf5b68ab40ee10966e77c0bc9a4",
+        "heterogeneous_compute/quantization/deploy.py": "5c76cff0a9b9971cb72fb511f54c424e83cbd215abace5ce39472eb2b0a65e8c",
+        "heterogeneous_compute/quantization/deployment.json": "46163b0c099917c333b26c2ea78a65ca42a86fb72031b3652d83384fb36fa9ea",
+        "heterogeneous_compute/tests/test_quantization_deployment.py": "71f136cbe526aa4eed13d6adc5abf33796b3645f0a16a862ca7c0636aab881e2",
+        "heterogeneous_compute/tests/test_model_download.py": "d51fb7885a93c221821b1ea13dbb7c4218f92fd47ce2541fae60d1ae036e4b9a",
+        "heterogeneous_compute/tests/test_int4_compilation.py": "bc42c4c613a90f11ae0c3d07bdf5b6d3c0121a0cad7502134322b4f3f87faffe",
+        "heterogeneous_compute/tests/test_serving.py": "1393dfd6e9295b49770acbe99e615275a1bce46862f3ab54c85e39fc4ce70a51",
+        "shared/download_model.py": "90a46508a03c44325ad82658340fe6972c89fa941c552d4f68b9545fd27f7de6",
+        "shared/ascend_int4/vllm_adapter.py": "cb76d50605b897ad1378c17570f8b7c27737c75451b4b366035d2c7ef061c9d4"
+      }
+    }
+  },
+  "limits": [
+    "Not a throughput or sustained-stability benchmark",
+    "Not Kubernetes-managed lifecycle acceptance",
+    "AWQ requests do not use the independent cross-vendor PP executor",
+    "Learned AWQ/GPTQ expert selection remains disabled",
+    "Eight Ascend boards are container-visible; current AWQ process uses chips 0/1 and embedding chip 2"
+  ]
+}
