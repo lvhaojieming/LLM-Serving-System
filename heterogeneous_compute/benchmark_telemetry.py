@@ -120,7 +120,7 @@ def process_sample():
         try:
             stat = (d / 'stat').read_text().rsplit(')', 1)[1].split()
             cmd = (d / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
-            role = ('gateway' if 'heteroserve.gateway' in cmd else 'router' if 'vllm_router.launch_router' in cmd else
+            role = ('gateway' if 'heteroserve.gateway' in cmd else 'router' if ('vllm_router.launch_router' in cmd or cmd.strip() == 'vllm::router') else
                     'benchmark' if ('benchmark.py' in cmd or 'benchmark_telemetry.py' in cmd) else 'model' if 'serve ' in cmd else None)
             procs[int(d.name)] = dict(pid=int(d.name), ppid=int(stat[1]), role=role,
                 start_ticks=int(stat[19]), cpu_seconds=(int(stat[11])+int(stat[12]))/os.sysconf('SC_CLK_TCK'),
