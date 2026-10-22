@@ -8,14 +8,21 @@
     "port": 18600,
     "address": "192.168.162.60",
     "max_inflight": 32,
-    "timeout_seconds": 180
+    "timeout_seconds": 180,
+    "random_route_health_seconds": 5,
+    "route_embeddings": {"awq": "embedding"}
   },
   "router": {
     "host": "127.0.0.1",
     "port": 18601,
     "policy": "round_robin",
     "runtime": "/workspace/artifacts/runtime/vllm-router",
-    "version": "0.1.15"
+    "version": "0.1.15",
+    "pools": {
+      "ascend": {"port": 18601, "metrics_port": 18602, "backend": "ascend-awq", "nodes": ["ascend910c-01", "ascend910c-02"]},
+      "musa": {"port": 18603, "metrics_port": 18604, "backend": "musa-awq", "nodes": ["s5000-01", "s5000-02"]},
+      "iluvatar": {"port": 18605, "metrics_port": 18606, "backend": "iluvatar-awq", "nodes": ["iluvatar150-01", "iluvatar150-02"]}
+    }
   },
   "backends": {
     "ascend-awq": {

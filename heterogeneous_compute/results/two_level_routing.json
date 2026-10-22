@@ -1,0 +1,70 @@
+{
+  "recorded_at": "2026-10-22T08:37:24.963142+00:00",
+  "scope": "Functional acceptance of actual Embedding, uniform random hardware-pool selection and official per-pool L2 routing",
+  "configuration": "heterogeneous_compute/configs/serving.json",
+  "code_base": "fa9d60e",
+  "source_sha256": {
+    "homogeneous/src/heteroserve/gateway.py": "6f794788a9344d67c977a9c5039a0f90c2c0377878820d4cd1b93e237521f41d",
+    "heterogeneous_compute/serving.py": "7f4734a308acd018329df2f8eeed65c06849f084bc35adcdde6093c731f2fc72",
+    "heterogeneous_compute/configs/serving.json": "39664a205a5c90a07ad071af59d4ff997ab020eef4368c9c4e6f575bb9366de0",
+    "heterogeneous_compute/configs/system_benchmark.json": "8485df682a07b92b2b18f6118be28be08a63a7a9f8a5f2af7ebb35e6e434ab14"
+  },
+  "pipeline": [
+    "Gateway accepts model=awq within its fixed 32-request budget",
+    "Qwen3-Embedding-0.6B on .58 devices 12/13 produces one finite vector",
+    "Gateway uniformly randomly chooses one available vendor pool, independent of its replica count",
+    "That pool's official vllm-router==0.1.15 selects a healthy instance using round_robin",
+    "One native AWQ TP2/PP1 instance completes generation"
+  ],
+  "embedding": {
+    "model": "Qwen/Qwen3-Embedding-0.6B",
+    "revision": "dd3e37eb506b3addbd930037796e25d349ae9010",
+    "input_serialization": "Newline-joined role: content messages in original order",
+    "vector_controls_selection": false,
+    "failure_stops_generation": true,
+    "native_and_gateway_acceptance": "3 finite 1024-dimensional vectors; duplicate input consistency passed",
+    "observed_full_pipeline_embedding_ms_example": 35.337592009454966
+  },
+  "pools": {
+    "ascend": {"router_port": 18601, "metrics_port": 18602, "configured_workers": 16, "healthy_workers": 13},
+    "musa": {"router_port": 18603, "metrics_port": 18604, "configured_workers": 8, "healthy_workers": 8},
+    "iluvatar": {"router_port": 18605, "metrics_port": 18606, "configured_workers": 8, "healthy_workers": 8}
+  },
+  "pool_health": "Official /readiness allows pools with some failed workers; /workers supplies authoritative instance health",
+  "health_cache_seconds": 5,
+  "automatic_request_retries": false,
+  "gateway_max_inflight": 32,
+  "model_device_allocations_changed": false,
+  "model_processes_restarted": false,
+  "containers_recreated": false,
+  "resource_limits_enabled": false,
+  "functional_validation": {
+    "code_tests_passed": 164,
+    "configured_awq_workers": 32,
+    "direct_generation_passed": 29,
+    "json_and_sse_aliases_passed": ["ascend-awq", "musa-awq", "iluvatar-awq", "awq"],
+    "random_pool_requests": 64,
+    "explicit_pool_coverage_requests": 32,
+    "all_29_healthy_workers_received_requests": true,
+    "failed_workers_received_requests": 0,
+    "full_device_coverage_passed": false,
+    "missing_workers": ["http://192.168.162.23:18702", "http://192.168.162.23:18703", "http://192.168.162.23:18704"],
+    "gateway_inflight_after_acceptance": 0
+  },
+  "benchmark_contract": {
+    "workload_input_tokens": 256,
+    "workload_output_tokens": 128,
+    "slo": {"tpot_seconds": 0.1},
+    "minimum_success_ratio": 0.99,
+    "minimum_slo_ratio": 0.95,
+    "timeout_seconds": 60,
+    "ttft_and_e2e_reported_or_used_for_slo": false,
+    "capacity_or_long_term_stability_verified_by_this_result": false
+  },
+  "observations": [
+    "The first post-update full-pipeline probe timed out at its 30-second client deadline; later requests completed. Its cause was not established and it is not a formal capacity sample",
+    "The local full-acceptance SSH launcher exceeded 115 seconds; the owned remote verification process later exited naturally and saved the complete report",
+    "Ascend .23's three device initialization faults remain unresolved; they are excluded by L2 health selection, not repaired",
+    "Execution modes remain mixed: Ascend and .58 AWQ graph, MUSA and .60 AWQ retained eager"
+  ]
+}

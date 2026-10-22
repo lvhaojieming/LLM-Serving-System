@@ -24,7 +24,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from heterogeneous_compute.serving import expand_config, generation_workers
+from heterogeneous_compute.serving import expand_config, generation_workers, router_configs
 
 
 # Client event times supply latency distributions. Repeatedly retaining every
@@ -96,6 +96,19 @@ def parse_metrics(raw, names=None):
 def metric_sum(rows, name, exclude_reasons=()):
     selected = [r["value"] for r in rows if r["name"] == name and r["labels"].get("finished_reason") not in exclude_reasons]
     return sum(selected) if selected else None
+
+
+def router_worker_snapshot(reports):
+    """Retain pool identity while exposing the legacy combined workers list."""
+    result={'workers':[],'pools':{},'errors':{}}
+    for pool,report in reports.items():
+        if not isinstance(report,dict) or not isinstance(report.get('workers'),list):
+            result['errors'][pool]=report.get('error','Missing workers list') if isinstance(report,dict) else 'Invalid router workers response'
+            continue
+        result['pools'][pool]=report
+        for worker in report['workers']:
+            result['workers'].append({**worker,'router_pool':pool})
+    return result
 
 
 def process_sample():
@@ -204,10 +217,12 @@ class PacketObserver:
     def __init__(self, config):
         self.workers = {w['base_url'].removesuffix('/v1') for w in generation_workers(config).values()}
         self.gateway_port = config['gateway']['port']
-        self.router_port = config['router']['port']
+        self.router_ports={router['port'] for router in router_configs(config).values()}
         self.worker_endpoints={(u[7:].rsplit(':',1)[0],int(u.rsplit(':',1)[1])) for u in self.workers}
         self.worker_ports={port for _,port in self.worker_endpoints}
-        self.ports = {self.gateway_port, self.router_port} | self.worker_ports
+        embedding={b['base_url'].removesuffix('/v1') for b in config['backends'].values() if b.get('task')=='embed'}
+        self.embedding_endpoints={(u[7:].rsplit(':',1)[0],int(u.rsplit(':',1)[1])) for u in embedding}
+        self.ports = {self.gateway_port} | self.router_ports | self.worker_ports | {port for _,port in self.embedding_endpoints}
         self.routes = queue.SimpleQueue()
         self.stop = threading.Event()
         self.bytes = {'gateway_rx_tcp_payload': 0, 'gateway_tx_tcp_payload': 0,
@@ -289,8 +304,10 @@ class PacketObserver:
     def observe_packet(self,p):
         worker_out=(p['dst'],p['dport']) in self.worker_endpoints
         worker_in=(p['src'],p['sport']) in self.worker_endpoints
-        if not (worker_out or worker_in or p['sport'] in {self.gateway_port,self.router_port}
-                or p['dport'] in {self.gateway_port,self.router_port}):
+        embedding_out=(p['dst'],p['dport']) in self.embedding_endpoints
+        embedding_in=(p['src'],p['sport']) in self.embedding_endpoints
+        if not (worker_out or worker_in or embedding_out or embedding_in or p['sport'] in self.router_ports or p['sport']==self.gateway_port
+                or p['dport'] in self.router_ports or p['dport']==self.gateway_port):
             return
         n=p['size'];flow=(p['src'],p['sport'],p['dst'],p['dport']);reverse=(p['dst'],p['dport'],p['src'],p['sport'])
         if (p['flags']&2 and not p['flags']&16) or p['payload'].startswith(b'GET '):
@@ -298,11 +315,12 @@ class PacketObserver:
             self.flows.pop(flow,None);self.flows.pop(reverse,None)
         if p['payload'].startswith(b'POST /v1/'):
             if p['dport']==self.gateway_port:self.network_flows[flow]='client_gateway'
-            elif p['dport']==self.router_port:self.network_flows[flow]='gateway_router'
+            elif p['dport'] in self.router_ports:self.network_flows[flow]='gateway_router'
+            elif embedding_out and p['src'] in {self.gateway_address,'127.0.0.1'}:self.network_flows[flow]='gateway_embedding'
             elif worker_out and p['src'] in {self.gateway_address,'127.0.0.1'}:self.network_flows[flow]='router_worker'
         kind=self.network_flows.get(flow);back=self.network_flows.get(reverse)
-        if kind=='client_gateway' or back=='gateway_router':self.bytes['gateway_rx_tcp_payload']+=n
-        if back=='client_gateway' or kind=='gateway_router':self.bytes['gateway_tx_tcp_payload']+=n
+        if kind=='client_gateway' or back in {'gateway_router','gateway_embedding'}:self.bytes['gateway_rx_tcp_payload']+=n
+        if back=='client_gateway' or kind in {'gateway_router','gateway_embedding'}:self.bytes['gateway_tx_tcp_payload']+=n
         if kind=='gateway_router' or back=='router_worker':self.bytes['router_rx_tcp_payload']+=n
         if back=='gateway_router' or kind=='router_worker':self.bytes['router_tx_tcp_payload']+=n
         if worker_out and n:
@@ -341,7 +359,7 @@ class PacketObserver:
         return {'routes':rows,'tcp_payload_bytes':dict(self.bytes),'error':self.error,
                 'packet_statistics':packet_stats,
                 'capture':dict(self.capture_info),
-                'network_scope':'Owned service TCP payload bytes on this host; includes retransmissions, excludes IP/TCP headers. No packet bodies retained.'}
+                'network_scope':'Owned service TCP payload bytes on this host, including Gateway Embedding calls; includes retransmissions, excludes IP/TCP headers. No packet bodies retained.'}
 
 
 def device_values(vendor, report):
@@ -383,8 +401,8 @@ def collect(config_path,node,central,max_seconds=86400):
     vendor='ascend' if node.startswith('ascend') else 'musa' if node.startswith('s5000') else 'iluvatar'
     script='/workspace/heterogeneous_compute/benchmark_telemetry.py'
     metrics={name:w for name,w in generation_workers(config).items() if w['node']==node}
+    gateway_node=config['services']['gateway']['node']
     disabled_smi=False; started=time.monotonic(); failures=0
-    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
     pool=concurrent.futures.ThreadPoolExecutor(max_workers=12)
     while time.monotonic()-started<max_seconds:
         before=time.monotonic(); sample={'node':node,'vendor':vendor,'time':time.time(),'workers':{}}
@@ -407,9 +425,15 @@ def collect(config_path,node,central,max_seconds=86400):
             jobs['device']=pool.submit(bounded,cmd,3)
         for name,w in metrics.items():
             jobs['worker:'+name]=pool.submit(fetch,w['base_url'][:-3]+'/metrics')
-        if node=='iluvatar150-02':
-            for name,url in [('router_workers','http://127.0.0.1:18601/workers'),('router_metrics','http://127.0.0.1:18602/metrics'),('gateway_metrics','http://127.0.0.1:18600/metrics')]:
-                jobs[name]=pool.submit(fetch,url)
+        router_reports={}
+        if node==gateway_node:
+            sample['router_metrics']=[]
+            for name,router in router_configs(config).items():
+                label=router.get('pool',name)
+                host=router.get('host','127.0.0.1')
+                jobs['router_workers:'+label]=pool.submit(fetch,f"http://{host}:{router['port']}/workers")
+                jobs['router_metrics:'+label]=pool.submit(fetch,f"http://{host}:{router['metrics_port']}/metrics")
+            jobs['gateway_metrics']=pool.submit(fetch,f"http://127.0.0.1:{config['gateway']['port']}/metrics")
         for name,future in jobs.items():
             try:
                 value=future.result(timeout=5)
@@ -418,8 +442,14 @@ def collect(config_path,node,central,max_seconds=86400):
                     sample['workers'][name[7:]]={'metrics':rows,'running':metric_sum(rows,'vllm:num_requests_running'),
                         'waiting':metric_sum(rows,'vllm:num_requests_waiting'),
                         'completed':metric_sum(rows,'vllm:request_success_total',('abort','error'))}
-                elif name in {'router_metrics','gateway_metrics'}:
-                    sample[name]=parse_metrics(value,METRIC_NAMES[name.split('_',1)[0]])
+                elif name.startswith('router_workers:'):
+                    router_reports[name.split(':',1)[1]]=value
+                elif name.startswith('router_metrics:'):
+                    label=name.split(':',1)[1]
+                    rows=parse_metrics(value,METRIC_NAMES['router'])
+                    sample['router_metrics'].extend({**row,'labels':{**row['labels'],'router_pool':label}} for row in rows)
+                elif name=='gateway_metrics':
+                    sample[name]=parse_metrics(value,METRIC_NAMES['gateway'])
                 elif name=='container':
                     data=json.loads(value['stdout']); state=data['State']
                     sample['container']={'id':data['Id'],'image':data['Image'],'restart_count':data['RestartCount'],
@@ -433,7 +463,12 @@ def collect(config_path,node,central,max_seconds=86400):
                 else:
                     sample[name]=value
             except Exception as exc:
-                sample[name]={'error':repr(exc)}
+                if name.startswith('router_workers:'):
+                    router_reports[name.split(':',1)[1]]={'error':repr(exc)}
+                else:
+                    sample[name]={'error':repr(exc)}
+        if node==gateway_node:
+            sample['router_workers']=router_worker_snapshot(router_reports)
         if disabled_smi and 'device' not in sample:
             sample['device']={'values':[],'unavailable':'First bounded SMI query timed out; not retried during this run'}
         try:

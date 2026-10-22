@@ -2,20 +2,26 @@
 
 `serving.py` 复用三个厂商的独立原生 AWQ 实例、现有 Gateway 和官方
 `vllm-router==0.1.15`。配置集中在 `configs/serving.json`，不创建 K8s 集群或容器。
+当前 `awq` 完整路径为：实际 Embedding → 一级等概率随机选厂商池 →
+该池自己的官方 vLLM Router 按轮询选择健康实例。三个厂商池概率相同，
+不按池中的副本数量加权；Embedding 向量暂不参与随机决策。
+最新两级路径验收见 [`results/two_level_routing.json`](results/two_level_routing.json)，
+此前的单 Router 和天数分配结果作为历史验收保留。
 跨厂商 PP 执行器仍由原 `manage.py` 管理，本入口不将 AWQ 请求拆成跨厂商 PP。
 
 | 入口模型名 | 服务 | 分配 |
 | --- | --- | --- |
-| `awq` | 官方 Router 按 round_robin 分配 | 目标为六台节点的 32 个 AWQ TP2 副本，实际仅选择健康副本 |
-| `ascend-awq` | `.24:18424` | 昇腾芯片 0/1，TP2，项目 INT4 适配器 |
-| `musa-awq` | `.97:18497` | 摩尔设备 6/7，复用已有 TP2 实例 |
-| `iluvatar-awq` | `.60:18460` | 天数设备 2/3，复用已有 TP2 实例 |
+| `awq` | Embedding → 随机厂商池 → 池内官方 Router | 目标为六台节点的 32 个 AWQ TP2 副本，实际仅选择健康副本 |
+| `ascend-awq` | 昇腾池官方 Router，本机 18601 | `.23`／`.24` 全部已配置昇腾副本 |
+| `musa-awq` | 摩尔池官方 Router，本机 18603 | `.96`／`.97` 全部已配置摩尔副本 |
+| `iluvatar-awq` | 天数池官方 Router，本机 18605 | `.58`／`.60` 全部已配置天数副本 |
 | `embedding` | `.58:18458` | 天数逻辑设备 12/13，Qwen3-Embedding-0.6B BF16，TP2/PP1 pooling |
 
 统一地址 `http://192.168.162.60:18600`，生成用 `/v1/chat/completions`，
 embedding 用 `/v1/embeddings`。昇腾容器映射八张物理卡对应的十六个芯片设备，
-`ascend-awq`、`musa-awq`、`iluvatar-awq` 是原主实例的诊断入口；常规调用
-使用 `awq`，覆盖全部副本。保持 `resource_limits_enabled=false`。
+`ascend-awq`、`musa-awq`、`iluvatar-awq` 用于指定厂商池诊断，直接进入该池二级 Router；
+常规整系统测试使用 `awq`，包含实际 Embedding 和一级随机选择。
+保持 `resource_limits_enabled=false`。
 
 `replica_groups` 按设备集合展开服务和 Router worker，不复制项目或实现。
 启动前验证 AWQ 分区与预留设备无重叠且覆盖完整清单。天数的“AWQ 使用 8 张卡”
@@ -42,9 +48,16 @@ AWQ 权重来源与算子差异见 `configs/native_awq.json`。摩尔和天数�
 启动验收同时核对实际命令和日志中的 `disable_custom_all_reduce=True`。
 实际图捕获／回放必须依据运行证据，不能仅凭省略 eager 参数判断。
 本轮不启用原 AWQ/GPTQ 学习路由头，其标签不代表三家硬件。`auto` 不开放。
-Embedding 单独提供向量接口，下载模型不等于恢复旧训练头。
+`route_embeddings={"awq":"embedding"}` 要求 `awq` 每次先完成真实向量计算，
+输入是按消息顺序用换行连接的 `role: content`。Embedding 失败则不发送 AWQ，
+向量暂不作为选池依据。独立 `/v1/embeddings` 接口继续保留。
+响应头记录选池、请求 ID 和 Embedding 阶段耗时。
 摩尔原生后端不提供 `/get_load`，因此使用官方轮询策略，不把策略名当成已经完成
 设备负载感知；路由继续使用官方健康检查排除故障副本。
+每厂商独立复用一个官方 Router 进程，API／指标端口为 18601/18602、
+18603/18604、18605/18606，均仅绑定本机。一级健康快照缓存 5 秒，
+使用官方 `/readiness` 判断池是否仍有可用实例；`/health` 的全量健康语义
+不能用来排除仍有 13 个健康实例的昇腾池。选池后不自动重试。
 
 ## 下载与复现
 
@@ -98,10 +111,11 @@ Gateway/Router/Embedding/原生 AWQ 校验 boot ID、PID 启动时间与进程�
 
 `/ready` 的 `expert_coverage_complete=true` 才表示全部配置入口就绪；
 HTTP 200 也可能只表示部分服务可用。Gateway 还核对官方 `/workers` 中的
-健康 URL 集合是否恰好等于全部 32 个预期副本，避免少数主实例健康掩盖缺失副本。
+三个注册表的健康 URL 联集是否恰好等于全部 32 个预期副本，避免少数主实例健康掩盖缺失副本。
 验收要求全部副本逐一完成真实生成、
 各入口普通与完整 SSE 请求正确，并通过官方 Router 的 worker 计数验证小批
-并发请求确实经过每一个健康 worker；请求数为 `max(24, 2 × 预期副本数)`，
+并发请求覆盖三个厂商池；统一入口发出 `max(24, 2 × 预期副本数)` 个随机请求，
+再通过显式厂商入口逐池核对轮询覆盖，避免把有限随机样本要求成确定的均匀分布。
 并发 4，仅为功能验证。
 设备缺失时仍记录全部 worker 的逐一生成结果，最终 `passed=false` 并返回非零状态，
 不能把可用部分的功能通过当成全设备验收。Embedding 检查批量数量、1024 维、有限数值、
@@ -132,8 +146,10 @@ HTTP 200 也可能只表示部分服务可用。Gateway 还核对官方 `/worker
 
 `benchmark.py --system-config configs/system_benchmark.json` 使用固定到达率独立发送，
 关闭重试，保存逐请求时间、SLO、发送滞后、错误、厂商与副本关联。主负载 256/128，
-TTFT≤2 秒、TPOT≤0.1 秒/token、E2E≤20 秒；成功率至少 99%，全部已发送请求的 SLO
-达标比例至少 95%。容量搜索、两小时验证、三档过载恢复均由配置控制。
+仅保留 TPOT≤0.1 秒/token 的延迟 SLO；成功率至少 99%，全部已发送请求的 SLO
+达标比例至少 95%。TTFT 与端到端延迟不再统计、展示或用于 SLO，60 秒仍是
+请求超时界限。保留发送、完成及生成 token 所需内部时间，用于请求率、TPOT、
+积压和恢复。容量搜索、两小时验证、三档过载恢复均由配置控制。
 实际执行模式混合，不能把本系统结果解释为三厂商在相同图模式下的硬件比较。
 
 在 `.96` 现有容器内，以 `/workspace` 为工作目录启动控制器；结果目录每次使用唯一

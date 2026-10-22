@@ -30,6 +30,22 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT = ROOT / "heterogeneous_compute/configs/serving.json"
 
 
+def router_configs(config):
+    """Official L2 routers, with the original single-router format supported."""
+    common = {k: v for k, v in config["router"].items() if k != "pools"}
+    pools = config["router"].get("pools")
+    if not pools:
+        return {"router": dict(common, metrics_port=common.get("metrics_port", 18602))}
+    return {"router-" + name: dict(common, **pool, pool=name) for name, pool in pools.items()}
+
+
+def router_workers(config, name):
+    spec = router_configs(config)[name]
+    nodes = spec.get("nodes")
+    return {key: value for key, value in generation_workers(config).items()
+            if nodes is None or value["node"] in nodes}
+
+
 def expand_config(config):
     """Expand device partitions into replicas without duplicating deployment code."""
     result = copy.deepcopy(config)
@@ -89,10 +105,22 @@ def expand_config(config):
             workers[name] = dict(base_url=endpoint, model="Qwen3-14B-AWQ", node=group["node"], devices=devices)
         if sorted(used) != list(range(group["device_count"])):
             raise ValueError("Device coverage is incomplete: " + group["name"])
+    result["workers"] = workers
+    if config["router"].get("pools"):
+        template = templates.get("router") or next(s for s in templates.values() if s["driver"] == "router")
+        result["services"] = {n:s for n,s in result["services"].items() if s["driver"] != "router"}
+        assigned = set()
+        for name, spec in router_configs(result).items():
+            names = set(router_workers(result, name))
+            if not names or assigned.intersection(names):
+                raise ValueError("Empty or overlapping official Router worker pools")
+            assigned.update(names)
+            result["services"][name] = dict(template, router_pool=spec["pool"])
+        if assigned != set(workers):
+            raise ValueError("Official Router pools do not cover all generation workers")
     # Keep frontend services last so a default stop drains ingress before workers.
     result["services"] = {**{n:s for n,s in result["services"].items() if s["driver"] not in {"gateway","router"}},
                           **{n:s for n,s in result["services"].items() if s["driver"] in {"router","gateway"}}}
-    result["workers"] = workers
     disabled = {n for n,s in result["services"].items() if s.get("enabled", True) is False}
     result["services"] = {n:s for n,s in result["services"].items() if n not in disabled}
     result["backends"] = {n:s for n,s in result["backends"].items() if n not in disabled}
@@ -131,12 +159,21 @@ def http(url, body=None, timeout=10):
 
 def gateway_config(config):
     result = {k: v for k, v in config["gateway"].items() if k != "address"}
-    result.update(learned_routing={"enabled": False}, pools=dict(config["backends"]))
-    router = config["router"]
-    result["pools"]["awq"] = dict(model="Qwen3-14B-AWQ",
-        base_url=f"http://{router['host']}:{router['port']}/v1", health_path="/health")
-    result["worker_registry"] = {"url": f"http://{router['host']}:{router['port']}/workers",
-                                 "expected_urls": [w["base_url"].removesuffix("/v1") for w in generation_workers(config).values()]}
+    result.update(learned_routing={"enabled": False}, pools=copy.deepcopy(config["backends"]))
+    routers = router_configs(config)
+    if config["router"].get("pools"):
+        for spec in routers.values():
+            result["pools"][spec["backend"]].update(
+                base_url=f"http://{spec['host']}:{spec['port']}/v1", health_path="/readiness")
+        result["random_routes"] = {"awq": [r["backend"] for r in routers.values()]}
+        result.setdefault("random_route_health_seconds", 5)
+        result["worker_registry"] = {"urls": [f"http://{r['host']}:{r['port']}/workers" for r in routers.values()]}
+    else:
+        router = routers["router"]
+        result["pools"]["awq"] = dict(model="Qwen3-14B-AWQ",
+            base_url=f"http://{router['host']}:{router['port']}/v1", health_path="/readiness")
+        result["worker_registry"] = {"url": f"http://{router['host']}:{router['port']}/workers"}
+    result["worker_registry"]["expected_urls"] = [w["base_url"].removesuffix("/v1") for w in generation_workers(config).values()]
     return result
 
 
@@ -162,9 +199,9 @@ def fingerprint(config, name):
     identity = {"service": config["services"][name]}
     if name == "gateway":
         identity["gateway"] = gateway_config(config)
-    elif name == "router":
-        identity["router"] = config["router"]
-        identity["workers"] = generation_workers(config)
+    elif config["services"][name]["driver"] == "router":
+        identity["router"] = router_configs(config)[name]
+        identity["workers"] = router_workers(config, name)
     elif config["services"][name]["driver"] == "native-awq":
         spec, target = native_spec(config["services"][name])
         identity["native"] = {k: v for k, v in spec.items() if k != "benchmark" and k != "vendors"}
@@ -199,15 +236,15 @@ def commands(config, name):
         save(target, gateway_config(config))
         return [sys.executable, "-m", "heteroserve.gateway", "--config", str(target)], {}
     if service["driver"] == "router":
-        router = config["router"]
-        workers = [v["base_url"].removesuffix("/v1") for v in generation_workers(config).values()]
+        router = router_configs(config)[name]
+        workers = [v["base_url"].removesuffix("/v1") for v in router_workers(config, name).values()]
         # Preserve the vendor's PYTHONPATH; the router target contains only its wheels.
         bootstrap = "import sys,runpy; sys.path.insert(0," + repr(router["runtime"]) + "); sys.argv="
         argv = ["launch_router", "--host", router["host"], "--port", str(router["port"]),
                 "--worker-urls", *workers, "--policy", router["policy"], "--disable-retries",
                 "--request-timeout-secs", "180", "--health-check-interval-secs", "10",
                 "--worker-startup-check-interval", "5", "--worker-startup-timeout-secs", "600",
-                "--prometheus-port", "18602", "--max-payload-size", "2097152"]
+                "--prometheus-host", "127.0.0.1", "--prometheus-port", str(router["metrics_port"]), "--max-payload-size", "2097152"]
         bootstrap += repr(argv) + "; runpy.run_module('vllm_router.launch_router',run_name='__main__')"
         return [sys.executable, "-c", bootstrap], {}
     raise ValueError("Unknown service driver")
@@ -369,8 +406,9 @@ def local(config, action, name):
     env["PYTHONPATH"] = str(ROOT / "homogeneous/src") + ":" + str(ROOT) + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     spec = config.get("workers", {}).get(name) or config["backends"].get(name)
     endpoint = urlsplit(spec["base_url"]) if spec else None
-    port = endpoint.port if endpoint else config[name]["port"]
-    host = endpoint.hostname if endpoint else config[name]["host"]
+    listen = router_configs(config)[name] if service["driver"] == "router" else config.get(name, {})
+    port = endpoint.port if endpoint else listen["port"]
+    host = endpoint.hostname if endpoint else listen["host"]
     with socket.socket() as check:
         check.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         check.bind((host, port))
@@ -400,11 +438,11 @@ def status(config):
     endpoints = {name: spec["base_url"].removesuffix("/v1") for name, spec in config["backends"].items()}
     endpoints.update({name: spec["base_url"].removesuffix("/v1") for name, spec in generation_workers(config).items()})
     endpoints["gateway"] = f"http://{config['gateway']['address']}:{config['gateway']['port']}"
-    endpoints["router"] = f"http://{config['router']['host']}:{config['router']['port']}"
+    endpoints.update({n:f"http://{s['host']}:{s['port']}" for n,s in router_configs(config).items()})
     result = {}
     for name, url in endpoints.items():
         try:
-            path = "/ready" if name == "gateway" else "/health"
+            path = "/ready" if name == "gateway" else "/readiness" if name in router_configs(config) else "/health"
             response = urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url + path, timeout=4)
             with response:
                 detail = response.read().decode()
@@ -436,8 +474,9 @@ def verify_workers(config):
 def verify(config):
     base = f"http://{config['gateway']['address']}:{config['gateway']['port']}"
     ready = http(base + "/ready")
-    router_url = f"http://{config['router']['host']}:{config['router']['port']}"
-    workers = http(router_url + "/workers")["workers"]
+    routers = router_configs(config)
+    workers = [worker for spec in routers.values()
+               for worker in http(f"http://{spec['host']}:{spec['port']}/workers")["workers"]]
     expected = {v["base_url"].removesuffix("/v1") for v in generation_workers(config).values()}
     registered_healthy = {w["url"] for w in workers if w["is_healthy"]}
     coverage_complete = ready["expert_coverage_complete"] and registered_healthy == expected
@@ -462,13 +501,16 @@ def verify(config):
         tests.append({"model": model, "json": True, "sse_done": True, "answer": text.strip()})
     def counters():
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(f"http://{config['router']['host']}:18602/metrics", timeout=10) as response:
-            raw = response.read().decode()
-        return {worker: float(value) for worker, value in re.findall(
-            r'^vllm_router_processed_requests_total\{worker="([^"]+)"\}\s+([0-9.eE+\-]+)', raw, re.M)}
+        result = {}
+        for spec in routers.values():
+            with opener.open(f"http://{spec['host']}:{spec['metrics_port']}/metrics", timeout=10) as response:
+                raw = response.read().decode()
+            result.update({worker: float(value) for worker, value in re.findall(
+                r'^vllm_router_processed_requests_total\{worker="([^"]+)"\}\s+([0-9.eE+\-]+)', raw, re.M)})
+        return result
     before = counters()
-    def pooled(_):
-        response = http(base + "/v1/chat/completions", {"model": "awq", "messages": [{"role": "user", "content": "What is 2+3? Reply with only the digit."}],
+    def pooled(_, model="awq"):
+        response = http(base + "/v1/chat/completions", {"model": model, "messages": [{"role": "user", "content": "What is 2+3? Reply with only the digit."}],
             "max_tokens": 16, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}}, timeout=120)
         assert response["choices"][0]["message"]["content"].strip() == "5"
     pooled_count = max(24, 2 * len(expected))
@@ -478,7 +520,18 @@ def verify(config):
     dispatched = {worker: after.get(worker, 0) - before.get(worker, 0) for worker in expected}
     assert sum(n > 0 for n in dispatched.values()) >= min(3, len(expected)), dispatched
     assert sum(dispatched.values()) >= pooled_count, dispatched
-    if config["router"]["policy"] == "round_robin":
+    explicit_coverage_requests = 0
+    if config["router"].get("pools"):
+        # A finite random L1 sample need not visit every L2 instance. Verify
+        # each pool's round-robin separately without changing the L1 policy.
+        for name, spec in routers.items():
+            count = len(router_workers(config, name))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                list(executor.map(lambda i: pooled(i, spec["backend"]), range(count)))
+            explicit_coverage_requests += count
+        after = counters()
+        dispatched = {worker: after.get(worker, 0) - before.get(worker, 0) for worker in expected}
+    if all(spec["policy"] == "round_robin" for spec in routers.values()):
         assert all(dispatched[url] > 0 for url in registered_healthy), dispatched
     embedding_result = {"skipped": True, "reason": "Embedding disabled in the active configuration"}
     if "embedding" in config["backends"]:
@@ -494,7 +547,11 @@ def verify(config):
               "ready": ready, "generation": tests, "direct_workers": direct_results,
               "missing_healthy_workers": sorted(expected - registered_healthy),
               "unexpected_healthy_workers": sorted(registered_healthy - expected),
-              "official_router": {"policy": config["router"]["policy"], "pooled_requests": pooled_count, "concurrency": 4, "worker_dispatch_deltas": dispatched},
+              "official_router": {"policy": config["router"]["policy"], "routers": list(routers),
+                  "l1_random_routes": gateway_config(config).get("random_routes", {}),
+                  "route_embeddings": gateway_config(config).get("route_embeddings", {}),
+                  "pooled_requests": pooled_count, "explicit_coverage_requests": explicit_coverage_requests,
+                  "concurrency": 4, "worker_dispatch_deltas": dispatched},
               "embedding": embedding_result,
               "scope": "Functional acceptance only; no throughput/stability/Kubernetes or cross-vendor PP claim",
               "completed_at": datetime.now(timezone.utc).isoformat()}
@@ -516,6 +573,8 @@ def main():
     if config["resource_limits_enabled"] is not False:
         raise ValueError("This deployment keeps resource limits disabled")
     names = args.only or list(config["services"])
+    if args.only and "router" not in config["services"]:
+        names = [expanded for name in names for expanded in (list(router_configs(config)) if name == "router" else [name])]
     if any(n not in config["services"] for n in names):
         parser.error("Unknown service")
     if args.local:

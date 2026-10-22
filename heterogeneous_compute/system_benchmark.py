@@ -21,8 +21,11 @@ from urllib.parse import urlsplit
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from heterogeneous_compute.serving import expand_config, generation_workers
+from heterogeneous_compute.serving import expand_config, generation_workers, gateway_config, router_configs, router_workers
 from heterogeneous_compute.benchmark_telemetry import metric_sum
+
+
+SLO_FIELDS={'ttft_seconds':'ttft','tpot_seconds':'tpot','e2e_seconds':'e2e'}
 
 
 def save(path,value):
@@ -38,8 +41,9 @@ def percentile(values,q):
 
 
 def meets_slo(row,slo):
-    return bool(row.get('success') and all(row.get(k) is not None and row[k]<=slo[v]
-        for k,v in [('ttft','ttft_seconds'),('tpot','tpot_seconds'),('e2e','e2e_seconds')]))
+    if not slo or set(slo)-set(SLO_FIELDS):raise ValueError('Configure at least one supported latency SLO')
+    return bool(row.get('success') and all(row.get(SLO_FIELDS[key]) is not None and row[SLO_FIELDS[key]]<=limit
+        for key,limit in slo.items()))
 
 
 def summarize(rows,start,end,slo):
@@ -69,6 +73,9 @@ class Receiver:
         self.state={'phase':'waiting_for_collectors','finished':False,'time':time.time()}
         nodes={w['node'] for w in generation_workers(serving).values()} | {serving['services']['gateway']['node']}
         self.nodes=nodes
+        self.gateway_node=serving['services']['gateway']['node']
+        self.router_members={router.get('pool',name):{w['base_url'].removesuffix('/v1')
+            for w in router_workers(serving,name).values()} for name,router in router_configs(serving).items()}
         receiver=self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self,*args):pass
@@ -107,8 +114,26 @@ class Receiver:
         print(json.dumps(self.state),flush=True)
 
     def workers(self):
-        latest=self.latest.get('iluvatar150-02',{})
+        latest=self.latest.get(self.gateway_node,{})
         return {r['url'] for r in latest.get('router_workers',{}).get('workers',[]) if r.get('is_healthy')}
+
+    def router_health(self):
+        snapshot=self.latest.get(self.gateway_node,{}).get('router_workers',{})
+        if snapshot.get('errors'):raise RuntimeError('Router pool telemetry failed: '+str(snapshot['errors']))
+        pools=snapshot.get('pools')
+        # Legacy single-router collectors expose only the combined workers list.
+        if pools is None and len(self.router_members)==1:
+            pools={next(iter(self.router_members)):snapshot}
+        if set(pools or {})!=set(self.router_members):
+            raise RuntimeError('Router pool telemetry is incomplete')
+        healthy={}
+        for name,report in pools.items():
+            listed={w['url'] for w in report.get('workers',[])}
+            if not listed.issubset(self.router_members[name]):
+                raise RuntimeError('Worker registered in the wrong Router pool: '+name)
+            healthy[name]={w['url'] for w in report.get('workers',[]) if w.get('is_healthy')}
+            if not healthy[name]:raise RuntimeError('Router pool has no healthy workers: '+name)
+        return healthy
 
     def queue(self):
         running=waiting=0;missing=[]
@@ -116,7 +141,7 @@ class Receiver:
             for name,worker in node.get('workers',{}).items():
                 if worker.get('running') is None or worker.get('waiting') is None:missing.append(name)
                 else:running+=worker['running'];waiting+=worker['waiting']
-        gw=metric_sum(self.latest.get('iluvatar150-02',{}).get('gateway_metrics',[]),'heteroserve_gateway_inflight')
+        gw=metric_sum(self.latest.get(self.gateway_node,{}).get('gateway_metrics',[]),'heteroserve_gateway_inflight')
         return {'running':running,'waiting':waiting,'gateway_inflight':gw,'missing_workers':missing}
 
 
@@ -128,6 +153,7 @@ class Experiment:
         self.rows_file=(directory/'requests.jsonl').open('a',encoding='utf-8',buffering=1)
         self.sample_file=(directory/'timeline.jsonl').open('a',encoding='utf-8',buffering=1)
         self.results=[];self.frozen=None;self.tokenizer=None;self.prompts=[]
+        self.embedding_required=bool(gateway_config(serving).get('route_embeddings',{}).get(config['model']))
         self.start=time.time();self.deadline=self.start+23*3600
 
     def check(self):
@@ -138,6 +164,7 @@ class Experiment:
         if self.receiver.network.get('error'):raise RuntimeError('Request route observer failed')
         if self.receiver.network.get('packet_drops_total',0):raise RuntimeError('Route observer dropped packets; stop before claiming per-worker attribution')
         if self.receiver.workers()!=self.expected:raise RuntimeError('Frozen healthy worker set changed; no data concatenation across configurations')
+        if self.receiver.router_health()!=self.router_identities:raise RuntimeError('Frozen per-pool healthy worker set changed')
         for node in self.receiver.nodes:
             row=self.receiver.latest.get(node,{})
             if time.time()-row.get('received_at',0)>self.config['telemetry_max_age_seconds']:
@@ -167,8 +194,10 @@ class Experiment:
         import aiohttp
         c=self.config;output_tokens=output_tokens or c['output_tokens']
         sent=time.time();row={'index':index,'case':self.case,'phase':phase,'scheduled_at':scheduled,'sent_at':sent,
-            'send_lag':max(0,sent-scheduled),'success':False,'request_id':None,'vendor':None,'worker':None,
-            'ttft':None,'tpot':None,'e2e':None,'input_tokens':None,'output_tokens':None}
+            'send_lag':max(0,sent-scheduled),'success':False,'request_id':None,'vendor':None,'worker':None,'selected_pool':None,'embedding_ms':None,
+            'tpot':None,'input_tokens':None,'output_tokens':None}
+        if 'ttft_seconds' in c['slo']:row['ttft']=None
+        if 'e2e_seconds' in c['slo']:row['e2e']=None
         body={'model':model or c['model'],'messages':prompt,'temperature':0,'max_tokens':output_tokens,
               'ignore_eos':expected_text is None,'stream':True,'stream_options':{'include_usage':True},
               'chat_template_kwargs':{'enable_thinking':False}}
@@ -177,6 +206,13 @@ class Experiment:
             async with session.post((endpoint or c['endpoint'])+'/v1/chat/completions',json=body,
                 timeout=aiohttp.ClientTimeout(total=c['timeout_seconds'],connect=5),headers={'x-benchmark-request-id':str(index)}) as response:
                 row['http_status']=response.status;row['request_id']=response.headers.get('x-request-id')
+                row['selected_pool']=response.headers.get('x-moqe-expert')
+                embedding_header=response.headers.get('x-heteroserve-embedding-ms')
+                if embedding_header is not None:
+                    try:
+                        elapsed=float(embedding_header)
+                        if math.isfinite(elapsed) and elapsed>=0:row['embedding_ms']=elapsed
+                    except ValueError:pass
                 if response.status!=200:
                     await response.read();row['error']='429' if response.status==429 else '5xx' if response.status>=500 else 'http_'+str(response.status)
                 else:
@@ -205,14 +241,17 @@ class Experiment:
                         elif usage is None:row['error']='missing_usage'
                         elif expected_text is None and (row['input_tokens']!=c['input_tokens'] or row['output_tokens']!=output_tokens):row['error']='length_mismatch'
                         elif finish in {'abort','error'}:row['error']='backend_abort'
+                        elif endpoint is None and getattr(self,'embedding_required',False) and row['embedding_ms'] is None:
+                            row['error']='missing_embedding_measurement' if embedding_header is None else 'invalid_embedding_measurement'
                         else:row['success']=True
         except asyncio.TimeoutError:row['error']='timeout'
         except aiohttp.ClientConnectionError as exc:row.update(error='connection_error',detail=type(exc).__name__)
         except (aiohttp.ClientPayloadError,ValueError,KeyError) as exc:row.update(error='abnormal_truncation',detail=type(exc).__name__)
         except aiohttp.ClientError as exc:row.update(error='client_http_error',detail=type(exc).__name__)
-        row['completed_at']=time.time();row['e2e']=time.monotonic()-start;row['wire_response_bytes']=raw_bytes
+        row['completed_at']=time.time();row['wire_response_bytes']=raw_bytes
+        if 'e2e_seconds' in c['slo']:row['e2e']=time.monotonic()-start
         if first is not None:
-            row['ttft']=first-start
+            if 'ttft_seconds' in c['slo']:row['ttft']=first-start
             if row.get('output_tokens',0) and row['output_tokens']>1:row['tpot']=(last-first)/(row['output_tokens']-1)
         row['slo_pass']=meets_slo(row,c['slo']);self.rows_file.write(json.dumps(row,ensure_ascii=False)+'\n')
         self.completed.append(row)
@@ -225,6 +264,20 @@ class Experiment:
             await asyncio.sleep(1)
         else:raise RuntimeError('Collectors/route observer did not become ready')
         self.expected=r.workers();all_workers=generation_workers(self.serving)
+        self.router_identities=r.router_health()
+        routers=router_configs(self.serving)
+        routing=gateway_config(self.serving)
+        required_embedding=self.config.get('required_embedding_route')
+        if required_embedding and routing.get('route_embeddings',{}).get(self.config['model'])!=required_embedding:
+            raise RuntimeError('Frozen workload requires Embedding before hardware-pool selection')
+        multi_pool=bool(self.serving['router'].get('pools'))
+        if multi_pool:
+            selected=routing.get('random_routes',{}).get(self.config['model'],[])
+            expected_backends={router['backend'] for router in routers.values()}
+            if len(selected)!=len(expected_backends) or set(selected)!=expected_backends:
+                raise RuntimeError('Gateway does not uniformly select the configured hardware pools')
+            if any(router['policy']!='round_robin' for router in routers.values()):
+                raise RuntimeError('Expected round_robin L2 policy in every hardware pool')
         vendors=set();direct=[]
         self.identities={};self.process_identities={}
         for node in r.nodes:
@@ -276,15 +329,38 @@ class Experiment:
         async def pooled_check(i):
             async with semaphore:
                 return await self.one(session,workload[i%len(workload)],i,time.time(),'pooled-preflight')
-        pooled=await asyncio.gather(*(pooled_check(i) for i in range(2*len(self.expected))))
-        if not all(row['success'] for row in pooled):
-            raise RuntimeError('Unified fixed-length streaming check failed: '+str(Counter(row.get('error') for row in pooled if not row['success'])))
-        await asyncio.sleep(5)
-        mapped={r.routes.get(row['request_id'],{}).get('worker') for row in pooled}
-        if not self.expected.issubset(mapped):raise RuntimeError('Cannot associate pooled requests with every healthy worker; observer coverage incomplete')
+        pooled=[];mapped=set();limit=8*len(self.expected) if multi_pool else 2*len(self.expected)
+        backend_by_worker={w['base_url'].removesuffix('/v1'):router.get('backend')
+            for name,router in routers.items() for w in router_workers(self.serving,name).values()}
+        # A random L1 does not visit each hardware pool equally in a short sample.
+        # Bound additional genuine alias requests rather than mistaking chance
+        # undercoverage for a broken worker, or bypassing L1 to force coverage.
+        while len(pooled)<limit and not self.expected.issubset(mapped):
+            count=min(2*len(self.expected),limit-len(pooled));offset=len(pooled)
+            batch=await asyncio.gather(*(pooled_check(i) for i in range(offset,offset+count)))
+            pooled.extend(batch)
+            if not all(row['success'] for row in batch):
+                raise RuntimeError('Unified fixed-length streaming check failed: '+str(Counter(row.get('error') for row in batch if not row['success'])))
+            await asyncio.sleep(5)
+            for row in batch:
+                worker=r.routes.get(row['request_id'],{}).get('worker')
+                if not row['request_id'] or not worker:
+                    raise RuntimeError('Successful pooled request has no request-ID-to-worker association')
+                if multi_pool and row['selected_pool']!=backend_by_worker.get(worker):
+                    raise RuntimeError('L1 selected pool and observed L2 worker disagree')
+                mapped.add(worker)
+            if r.workers()!=self.expected or r.router_health()!=self.router_identities:
+                raise RuntimeError('Healthy Router pool set changed during preflight')
+        if not self.expected.issubset(mapped):raise RuntimeError('Random-pool preflight exhausted its request budget before covering every healthy worker')
         self.frozen={'healthy_workers':sorted(self.expected),'expected_workers':len(all_workers),'missing_workers':sorted({w['base_url'].removesuffix('/v1') for w in all_workers.values()}-self.expected),
             'identities':self.identities,'service_processes':self.process_identities,'direct_smoke':direct,
             'pooled_requests':len(pooled),'pooled_worker_coverage':sorted(mapped),'samples':dict(r.latest),
+            'router_pools':{name:sorted(workers) for name,workers in self.router_identities.items()},
+            'routing':{'random_routes':routing.get('random_routes',{}),'routers':routers},
+            'pipeline':{'route_embeddings':routing.get('route_embeddings',{}),
+                'embedding_timing':'x-heteroserve-embedding-ms, finite nonnegative milliseconds',
+                'recorded_slo_metrics':[SLO_FIELDS[key] for key in self.config['slo']],
+                'latency_scope':'Only configured latency SLO metrics are persisted. TPOT measures generated-token intervals; Embedding duration is a separate observation.'},
             'execution_mode':self.config['execution_mode'],'all_devices_accepted':len(self.expected)==len(all_workers)}
         save(self.directory/'preflight.json',self.frozen)
         self.check();self.completed.clear()
@@ -465,7 +541,21 @@ def export_results(directory,config,stages,routes,plots=True):
         writer=csv.DictWriter(out,fieldnames=fields,extrasaction='ignore');writer.writeheader();writer.writerows(stages)
     if not plots:return
     bins={};requests=0;associated=0
-    request_fields=['index','case','phase','request_id','worker','vendor','scheduled_at','sent_at','send_lag','completed_at','input_tokens','output_tokens','http_status','error','success','slo_pass','ttft','tpot','e2e']
+    snapshot=directory/'serving-snapshot.json'
+    serving=json.loads(snapshot.read_text()) if snapshot.exists() else None
+    vendors_by_worker={};vendors_by_backend={}
+    if serving:
+        for name,router in router_configs(serving).items():
+            pool=router.get('pool')
+            if pool in {'ascend','musa','iluvatar'}:
+                vendors_by_backend[router['backend']]=pool
+                vendors_by_worker.update({w['base_url'].removesuffix('/v1'):pool for w in router_workers(serving,name).values()})
+        for w in generation_workers(serving).values():
+            node=w.get('node','')
+            vendor='ascend' if node.startswith('ascend') else 'musa' if node.startswith('s5000') else 'iluvatar' if node.startswith('iluvatar') else None
+            if vendor:vendors_by_worker.setdefault(w['base_url'].removesuffix('/v1'),vendor)
+    request_fields=['index','case','phase','request_id','selected_pool','worker','vendor','embedding_ms','scheduled_at','sent_at','send_lag','completed_at','input_tokens','output_tokens','http_status','error','success','slo_pass',
+                    *[field for key,field in SLO_FIELDS.items() if key in config['slo']]]
     with (directory/'requests.csv').open('w',newline='',encoding='utf-8') as out:
         writer=csv.DictWriter(out,fieldnames=request_fields,extrasaction='ignore');writer.writeheader()
         if (directory/'requests.jsonl').exists():
@@ -473,8 +563,9 @@ def export_results(directory,config,stages,routes,plots=True):
                 row=json.loads(line);route=routes.get(row.get('request_id'),{})
                 row['worker']=route.get('worker',row.get('worker'))
                 if row['worker']:
-                    host=urlsplit(row['worker']).hostname
-                    row['vendor']='ascend' if host in {'192.168.162.23','192.168.162.24'} else 'musa' if host in {'192.168.162.96','192.168.162.97'} else 'iluvatar'
+                    row['vendor']=vendors_by_worker.get(row['worker'],row.get('vendor'))
+                elif row.get('selected_pool') in vendors_by_backend:
+                    row['vendor']=vendors_by_backend[row['selected_pool']]
                 writer.writerow(row)
                 if row['phase'] in {'direct-smoke','pooled-preflight'}:continue
                 requests+=1;associated+=bool(row['worker'])
@@ -485,6 +576,7 @@ def export_results(directory,config,stages,routes,plots=True):
                     done[row['vendor']+'_completed']+=row['success'];sent[row['vendor']+'_sent']+=1
     save(directory/'metric-coverage.json',{'requests':requests,'requests_associated_with_worker':associated,
         'association_scope':'Forwarded requests joined by Gateway request ID; Gateway rejections have no worker.',
+        'selected_pool_scope':'x-moqe-expert records the L1 hardware-pool choice when returned; absence is kept missing, not assigned by guess.',
         'network_scope':'TCP payload accounting includes retransmissions and excludes IP/TCP headers.',
         'limitations':['Ascend .23 device SMI may be unavailable; missing samples are not zero.',
             'Router internal queue is not exposed by the installed metrics; do not substitute backend waiting or Gateway inflight for it.',

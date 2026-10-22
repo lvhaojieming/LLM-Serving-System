@@ -2,7 +2,7 @@ import copy
 import json
 from pathlib import Path
 import pytest
-from heterogeneous_compute.serving import commands, expand_config, fingerprint, gateway_config, generation_workers, live, local, native_spec, serve_signature
+from heterogeneous_compute.serving import commands, expand_config, fingerprint, gateway_config, generation_workers, live, local, native_spec, router_configs, router_workers, serve_signature
 
 
 def config():
@@ -10,20 +10,59 @@ def config():
 
 
 def test_gateway_aliases_keep_embedding_separate_from_generation_pool():
-    cfg = gateway_config(config())
+    cfg = gateway_config(expand_config(config()))
     assert cfg["learned_routing"] == {"enabled": False}
     assert cfg["pools"]["embedding"]["task"] == "embed"
-    assert cfg["pools"]["awq"]["base_url"] == "http://127.0.0.1:18601/v1"
+    assert "awq" not in cfg["pools"]
+    assert cfg["random_routes"] == {"awq": ["ascend-awq", "musa-awq", "iluvatar-awq"]}
+    assert cfg["route_embeddings"] == {"awq": "embedding"}
+    assert [cfg["pools"][name]["base_url"] for name in cfg["random_routes"]["awq"]] == [
+        "http://127.0.0.1:18601/v1", "http://127.0.0.1:18603/v1", "http://127.0.0.1:18605/v1"]
+    assert len(cfg["worker_registry"]["urls"]) == 3
 
 
 def test_unrelated_service_change_does_not_invalidate_gateway_identity():
-    cfg = config()
+    cfg = expand_config(config())
     changed = copy.deepcopy(cfg)
     changed["services"]["ascend-awq"]["cudagraph_metrics"] = False
     assert fingerprint(cfg, "gateway") == fingerprint(changed, "gateway")
-    changed["backends"]["ascend-awq"]["base_url"] = "http://192.168.162.24:18428/v1"
+    changed["workers"]["ascend-awq"]["base_url"] = "http://192.168.162.24:18428/v1"
     assert fingerprint(cfg, "gateway") != fingerprint(changed, "gateway")
-    assert fingerprint(cfg, "router") != fingerprint(changed, "router")
+    assert fingerprint(cfg, "router-ascend") != fingerprint(changed, "router-ascend")
+    assert fingerprint(cfg, "router-musa") == fingerprint(changed, "router-musa")
+
+
+def test_pool_generation_does_not_mutate_source_configuration():
+    cfg = expand_config(config())
+    original = copy.deepcopy(cfg)
+    gateway_config(cfg)
+    assert cfg == original
+
+
+def test_official_router_pools_are_disjoint_and_keep_all_current_devices():
+    cfg = expand_config(config())
+    pools = router_configs(cfg)
+    assert {name: len(router_workers(cfg, name)) for name in pools} == {
+        'router-ascend': 16, 'router-musa': 8, 'router-iluvatar': 8}
+    assigned = []
+    for name, spec in pools.items():
+        argv, _ = commands(cfg, name)
+        assert argv[0] and '--worker-urls' in argv[2]
+        assert "'--port', '" + str(spec['port']) + "'" in argv[2]
+        assigned.extend(router_workers(cfg, name))
+    assert len(assigned) == len(set(assigned)) == 32
+    assert cfg == expand_config(cfg)
+
+
+def test_router_pools_reject_overlap_and_missing_nodes():
+    cfg = config()
+    cfg['router']['pools']['musa']['nodes'].append('ascend910c-01')
+    with pytest.raises(ValueError, match='overlapping'):
+        expand_config(cfg)
+    cfg = config()
+    cfg['router']['pools']['ascend']['nodes'].remove('ascend910c-01')
+    with pytest.raises(ValueError, match='cover'):
+        expand_config(cfg)
 
 
 def test_stop_does_not_signal_a_reused_or_foreign_pid(tmp_path, monkeypatch):

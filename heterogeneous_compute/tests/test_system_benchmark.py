@@ -1,16 +1,20 @@
 import asyncio
+import csv
 import json
 import io
 from pathlib import Path
 import socket
 import struct
+import sys
 import tempfile
 import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from heterogeneous_compute.system_benchmark import Experiment, meets_slo, summarize
+from heterogeneous_compute.system_benchmark import Experiment, Receiver, export_results, meets_slo, summarize
 from heterogeneous_compute.benchmark_telemetry import (
     METRIC_NAMES, PacketObserver, device_values, ipv4_tcp, metric_sum, packet_filter, parse_metrics,
+    router_worker_snapshot,
 )
 
 
@@ -41,6 +45,31 @@ def test_success_but_slow_or_failed_request_never_contributes_goodput():
     assert result['goodput']==0
     assert result['slo_ratio']==0
     assert not meets_slo({**row(0,1),'tpot':None},SLO)
+
+
+def test_tpot_only_slo_ignores_removed_ttft_and_e2e_metrics_but_requires_valid_tpot():
+    sample={**row(0,999),'ttft':999,'tpot':.05,'e2e':999}
+    assert meets_slo(sample,{'tpot_seconds':.1})
+    assert not meets_slo(sample,SLO)  # original three-SLO configuration remains valid
+    assert not meets_slo({**sample,'tpot':.101},{'tpot_seconds':.1})
+    assert not meets_slo({**sample,'tpot':None},{'tpot_seconds':.1})
+    assert not meets_slo({**sample,'success':False},{'tpot_seconds':.1})
+    result=summarize([sample],0,1000,{'tpot_seconds':.1})
+    assert result['goodput']==.001 and result['slo_ratio']==1
+
+
+def test_tpot_only_export_omits_cancelled_latency_columns():
+    with tempfile.TemporaryDirectory() as temporary:
+        directory=Path(temporary)
+        sample={**row(0,1),'phase':'coarse','request_id':'r','worker':None,'slo_pass':True}
+        (directory/'requests.jsonl').write_text(json.dumps(sample)+'\n')
+        # CSV production is verified without loading a plotting environment.
+        with patch.dict(sys.modules,{'matplotlib':None}):
+            export_results(directory,{'slo':{'tpot_seconds':.1}},[],{})
+        with (directory/'requests.csv').open(newline='',encoding='utf-8') as handle:
+            reader=csv.DictReader(handle);rows=list(reader)
+        assert len(rows)==1 and 'tpot' in reader.fieldnames
+        assert 'ttft' not in reader.fieldnames and 'e2e' not in reader.fieldnames
 
 
 def test_metrics_respect_labels_and_exclude_backend_aborts():
@@ -121,6 +150,77 @@ def test_short_snapshots_preserve_original_tcp_byte_counts_and_strip_padding():
 def observer():
     return PacketObserver({'backends':{'worker':{'base_url':'http://192.168.162.97:18741/v1'}},
         'gateway':{'address':'192.168.162.60','port':18600},'router':{'port':18601}})
+
+
+def pool_serving():
+    return {'backends':{vendor+'-awq':{'base_url':f'http://192.168.162.{host}:18741/v1','node':node}
+            for vendor,host,node in [('ascend',24,'ascend910c-02'),('musa',97,'s5000-01'),('iluvatar',58,'iluvatar150-01')]},
+        'gateway':{'address':'192.168.162.60','port':18600},
+        'router':{'host':'127.0.0.1','policy':'round_robin','pools':{
+            vendor:{'port':port,'metrics_port':port+1,'backend':vendor+'-awq','nodes':[node]}
+            for vendor,port,node in [('ascend',18601,'ascend910c-02'),('musa',18603,'s5000-01'),('iluvatar',18605,'iluvatar150-01')]}}}
+
+
+def test_three_router_ports_preserve_aggregate_gateway_router_traffic_counts():
+    capture=PacketObserver(pool_serving())
+    assert capture.router_ports=={18601,18603,18605}
+    request=b'POST /v1/chat/completions HTTP/1.1\r\n\r\n{}'
+    response=b'HTTP/1.1 200 OK\r\n\r\nresponse'
+    ins=packet_filter(capture.ports,capture.worker_ports)
+    for offset,port in enumerate(sorted(capture.router_ports)):
+        outgoing=frame(request,sport=45000+offset,dport=port,src='127.0.0.1',dst='127.0.0.1')
+        incoming=frame(response,sport=port,dport=45000+offset,src='127.0.0.1',dst='127.0.0.1')
+        assert run_filter(ins,outgoing)==256 and run_filter(ins,incoming)==256
+        capture.observe_packet(ipv4_tcp(outgoing));capture.observe_packet(ipv4_tcp(incoming))
+    assert capture.bytes=={'gateway_rx_tcp_payload':3*len(response),'gateway_tx_tcp_payload':3*len(request),
+                          'router_rx_tcp_payload':3*len(request),'router_tx_tcp_payload':3*len(response)}
+
+
+def test_embedding_network_bytes_belong_to_gateway_without_becoming_generation_routes():
+    config=pool_serving()
+    config['backends']['embedding']={'base_url':'http://192.168.162.58:18458/v1','task':'embed'}
+    capture=PacketObserver(config)
+    request=b'POST /v1/embeddings HTTP/1.1\r\nx-request-id: same-awq-id\r\n\r\n{}'
+    response=b'HTTP/1.1 200 OK\r\n\r\n'+b'large embedding array'*100
+    assert 18458 in capture.ports and 18458 not in capture.worker_ports
+    capture.observe_packet(ipv4_tcp(frame(request,dport=18458,dst='192.168.162.58')))
+    capture.observe_packet(ipv4_tcp(frame(response,sport=18458,dport=45000,src='192.168.162.58',dst='192.168.162.60')[:256]))
+    assert capture.bytes=={'gateway_rx_tcp_payload':len(response),'gateway_tx_tcp_payload':len(request),
+                          'router_rx_tcp_payload':0,'router_tx_tcp_payload':0}
+    assert capture.routes.empty() and capture.flows=={}
+
+
+def test_router_snapshot_keeps_pool_identity_and_does_not_hide_failed_collection():
+    report=router_worker_snapshot({'ascend':{'workers':[{'url':'a','is_healthy':True}]},
+        'musa':{'workers':[{'url':'m','is_healthy':False}]},'iluvatar':{'error':'connection refused'}})
+    assert report['workers']==[{'url':'a','is_healthy':True,'router_pool':'ascend'},
+                               {'url':'m','is_healthy':False,'router_pool':'musa'}]
+    assert report['errors']=={'iluvatar':'connection refused'}
+    receiver=Receiver.__new__(Receiver);receiver.gateway_node='gateway-node'
+    receiver.router_members={'ascend':{'a'},'musa':{'m'},'iluvatar':{'i'}}
+    receiver.latest={'gateway-node':{'router_workers':report}}
+    try:receiver.router_health()
+    except RuntimeError as exc:assert 'telemetry failed' in str(exc)
+    else:raise AssertionError('A missing Router pool cannot be treated as a complete snapshot')
+
+
+def test_pool_freeze_detects_cross_pool_worker_registration_even_when_union_is_unchanged():
+    receiver=Receiver.__new__(Receiver);receiver.gateway_node='gateway-node'
+    receiver.router_members={'ascend':{'a'},'musa':{'m'},'iluvatar':{'i'}}
+    reports={pool:{'workers':[{'url':url,'is_healthy':True}]} for pool,url in [('ascend','a'),('musa','m'),('iluvatar','i')]}
+    receiver.latest={'gateway-node':{'router_workers':router_worker_snapshot(reports)}}
+    assert receiver.workers()=={'a','m','i'}
+    assert receiver.router_health()=={'ascend':{'a'},'musa':{'m'},'iluvatar':{'i'}}
+    reports['ascend'],reports['musa']=reports['musa'],reports['ascend']
+    receiver.latest['gateway-node']['router_workers']=router_worker_snapshot(reports)
+    assert receiver.workers()=={'a','m','i'}
+    try:receiver.router_health()
+    except RuntimeError as exc:assert 'wrong Router pool' in str(exc)
+    else:raise AssertionError('Equal union does not imply valid hardware-pool placement')
+    # A legacy collector's single workers list remains supported.
+    receiver.router_members={'router':{'a','m'}}
+    receiver.latest['gateway-node']['router_workers']={'workers':[{'url':'a','is_healthy':True},{'url':'m','is_healthy':False}]}
+    assert receiver.router_health()=={'router':{'a'}}
 
 
 def test_header_reassembly_handles_overlap_and_out_of_order_segments_without_body_storage():
@@ -219,17 +319,27 @@ def test_stream_parser_counts_429_truncation_errors_and_total_deadline():
             else:payload+='data: '+json.dumps({'choices':[{'delta':{'content':'hello'},'finish_reason':'length'}]})+'\n\n'
             payload+='data: '+json.dumps({'choices':[],'usage':{'prompt_tokens':256,'completion_tokens':128}})+'\n\n'
             if mode!='truncated':payload+='data: [DONE]\n\n'
-            return web.Response(text=payload,content_type='text/event-stream')
+            headers={'x-moqe-expert':'musa-awq','x-request-id':'req-1','x-heteroserve-embedding-ms':'nan' if mode=='bad-embedding' else '1.25'}
+            if mode=='missing-embedding':headers.pop('x-heteroserve-embedding-ms')
+            return web.Response(text=payload,content_type='text/event-stream',headers=headers)
         app=web.Application();app.router.add_post('/v1/chat/completions',handler)
         runner=web.AppRunner(app);await runner.setup();site=web.TCPSite(runner,'127.0.0.1',0);await site.start()
         port=site._server.sockets[0].getsockname()[1]
         experiment=Experiment.__new__(Experiment);experiment.case=0;experiment.completed=[];experiment.rows_file=io.StringIO()
+        experiment.embedding_required=True
         experiment.config={'output_tokens':128,'input_tokens':256,'model':'normal','endpoint':f'http://127.0.0.1:{port}','timeout_seconds':.03,'slo':SLO}
         try:
             async with aiohttp.ClientSession() as session:
-                for mode,error in [('normal',None),('429','429'),('truncated','abnormal_truncation'),('stream-error','stream_error'),('slow','timeout')]:
+                for mode,error in [('normal',None),('429','429'),('truncated','abnormal_truncation'),('stream-error','stream_error'),('slow','timeout'),('bad-embedding','invalid_embedding_measurement'),('missing-embedding','missing_embedding_measurement')]:
                     row=await experiment.one(session,[{'role':'user','content':'x'}],0,time.time(),'test',model=mode)
                     assert row.get('error')==error
                     assert row['success']==(error is None)
+                    if mode=='normal':assert row['selected_pool']=='musa-awq' and row['request_id']=='req-1' and row['embedding_ms']==1.25
+                experiment.config['slo']={'tpot_seconds':.1}
+                sample=await experiment.one(session,[{'role':'user','content':'x'}],0,time.time(),'test',model='normal')
+                assert sample['success'] and sample['tpot'] is not None
+                assert 'ttft' not in sample and 'e2e' not in sample
+                persisted=json.loads(experiment.rows_file.getvalue().splitlines()[-1])
+                assert 'ttft' not in persisted and 'e2e' not in persisted
         finally:await runner.cleanup()
     asyncio.run(run())
