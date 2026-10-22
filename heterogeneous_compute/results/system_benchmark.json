@@ -1,0 +1,88 @@
+{
+  "run_id": "20261022T084810Z",
+  "code_revision": "82b43907f88a3e5a353cbc3924328ace9191b511",
+  "status": "stopped_during_preflight",
+  "finished_at_utc": "2026-10-22T08:55:18.228279+00:00",
+  "configuration": "heterogeneous_compute/configs/system_benchmark.json",
+  "deployment_configuration": "heterogeneous_compute/configs/serving.json",
+  "artifact_directory": "artifacts/serving/system-benchmark/20261022T084810Z",
+  "artifact_host": "s5000-02",
+  "artifact_project_root": "/home/zhangjinhao/LLM-Serving-System",
+  "pipeline": "Actual Embedding -> uniform random vendor pool -> official pool-specific round_robin Router -> AWQ TP2/PP1",
+  "healthy_workers": {"ascend": 13, "musa": 8, "iluvatar": 8},
+  "workload": {"input_tokens": 256, "output_tokens": 128, "seed": 20261022},
+  "slo": {"tpot_seconds": 0.1},
+  "client_timeout_seconds": 60,
+  "ttft_and_e2e_reported_or_used_for_slo": false,
+  "preflight": {
+    "direct_short_generation": {"requests": 29, "successful": 29},
+    "unified_fixed_length_generation": {"requests": 58, "successful": 46, "timeouts": 12},
+    "unified_fixed_length_by_node": {
+      "ascend910c-01": {"requests": 5, "successful": 5, "timeouts": 0},
+      "ascend910c-02": {"requests": 8, "successful": 8, "timeouts": 0},
+      "s5000-01": {"requests": 12, "successful": 0, "timeouts": 12},
+      "s5000-02": {"requests": 11, "successful": 11, "timeouts": 0},
+      "iluvatar150-01": {"requests": 11, "successful": 11, "timeouts": 0},
+      "iluvatar150-02": {"requests": 11, "successful": 11, "timeouts": 0}
+    },
+    "failure_reason": "Unified fixed-length streaming check failed: Counter({'timeout': 12})",
+    "all_timeouts_selected_pool": "musa-awq",
+    "traced_timeout_examples": [
+      {"request_id": "3caccd0fc1474768989fc1ea239b422c", "worker": "http://192.168.162.97:18497"},
+      {"request_id": "c5f6483e29c640e7b68564115b73e680", "worker": "http://192.168.162.97:18741"},
+      {"request_id": "c044b38e88584246b95e5efc8df48dad", "worker": "http://192.168.162.97:18740"},
+      {"request_id": "4eff0ae2369c449e9397b3db6393d765", "worker": "http://192.168.162.97:18742"}
+    ]
+  },
+  "diagnosis": {
+    "node": "s5000-01",
+    "observed_backend_generation_tokens_per_second": [0.8, 1.4],
+    "backend_cancel_observed": true,
+    "external_host_process": "test_mrng_index",
+    "external_host_process_pid": 3270085,
+    "external_host_process_is_owned_by_another_user": true,
+    "external_host_process_is_outside_project_containers": true,
+    "external_host_process_cpu_percent": 23018,
+    "external_host_process_threads": 255,
+    "host_load_average": [303.15, 296.46, 278.25],
+    "new_mccl_musa_fatal_or_oom_found_in_checked_logs": false,
+    "interpretation": "Strong evidence of host CPU contention affecting .97 generation; this does not establish that contention is the sole cause of every timeout. HTTP 200 is only the SSE response header, not successful generation."
+  },
+  "telemetry_validation": {
+    "all_six_nodes_fresh_at_initial_confirmation": true,
+    "all_three_router_processes_have_cpu_and_rss_samples": true,
+    "observer_packet_drops_at_initial_confirmation": 0,
+    "observer_receive_buffer_bytes": 33554432,
+    "device_smi_unavailable_nodes": ["ascend910c-01", "s5000-01"],
+    "missing_device_metrics_are_not_zero": true,
+    "router_internal_waiting_queue_is_not_exposed": true
+  },
+  "capacity": {
+    "formal_pressure_stages_started": false,
+    "max_stable_rate": null,
+    "goodput_at_capacity": null,
+    "recovery_time_seconds": null,
+    "two_hour_stability_verified": false,
+    "scope": "No capacity, overload-recovery or long-term-stability conclusion can be drawn from this failed preflight."
+  },
+  "cleanup": {
+    "controller_exited": true,
+    "all_six_collectors_exited": true,
+    "observer_exited": true,
+    "external_host_process_modified_or_stopped": false,
+    "model_services_restarted": false,
+    "containers_recreated": false,
+    "resource_limits_enabled": false,
+    "raw_diagnostics_preserved_outside_git": true
+  },
+  "reproduction": {
+    "command": "python3 heterogeneous_compute/benchmark.py --system-config heterogeneous_compute/configs/system_benchmark.json --result-dir artifacts/serving/system-benchmark/<NEW_RUN_ID>",
+    "requirements": "Use the existing six-node telemetry and Gateway observer described in heterogeneous_compute/serving.md. Coordinate the .97 host CPU contention before a new full-system run. Keep the same SLO; a new deployment or resource configuration requires a separate run."
+  },
+  "source_sha256": {
+    "heterogeneous_compute/system_benchmark.py": "9b1ff3cf6e0ca2671d69aee3925a18220651bfb21fdeeef0e1251ed8ed775582",
+    "heterogeneous_compute/benchmark_telemetry.py": "d3115ab85165373510d47737a5c98026217cb73f5fe6eebaa649b84fdc2efc11",
+    "heterogeneous_compute/configs/system_benchmark.json": "8485df682a07b92b2b18f6118be28be08a63a7a9f8a5f2af7ebb35e6e434ab14",
+    "heterogeneous_compute/configs/serving.json": "39664a205a5c90a07ad071af59d4ff997ab020eef4368c9c4e6f575bb9366de0"
+  }
+}
