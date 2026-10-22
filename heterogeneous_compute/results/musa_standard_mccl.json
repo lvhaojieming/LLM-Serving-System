@@ -1,0 +1,293 @@
+{
+  "passed": true,
+  "completed_at": "2026-10-22T06:05:15.846428+00:00",
+  "scope": "All eight AWQ replicas on the two retained MUSA nodes use standard MCCL",
+  "configuration": "heterogeneous_compute/configs/native_awq.json",
+  "code_base": "7b964390061e1bfd86512d63b478da25f95ce6ba",
+  "source_sha256": {
+    "heterogeneous_compute/serving.py": "724a03097eeabe6382a68174afe61eab8b7e2fde6719e123dd0acb739981faf9",
+    "heterogeneous_compute/configs/native_awq.json": "4d00046b7be6c824dcea173999757faf3daa9f5f610ab7e0be2ff248f35f6474",
+    "heterogeneous_compute/tests/test_serving.py": "535be936b649dec3b1264de46feeb33006ec58241a9598494f3278268f5f17bc",
+    "heterogeneous_compute/probes/communication_probe.py": "c37ebd2156ca0fb8fe70a92c185a3854853ab774106e8b7e21aec650a0a96ef8"
+  },
+  "model": "Qwen3-14B-AWQ",
+  "tp": 2,
+  "execution_mode": "retained eager",
+  "custom_all_reduce": false,
+  "required_cli_argument": "--disable-custom-all-reduce",
+  "mccl_transport": {
+    "MCCL_NET": "Socket",
+    "MCCL_IB_DISABLE": "1",
+    "MCCL_P2P_DISABLE": "1",
+    "MCCL_SHM_DISABLE": "1"
+  },
+  "symptom": "The .97 device-2/3 replica loaded weights but remained in startup profiling for approximately 30 minutes; it did not listen on its HTTP port.",
+  "resolution": "Explicitly disable the vLLM vendor custom AllReduce path and use standard MCCL; preserve the same model, TP2 partitions, image, container and remaining serving parameters. Apply the same policy to all MUSA replicas.",
+  "diagnosis_limit": "Basic tensor operations and isolated native/custom collective probes passed. The exact internal defect was not isolated; this recovery does not establish hardware P2P failure or prove every custom collective is broken. MCCL_P2P_DISABLE alone does not disable vLLM custom AllReduce.",
+  "workers": [
+    {
+      "service": "musa-awq",
+      "devices": [
+        6,
+        7
+      ],
+      "tp": 2,
+      "standard_mccl": true,
+      "actual_cli_verified": true,
+      "startup_log_verified": true,
+      "mode": "eager",
+      "node": "s5000-01",
+      "inference_passed": true,
+      "answers": [
+        "5",
+        "15",
+        "42",
+        "17"
+      ]
+    },
+    {
+      "service": "musa-97-0",
+      "devices": [
+        0,
+        1
+      ],
+      "tp": 2,
+      "standard_mccl": true,
+      "actual_cli_verified": true,
+      "startup_log_verified": true,
+      "mode": "eager",
+      "node": "s5000-01",
+      "inference_passed": true,
+      "answers": [
+        "5",
+        "15",
+        "42",
+        "17"
+      ]
+    },
+    {
+      "service": "musa-97-1",
+      "devices": [
+        2,
+        3
+      ],
+      "tp": 2,
+      "standard_mccl": true,
+      "actual_cli_verified": true,
+      "startup_log_verified": true,
+      "mode": "eager",
+      "node": "s5000-01",
+      "inference_passed": true,
+      "answers": [
+        "5",
+        "15",
+        "42",
+        "17"
+      ]
+    },
+    {
+      "service": "musa-97-2",
+      "devices": [
+        4,
+        5
+      ],
+      "tp": 2,
+      "standard_mccl": true,
+      "actual_cli_verified": true,
+      "startup_log_verified": true,
+      "mode": "eager",
+      "node": "s5000-01",
+      "inference_passed": true,
+      "answers": [
+        "5",
+        "15",
+        "42",
+        "17"
+      ]
+    },
+    {
+      "service": "musa-96-0",
+      "devices": [
+        0,
+        1
+      ],
+      "tp": 2,
+      "standard_mccl": true,
+      "actual_cli_verified": true,
+      "startup_log_verified": true,
+      "mode": "eager",
+      "node": "s5000-02",
+      "inference_passed": true,
+      "answers": [
+        "5",
+        "15",
+        "42",
+        "17"
+      ]
+    },
+    {
+      "service": "musa-96-1",
+      "devices": [
+        2,
+        3
+      ],
+      "tp": 2,
+      "standard_mccl": true,
+      "actual_cli_verified": true,
+      "startup_log_verified": true,
+      "mode": "eager",
+      "node": "s5000-02",
+      "inference_passed": true,
+      "answers": [
+        "5",
+        "15",
+        "42",
+        "17"
+      ]
+    },
+    {
+      "service": "musa-96-2",
+      "devices": [
+        4,
+        5
+      ],
+      "tp": 2,
+      "standard_mccl": true,
+      "actual_cli_verified": true,
+      "startup_log_verified": true,
+      "mode": "eager",
+      "node": "s5000-02",
+      "inference_passed": true,
+      "answers": [
+        "5",
+        "15",
+        "42",
+        "17"
+      ]
+    },
+    {
+      "service": "musa-96-3",
+      "devices": [
+        6,
+        7
+      ],
+      "tp": 2,
+      "standard_mccl": true,
+      "actual_cli_verified": true,
+      "startup_log_verified": true,
+      "mode": "eager",
+      "node": "s5000-02",
+      "inference_passed": true,
+      "answers": [
+        "5",
+        "15",
+        "42",
+        "17"
+      ]
+    }
+  ],
+  "rollout": {
+    "verified_replicas": 8,
+    "method": "Remove each worker with the official Router REST API, wait for native running/waiting gauges to reach zero, stop/start its registered process, verify real generation, then register again. One replica per node at a time.",
+    "containers_recreated": false,
+    "resource_limits_enabled": false,
+    "retired_baselines_restarted": false,
+    "temporary_per_device_override_removed": true
+  },
+  "tests": {
+    "unit_passed": 81,
+    "warnings": 1,
+    "warning": "Existing Starlette/httpx TestClient deprecation",
+    "all_eight_workers": {
+      "requests_passed": 32,
+      "cases": [
+        [
+          "What is 2+3? Reply with only the digit.",
+          "5"
+        ],
+        [
+          "What is 7+8? Reply with only the number.",
+          "15"
+        ],
+        [
+          "What is 6 times 7? Reply with only the number.",
+          "42"
+        ],
+        [
+          "What is 20 minus 3? Reply with only the number.",
+          "17"
+        ]
+      ]
+    },
+    "original_failed_replica": {
+      "serial_requests_passed": 8,
+      "concurrent_requests_passed": 32,
+      "concurrency": 8,
+      "long_prompt": {
+        "prompt_tokens": 1306,
+        "passed": true
+      },
+      "stream": {
+        "answer": "5",
+        "done": true
+      }
+    },
+    "native_collective_probe": {
+      "backend": "mccl",
+      "ranks": 2,
+      "fp16_shapes": [
+        [
+          1,
+          5120
+        ],
+        [
+          256,
+          5120
+        ],
+        [
+          4096,
+          5120
+        ]
+      ],
+      "all_elements_equal_three": true
+    },
+    "unified_gateway": {
+      "requests_passed": 64,
+      "all_healthy_workers_received_requests": true,
+      "musa_worker_dispatch_deltas": {
+        "musa-97-0": 3.0,
+        "musa-97-1": 3.0,
+        "musa-97-2": 2.0,
+        "musa-96-0": 2.0,
+        "musa-96-1": 3.0,
+        "musa-96-2": 2.0,
+        "musa-96-3": 2.0,
+        "musa-awq": 2.0
+      }
+    }
+  },
+  "versions": {
+    "s5000-01": {
+      "torch": "2.5.0",
+      "torch-musa": "2.5.0",
+      "vllm": "0.9.3.dev0+ga5dd03c1e.d20260309.empty",
+      "transformers": "4.52.4"
+    },
+    "s5000-02": {
+      "torch": "2.5.0",
+      "torch-musa": "2.5.0",
+      "vllm": "0.9.3.dev0+ga5dd03c1e.d20260309.empty",
+      "transformers": "4.52.4"
+    }
+  },
+  "remaining_system_issues": [
+    "Ascend .23 logical devices 4-9 still fail initialization; three target replicas remain unavailable.",
+    "Iluvatar .58 is not activated; connectivity and hardware/runtime inventory remain pending."
+  ],
+  "not_validated": [
+    "Sustained stability",
+    "Maximum stable request rate",
+    "Comparable graph-mode performance"
+  ],
+  "seed": 20261010
+}

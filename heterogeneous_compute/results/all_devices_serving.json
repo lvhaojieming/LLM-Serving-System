@@ -1,12 +1,12 @@
 {
-  "recorded_at": "2026-10-22T05:17:11.277775+00:00",
+  "recorded_at": "2026-10-22T06:04:32.392969+00:00",
   "scope": "Five reachable nodes, all-device AWQ replica configuration and functional acceptance; sixth node pending connectivity",
   "full_deployment_passed": false,
   "gateway": "http://192.168.162.60:18600",
   "configuration": "heterogeneous_compute/configs/serving.json",
-  "code_base": "2f5d0def8078acd5d0a7a313968ef9cfc8a73b5e",
+  "code_base": "7b964390061e1bfd86512d63b478da25f95ce6ba",
   "source_sha256": {
-    "heterogeneous_compute/serving.py": "1be868cb9f3e792f7163191e89b1baecc5e6a7e8bdb3d256fe22543f61fff8a2",
+    "heterogeneous_compute/serving.py": "724a03097eeabe6382a68174afe61eab8b7e2fde6719e123dd0acb739981faf9",
     "heterogeneous_compute/configs/serving.json": "8544ad2b75c374a6d4cb93f9dfe71098726ba7d49c63266842682df306095374",
     "homogeneous/src/heteroserve/gateway.py": "8eb0ff9ee4332a27044f168908eff25acd0f5cba10b27611a34dfdce6a8e8e97",
     "homogeneous/src/heteroserve/routing/runtime.py": "70a89148d57df717fdd4d07abe3aab2cb69e72e4f0d6edc3cef30987a89a51b6",
@@ -17,19 +17,20 @@
     "homogeneous/tests/test_gateway.py": "8b6ea361f5e16fe776415154881cb65eab3399931449ede13dec07398e007b5e",
     "heterogeneous_compute/quantization/deploy.py": "5c76cff0a9b9971cb72fb511f54c424e83cbd215abace5ce39472eb2b0a65e8c",
     "heterogeneous_compute/quantization/deployment.json": "46163b0c099917c333b26c2ea78a65ca42a86fb72031b3652d83384fb36fa9ea",
-    "heterogeneous_compute/configs/native_awq.json": "920ca7860a8471c713bbe74890a81301793bede64f2c57d75ffcd4b26fd1b1da",
+    "heterogeneous_compute/configs/native_awq.json": "4d00046b7be6c824dcea173999757faf3daa9f5f610ab7e0be2ff248f35f6474",
     "heterogeneous_compute/tests/test_quantization_deployment.py": "71f136cbe526aa4eed13d6adc5abf33796b3645f0a16a862ca7c0636aab881e2",
     "heterogeneous_compute/tests/test_model_download.py": "d51fb7885a93c221821b1ea13dbb7c4218f92fd47ce2541fae60d1ae036e4b9a",
     "heterogeneous_compute/tests/test_int4_compilation.py": "bc42c4c613a90f11ae0c3d07bdf5b6d3c0121a0cad7502134322b4f3f87faffe",
-    "heterogeneous_compute/tests/test_serving.py": "60d74bd00d99a63502c50b79dd264d65a888d2fa9bfd686294cac2f97a163f01",
+    "heterogeneous_compute/tests/test_serving.py": "535be936b649dec3b1264de46feeb33006ec58241a9598494f3278268f5f17bc",
     "shared/download_model.py": "90a46508a03c44325ad82658340fe6972c89fa941c552d4f68b9545fd27f7de6",
     "shared/ascend_int4/vllm_adapter.py": "88786ee1eed221328a93addf241bb02cdddbdd5486099e003b96befeeba3ee5e",
+    "heterogeneous_compute/probes/communication_probe.py": "c37ebd2156ca0fb8fe70a92c185a3854853ab774106e8b7e21aec650a0a96ef8",
     "shared/ascend_int4/layout.py": "dbdec9229d4143b24ab573df515db6fee186d960be04f3847af75af458d306fc",
     "shared/ascend_int4/sitecustomize.py": "600e6043d79f5242874457e98fa81a5a6a426b049516b311a3823eeba517ab18"
   },
   "seed": 20261010,
   "tests": {
-    "passed": 80,
+    "passed": 81,
     "warnings": 1,
     "warning": "Existing Starlette/httpx TestClient deprecation"
   },
@@ -56,8 +57,8 @@
       "node": "s5000-01",
       "logical_devices_target": 8,
       "awq_replicas_target": 4,
-      "awq_replicas_verified": 3,
-      "logical_devices_verified": 6,
+      "awq_replicas_verified": 4,
+      "logical_devices_verified": 8,
       "reserved_for_embedding": []
     },
     {
@@ -91,7 +92,7 @@
       "expert_coverage_complete": false,
       "worker_coverage_complete": false,
       "expected_workers": 32,
-      "healthy_workers": 28,
+      "healthy_workers": 29,
       "l1_router_ready": null,
       "auto_expert_coverage_complete": false
     },
@@ -124,8 +125,7 @@
     "missing_healthy_workers": [
       "http://192.168.162.23:18702",
       "http://192.168.162.23:18703",
-      "http://192.168.162.23:18704",
-      "http://192.168.162.97:18741"
+      "http://192.168.162.23:18704"
     ],
     "unexpected_healthy_workers": [],
     "official_router": {
@@ -133,38 +133,38 @@
       "pooled_requests": 64,
       "concurrency": 4,
       "worker_dispatch_deltas": {
-        "http://192.168.162.97:18740": 2.0,
-        "http://192.168.162.96:18761": 2.0,
-        "http://192.168.162.60:18780": 3.0,
+        "http://192.168.162.96:18762": 2.0,
+        "http://192.168.162.23:18706": 2.0,
+        "http://192.168.162.60:18786": 3.0,
+        "http://192.168.162.60:18785": 2.0,
         "http://192.168.162.23:18702": 0,
-        "http://192.168.162.97:18742": 2.0,
-        "http://192.168.162.96:18763": 2.0,
-        "http://192.168.162.23:18705": 2.0,
-        "http://192.168.162.23:18704": 0,
-        "http://192.168.162.23:18700": 3.0,
-        "http://192.168.162.24:18724": 2.0,
-        "http://192.168.162.60:18460": 2.0,
-        "http://192.168.162.24:18727": 3.0,
-        "http://192.168.162.23:18707": 3.0,
-        "http://192.168.162.97:18497": 2.0,
         "http://192.168.162.24:18723": 2.0,
+        "http://192.168.162.97:18741": 3.0,
+        "http://192.168.162.23:18707": 2.0,
+        "http://192.168.162.24:18722": 3.0,
+        "http://192.168.162.23:18703": 0,
         "http://192.168.162.60:18782": 2.0,
-        "http://192.168.162.24:18722": 2.0,
+        "http://192.168.162.60:18787": 2.0,
+        "http://192.168.162.24:18726": 2.0,
+        "http://192.168.162.23:18705": 2.0,
+        "http://192.168.162.24:18721": 2.0,
+        "http://192.168.162.24:18725": 2.0,
+        "http://192.168.162.96:18763": 2.0,
+        "http://192.168.162.96:18761": 3.0,
+        "http://192.168.162.24:18724": 2.0,
+        "http://192.168.162.97:18740": 3.0,
+        "http://192.168.162.97:18497": 2.0,
+        "http://192.168.162.23:18704": 0,
+        "http://192.168.162.23:18701": 2.0,
+        "http://192.168.162.60:18460": 3.0,
+        "http://192.168.162.97:18742": 2.0,
+        "http://192.168.162.60:18784": 2.0,
+        "http://192.168.162.60:18780": 2.0,
+        "http://192.168.162.23:18700": 2.0,
         "http://192.168.162.96:18760": 2.0,
         "http://192.168.162.60:18783": 2.0,
-        "http://192.168.162.96:18762": 3.0,
-        "http://192.168.162.60:18786": 2.0,
-        "http://192.168.162.24:18726": 3.0,
-        "http://192.168.162.23:18701": 3.0,
-        "http://192.168.162.60:18784": 2.0,
-        "http://192.168.162.60:18785": 2.0,
-        "http://192.168.162.24:18424": 2.0,
-        "http://192.168.162.97:18741": 0,
-        "http://192.168.162.60:18787": 2.0,
-        "http://192.168.162.23:18703": 0,
-        "http://192.168.162.23:18706": 3.0,
-        "http://192.168.162.24:18725": 2.0,
-        "http://192.168.162.24:18721": 2.0
+        "http://192.168.162.24:18727": 2.0,
+        "http://192.168.162.24:18424": 2.0
       }
     },
     "embedding": {
@@ -174,7 +174,7 @@
       "duplicate_consistency": true
     },
     "scope": "Functional acceptance only; no throughput/stability/Kubernetes or cross-vendor PP claim",
-    "completed_at": "2026-10-22T05:17:11.277775+00:00",
+    "completed_at": "2026-10-22T06:04:32.392969+00:00",
     "verified_workers": [
       "ascend-23-0",
       "ascend-23-1",
@@ -190,6 +190,7 @@
       "ascend-24-6",
       "ascend-24-7",
       "musa-97-0",
+      "musa-97-1",
       "musa-97-2",
       "musa-awq",
       "musa-96-0",
@@ -232,21 +233,12 @@
         ],
         "passed": false,
         "error": "<urlopen error [Errno 111] Connection refused>"
-      },
-      {
-        "worker": "musa-97-1",
-        "devices": [
-          2,
-          3
-        ],
-        "passed": false,
-        "error": "<urlopen error [Errno 111] Connection refused>"
       }
     ]
   },
   "execution_modes": {
     "ascend": "Native aclgraph capture and replay confirmed on each responding AWQ replica; blocked replicas do not initialize devices",
-    "musa": "Explicit retained eager profile; vendor INT4 weight dequantization followed by FP16 matmul",
+    "musa": "Explicit retained eager profile; standard MCCL on all eight replicas; vLLM custom AllReduce disabled; vendor INT4 weight dequantization followed by FP16 matmul",
     "iluvatar": "Explicit retained eager profile; vendor cuinfer AWQ GEMM, torch AWQ fallback disabled"
   },
   "runtimes": [
@@ -386,14 +378,6 @@
       "node": "iluvatar150-01",
       "observed": "SSH to .58:14735 unavailable directly and via .60; internal TCP connectivity also timed out.",
       "action_required": "Restore connectivity, inspect inventory/old jobs, verify model/runtime, then activate the disabled replica group."
-    },
-    {
-      "node": "s5000-01",
-      "observed": "Some additional replicas still warming up at this snapshot; no failed hardware conclusion",
-      "workers": [
-        "musa-97-1"
-      ],
-      "action_taken": "Keep the authorized startup running; do not restart or reset progressing workers."
     }
   ],
   "not_validated": [

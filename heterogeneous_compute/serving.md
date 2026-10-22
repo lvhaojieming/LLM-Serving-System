@@ -35,6 +35,9 @@ embedding 用 `/v1/embeddings`。昇腾容器映射八张物理卡对应的十�
 
 AWQ 权重来源与算子差异见 `configs/native_awq.json`。摩尔和天数现有实例
 显式保留原配置的 eager；昇腾新启动默认厂商图模式，`.24` 开启 cudagraph metrics。
+两台摩尔节点的全部 AWQ 副本必须显式设置 `--disable-custom-all-reduce`，
+统一使用标准 MCCL。`MCCL_P2P_DISABLE=1` 仅约束 MCCL，不能替代这个 vLLM 参数。
+启动验收同时核对实际命令和日志中的 `disable_custom_all_reduce=True`。
 实际图捕获／回放必须依据运行证据，不能仅凭省略 eager 参数判断。
 本轮不启用原 AWQ/GPTQ 学习路由头，其标签不代表三家硬件。`auto` 不开放。
 Embedding 单独提供向量接口，下载模型不等于恢复旧训练头。
@@ -107,5 +110,10 @@ HTTP 200 也可能只表示部分服务可用。Gateway 还核对官方 `/worker
 `.23` 的逻辑设备 4–9 在 `torch.npu.set_device` 阶段出现 507033、TSD/HDC 错误；
 对应三个副本已停止，不能计入实际覆盖。其他同容器昇腾副本已真实生成并回放图。
 同机存在其他用户容器；未重置设备、重启主机或重启共享驱动服务。
-`.97` 的慢启动副本保持原启动任务，不因等待较久而反复重启。
+`.97` 设备 2/3 的副本曾在权重加载完成后长期停留在启动试运行。
+关闭 vLLM 自定义 AllReduce、走标准 MCCL 后，已通过连续／并发、长输入、SSE
+和官方 Router 分发验证；这不证明硬件 P2P 已损坏，也不等于长期稳定性验收。
+同一标准 MCCL 配置应用于全部摩尔副本，修复及滚动更新结果按实际验收摘要记录。
+全部摩尔副本的标准 MCCL 验收与复现信息见
+[`results/musa_standard_mccl.json`](results/musa_standard_mccl.json)。
 结果中的未通过项必须在恢复后重新执行 `verify`，不能只依据进程存在或健康接口判断通过。

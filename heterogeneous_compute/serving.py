@@ -525,6 +525,7 @@ def main():
                    ROOT / "heterogeneous_compute/tests/test_quantization_deployment.py",
                    ROOT / "heterogeneous_compute/tests/test_model_download.py", ROOT / "heterogeneous_compute/tests/test_int4_compilation.py",
                    ROOT / "heterogeneous_compute/tests/test_serving.py", ROOT / "shared/download_model.py", ROOT / "shared/ascend_int4/vllm_adapter.py",
+                   ROOT / "heterogeneous_compute/probes/communication_probe.py",
                    ROOT / "shared/ascend_int4/layout.py", ROOT / "shared/ascend_int4/sitecustomize.py"]
         manifest = ROOT / config["result_dir"] / "source-manifest.json"
         save(manifest, {"git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),

@@ -138,3 +138,13 @@ def test_stop_continues_after_an_ascend_startup_has_already_exited(tmp_path, mon
     monkeypatch.setattr(serving, 'stamp', lambda pid: None)
     monkeypatch.setattr(deploy, 'stop_server', lambda *args: (_ for _ in ()).throw(AssertionError('exited PID signalled')))
     serving.local(cfg, 'stop', 'ascend-awq')
+
+
+def test_all_musa_replicas_use_standard_mccl_and_disable_custom_allreduce():
+    cfg = expand_config(config())
+    names = [name for name, service in cfg['services'].items() if service.get('vendor') == 'musa']
+    assert len(names) == 8
+    for name in names:
+        argv, _ = commands(cfg, name)
+        assert '--disable-custom-all-reduce' in argv
+        assert '--enforce-eager' in argv and argv[argv.index('--tensor-parallel-size') + 1] == '2'

@@ -1,5 +1,29 @@
 # Ascend / MUSA TP2 PP2 transport preflight
 
+## 单节点标准集合通信诊断
+
+`communication_probe.py --local-only` 只启动两个诊断 rank，不加载模型，不启动 PP。
+摩尔固定走标准 MCCL，昇腾走 HCCL。以下在 `.97` 的现有摩尔容器内执行；
+端口应选当前未占用值，两个 rank 并行运行：
+
+```bash
+for rank in 0 1; do
+  MUSA_VISIBLE_DEVICES=2,3 MTHREADS_VISIBLE_DEVICES=2,3 OMP_NUM_THREADS=4 \
+  MCCL_IB_DISABLE=1 MCCL_NET=Socket MCCL_P2P_DISABLE=1 MCCL_SHM_DISABLE=1 \
+  MCCL_SOCKET_IFNAME=ens18f0 GLOO_SOCKET_IFNAME=ens18f0 \
+  timeout -k 2 65 python3 /workspace/heterogeneous_compute/probes/communication_probe.py \
+    --local-only --device musa --rank "$rank" --master 127.0.0.1 --port 29671 \
+    --rows 1 256 4096 --output "/workspace/artifacts/collectives/rank${rank}.json" &
+done
+wait
+```
+
+验证每个 rank 的 `[rows,5120]` FP16 张量相加后逐元素等于 3。
+报告中的首次调用包含上下文与通信初始化，不能作为吞吐或通信带宽结果。
+单卡计算、集合通信分别通过，也不能代替真实模型及 Gateway 的端到端验收。
+
+## 早期跨厂商传输实验
+
 Subsequent real-model adaptation and functional acceptance are documented in
 `heterogeneous_compute/README.md`. The following records the earlier
 transport-only preflight; it is not the current deployment status.

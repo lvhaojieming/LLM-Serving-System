@@ -10,6 +10,49 @@ import time
 from pathlib import Path
 
 
+def local_collective(args):
+    """Exercise native TP collectives without loading or restarting a model."""
+    import torch
+    import torch.distributed as dist
+    if args.device == 'musa':
+        import torch_musa  # noqa: F401
+    else:
+        import torch_npu  # noqa: F401
+    accelerator = getattr(torch, args.device)
+    backend = 'mccl' if args.device == 'musa' else 'hccl'
+    report = dict(rank=args.rank, device=args.device, collective=backend,
+                  rows=[], passed=False, torch=torch.__version__, model_loaded=False)
+    try:
+        accelerator.set_device(args.rank)
+        dist.init_process_group(backend, init_method=f'tcp://{args.master}:{args.port}',
+                                rank=args.rank, world_size=2, timeout=datetime.timedelta(seconds=20))
+        for rows in args.rows:
+            tensor = torch.full((rows, 5120), args.rank + 1, dtype=torch.float16,
+                                device=f'{args.device}:{args.rank}')
+            accelerator.synchronize()
+            start = time.perf_counter()
+            dist.all_reduce(tensor)
+            accelerator.synchronize()
+            passed = bool(torch.all(tensor == 3).cpu().item())
+            report['rows'].append(dict(rows=rows, passed=passed, elapsed_seconds=time.perf_counter()-start))
+            if not passed:
+                raise ValueError('Incorrect AllReduce result')
+        report['passed'] = True
+    except Exception as error:
+        report['error'] = str(error)
+    finally:
+        if dist.is_initialized():
+            try:
+                dist.destroy_process_group()
+            except Exception as error:
+                report['group_cleanup_error'] = str(error)
+        path = Path(args.output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=2))
+        print(json.dumps(report), flush=True)
+    return report['passed']
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--rank', type=int, required=True)
@@ -18,7 +61,15 @@ def main():
     parser.add_argument('--port', type=int, default=29643)
     parser.add_argument('--local-master')
     parser.add_argument('--output', required=True)
+    parser.add_argument('--local-only', action='store_true', help='Two local ranks, no PP or model loading')
+    parser.add_argument('--rows', nargs='+', type=int, default=[1, 256])
     args = parser.parse_args()
+    if args.local_only:
+        if args.rank not in (0, 1) or any(n < 1 for n in args.rows):
+            parser.error('Local TP needs rank 0/1 and positive row counts')
+        if not local_collective(args):
+            raise SystemExit(1)
+        return
     import torch
     if args.device == 'npu':
         import torch_npu  # noqa: F401
