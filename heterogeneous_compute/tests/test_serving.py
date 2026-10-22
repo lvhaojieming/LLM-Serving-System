@@ -1,7 +1,8 @@
 import copy
 import json
 from pathlib import Path
-from heterogeneous_compute.serving import fingerprint, gateway_config, live, local
+import pytest
+from heterogeneous_compute.serving import commands, expand_config, fingerprint, gateway_config, generation_workers, live, local, native_spec, serve_signature
 
 
 def config():
@@ -36,3 +37,104 @@ def test_stop_does_not_signal_a_reused_or_foreign_pid(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "killpg", lambda *args: (_ for _ in ()).throw(AssertionError("foreign PID signalled")))
     assert not live(marker)
     local(cfg, "stop", "embedding")
+
+
+def test_native_process_matching_accepts_shebang_and_equivalent_numeric_arguments():
+    a = ['/usr/bin/python', '/usr/local/bin/vllm', 'serve', '/models/Qwen3-14B-AWQ', '--dtype', 'half', '--port', '18497', '--gpu-memory-utilization', '0.60']
+    b = ['vllm', 'serve', '/models/Qwen3-14B-AWQ', '--port', '18497', '--gpu-memory-utilization', '0.6', '--dtype', 'float16']
+    assert serve_signature(a) == serve_signature(b)
+    b[b.index('18497')] = '18498'
+    assert serve_signature(a) != serve_signature(b)
+
+
+def test_native_process_matching_rejects_other_models_and_non_vllm_commands():
+    assert serve_signature(['python3', '-m', 'another_server', 'serve', '/models/Qwen3-14B-AWQ']) is None
+    a = ['vllm', 'serve', '/models/Qwen3-14B-AWQ', '--quantization', 'awq']
+    b = ['vllm', 'serve', '/models/Qwen3-14B', '--quantization', 'awq']
+    assert serve_signature(a) != serve_signature(b)
+
+
+@pytest.mark.parametrize('name,vendor', [('musa-awq', 'musa'), ('iluvatar-awq', 'iluvatar')])
+def test_native_lifecycle_uses_retained_vendor_configuration(name, vendor):
+    argv, env = commands(config(), name)
+    assert argv[argv.index('--quantization') + 1] == 'awq'
+    assert argv[argv.index('--tensor-parallel-size') + 1] == '2'
+    # These existing native profiles explicitly retain eager; no implicit mode switch.
+    assert '--enforce-eager' in argv
+    if vendor == 'musa':
+        assert env['MUSA_VISIBLE_DEVICES'] == '6,7' and '--block-size' in argv
+    else:
+        assert env['CUDA_VISIBLE_DEVICES'] == '2,3' and env['KERNEL_BACKEND'] == 'awq_gemm:cuinfer'
+
+
+def test_start_refuses_live_retired_experiments(monkeypatch):
+    import heterogeneous_compute.serving as serving
+    monkeypatch.setattr(serving, 'legacy_processes', lambda: [{'pid': 123, 'argv': ['old-pp']}])
+    with pytest.raises(RuntimeError, match='123'):
+        local(config(), 'start', 'musa-awq')
+
+
+def test_expansion_covers_all_devices_on_five_active_nodes_without_embedding_overlap():
+    cfg = expand_config(config())
+    assert len(generation_workers(cfg)) == 32
+    assert not any(s['node'] == 'iluvatar150-01' for s in cfg['services'].values())
+    used = {}
+    for worker in cfg['workers'].values():
+        entries = used.setdefault(worker['node'], [])
+        assert not set(entries).intersection(worker['devices'])
+        entries.extend(worker['devices'])
+    used['ascend910c-02'].append(2)  # Embedding reservation.
+    assert {n:len(d) for n,d in used.items()} == {'ascend910c-01':16,'ascend910c-02':16,'s5000-01':8,'s5000-02':8,'iluvatar150-02':16}
+    assert len(gateway_config(cfg)['worker_registry']['expected_urls']) == 32
+
+
+def test_expansion_rejects_overlapping_and_missing_device_partitions():
+    cfg = config()
+    cfg['replica_groups'][0]['device_sets'][1] = [1,2]
+    with pytest.raises(ValueError, match='Overlapping'):
+        expand_config(cfg)
+    cfg = config()
+    cfg['replica_groups'][0]['device_sets'].pop()
+    with pytest.raises(ValueError, match='incomplete'):
+        expand_config(cfg)
+
+
+def test_replica_overrides_keep_vendor_runtime_and_select_new_node_devices():
+    cfg = expand_config(config())
+    spec, target = native_spec(cfg['services']['musa-96-2'])
+    assert spec['tp'] == 2 and target['host'] == '192.168.162.96' and target['port'] == 18762
+    assert target['env']['MUSA_VISIBLE_DEVICES'] == '4,5'
+    assert target['env']['GLOO_SOCKET_IFNAME'] == 'ens21f0'
+    assert cfg['services']['ascend-24-1']['overrides']['tp'] == 1
+
+
+def test_worker_acceptance_retains_failures_and_tests_reachable_workers(monkeypatch):
+    import urllib.error
+    import heterogeneous_compute.serving as serving
+    cfg = {'workers': {
+        'working': {'base_url': 'http://working/v1', 'model': 'AWQ', 'devices': [0, 1]},
+        'offline': {'base_url': 'http://offline/v1', 'model': 'AWQ', 'devices': [2, 3]},
+        'wrong_answer': {'base_url': 'http://wrong/v1', 'model': 'AWQ', 'devices': [4, 5]},
+    }}
+    def request(url, body, timeout):
+        if 'offline' in url:
+            raise urllib.error.URLError('connection refused')
+        return {'choices': [{'message': {'content': '5' if 'working' in url else '4'}}]}
+    monkeypatch.setattr(serving, 'http', request)
+    results = {r['worker']: r for r in serving.verify_workers(cfg)}
+    assert results['working']['passed'] is True
+    assert results['offline']['passed'] is False and 'refused' in results['offline']['error']
+    assert results['wrong_answer']['passed'] is False and results['wrong_answer']['answer'] == '4'
+
+
+def test_stop_continues_after_an_ascend_startup_has_already_exited(tmp_path, monkeypatch):
+    import heterogeneous_compute.serving as serving
+    import heterogeneous_compute.quantization.deploy as deploy
+    cfg = config()
+    cfg['result_dir'] = str(tmp_path)
+    marker = tmp_path / 'ascend-awq/awq/server.json'
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({'pid': 12345}))
+    monkeypatch.setattr(serving, 'stamp', lambda pid: None)
+    monkeypatch.setattr(deploy, 'stop_server', lambda *args: (_ for _ in ()).throw(AssertionError('exited PID signalled')))
+    serving.local(cfg, 'stop', 'ascend-awq')

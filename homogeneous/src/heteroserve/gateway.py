@@ -48,6 +48,13 @@ def validate(config):
             raise ValueError("Pool task must be generate or embed")
     if type(config.get("max_inflight", 16)) is not int or config.get("max_inflight", 16) < 1:
         raise ValueError("Gateway requires a positive request budget")
+    registry = config.get("worker_registry")
+    if registry is not None:
+        if (not isinstance(registry, dict) or not isinstance(registry.get("url"), str)
+                or not registry["url"].startswith("http://") or not isinstance(registry.get("expected_urls"), list)
+                or not registry["expected_urls"] or any(not isinstance(u, str) or not u.startswith("http://") for u in registry["expected_urls"])
+                or len(set(registry["expected_urls"])) != len(registry["expected_urls"])):
+            raise ValueError("worker_registry requires an HTTP URL and unique expected worker URLs")
     return settings
 
 
@@ -109,10 +116,29 @@ def create_app(config, transport=None, router_runtime=None):
                 pass
         if healthy:
             l1_ready = (await runtime.ready() if getattr(runtime, "remote", False) else True) if learned_enabled else None
-            coverage_complete = len(healthy) == len(config["pools"])
+            worker_coverage = True
+            expected_workers = healthy_workers = None
+            if config.get("worker_registry"):
+                registry = config["worker_registry"]
+                expected = set(registry["expected_urls"])
+                expected_workers = len(expected)
+                healthy_workers = 0
+                worker_coverage = False
+                try:
+                    response = await app.state.client.get(registry["url"], timeout=3)
+                    if response.status_code == 200:
+                        rows = response.json().get("workers", [])
+                        actual = {r.get("url") for r in rows if isinstance(r, dict) and r.get("is_healthy") is True}
+                        healthy_workers = len(expected & actual)
+                        worker_coverage = actual == expected
+                except (httpx.HTTPError, ValueError, AttributeError, TypeError):
+                    pass
+            coverage_complete = len(healthy) == len(config["pools"]) and worker_coverage
             return {"ready": True, "ready_experts": healthy,
                     "learned_routing_enabled": learned_enabled,
                     "expert_coverage_complete": coverage_complete,
+                    "worker_coverage_complete": worker_coverage,
+                    "expected_workers": expected_workers, "healthy_workers": healthy_workers,
                     "l1_router_ready": l1_ready,
                     "auto_expert_coverage_complete": learned_enabled and l1_ready and coverage_complete}
         raise HTTPException(503, "no ready downstream expert pool")

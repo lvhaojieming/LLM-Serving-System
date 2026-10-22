@@ -14,10 +14,22 @@
   "download_report": "/home/zhangjinhao/LLM-Serving-System/artifacts/model-distribution/awq/source-check.json",
   "peers": [
     [
+      "ascend910c-01",
+      "192.168.162.23",
+      22,
+      "172.22.162.23"
+    ],
+    [
       "s5000-01",
       "192.168.162.97",
       22,
       "172.22.162.97"
+    ],
+    [
+      "s5000-02",
+      "192.168.162.96",
+      22,
+      "172.22.162.96"
     ],
     [
       "iluvatar150-02",

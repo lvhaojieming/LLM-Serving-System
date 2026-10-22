@@ -350,3 +350,20 @@ def test_task_mismatch_and_invalid_embedding_requests_do_not_dispatch(endpoint, 
     with TestClient(app) as client:
         assert client.post("/v1/" + endpoint, json=payload).status_code == 400
         assert app.state.gateway["inflight"] == 0
+
+
+@pytest.mark.parametrize('healthy,complete', [(1,False),(2,True),(3,False)])
+def test_readiness_requires_exact_healthy_replica_registry(healthy, complete):
+    cfg = explicit_config()
+    urls = ['http://w1:8000','http://w2:8000','http://unexpected:8000']
+    cfg['worker_registry'] = {'url':'http://router/workers','expected_urls':urls[:2]}
+    def backend(request):
+        if request.url.path == '/workers':
+            return httpx.Response(200,json={'workers':[{'url':u,'is_healthy':True} for u in urls[:healthy]]})
+        if request.url.path == '/v1/models':
+            return httpx.Response(200,json={'data':[{'id':'Qwen3-14B-AWQ'}]})
+        return httpx.Response(200)
+    with TestClient(create_app(cfg,httpx.MockTransport(backend))) as client:
+        ready = client.get('/ready').json()
+        assert ready['expert_coverage_complete'] is complete
+        assert ready['worker_coverage_complete'] is complete and ready['expected_workers']==2

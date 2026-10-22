@@ -5,14 +5,22 @@ Dense AWQ GEMM / GPTQ legacy, TP1/TP2, group128. No CUDA or FP16-weight fallback
 import json
 import torch
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                              register_weight_loader_v2_supported_method)
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+try:
+    from vllm.model_executor.layers.linear import register_weight_loader_v2_supported_method
+except ImportError:
+    # vLLM 0.11 exposes the same loader registry as a class-name list.
+    from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
+    def register_weight_loader_v2_supported_method(cls):
+        if cls.__name__ not in WEIGHT_LOADER_V2_SUPPORTED:
+            WEIGHT_LOADER_V2_SUPPORTED.append(cls.__name__)
+        return cls
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.parameter import (PackedvLLMParameter,
                                          GroupQuantScaleParameter, RowvLLMParameter)
 from shared.ascend_int4.layout import decode, repack, matmul
-
+from vllm.platforms import current_platform
 
 @register_quantization_config('moqe_ascend_int4')
 class AscendInt4Config(QuantizationConfig):
@@ -62,6 +70,12 @@ class AscendInt4Config(QuantizationConfig):
         if isinstance(layer, LinearBase) and not prefix.endswith('lm_head'):
             return AscendInt4LinearMethod(self)
         return None
+
+
+# Older NPU plugins do not extend their allowlist when a custom config registers.
+# This opt-in extension implements the native NPU operator for this exact method.
+if current_platform.device_name == 'npu' and 'moqe_ascend_int4' not in current_platform.supported_quantization:
+    current_platform.supported_quantization.append('moqe_ascend_int4')
 
 
 @register_weight_loader_v2_supported_method

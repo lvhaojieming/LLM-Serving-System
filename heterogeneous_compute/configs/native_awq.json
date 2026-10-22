@@ -49,6 +49,7 @@
         7
       ],
       "port": 18497,
+      "engine_args": ["--block-size", "32"],
       "result_dir": "/workspace/artifacts/baselines/native-awq/musa",
       "kernel_path": "Vendor AWQLinearMethod: awq_dequantize_triton + FP16 torch.matmul; INT4 stored weights, not fused INT4 GEMM",
       "env": {
