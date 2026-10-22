@@ -1,6 +1,7 @@
 {
   "resource_limits_enabled": false,
   "legacy_baselines_enabled": false,
+  "required_awq_tp": 2,
   "result_dir": "artifacts/serving",
   "gateway": {
     "host": "0.0.0.0",
@@ -37,7 +38,7 @@
     },
     "embedding": {
       "model": "Qwen3-Embedding-0.6B",
-      "base_url": "http://192.168.162.24:18427/v1",
+      "base_url": "http://192.168.162.58:18458/v1",
       "health_path": "/health",
       "verify_model_identity": true,
       "task": "embed"
@@ -66,29 +67,32 @@
       "vendor": "iluvatar"
     },
     "embedding": {
-      "node": "ascend910c-02",
-      "container": "heteroserve-ascend-w4",
+      "node": "iluvatar150-01",
+      "container": "heteroserve-iluvatar",
+      "enabled": true,
       "driver": "embedding",
-      "model_path": "/quantization/models/Qwen3-Embedding-0.6B",
+      "model_path": "/models/Qwen3-Embedding-0.6B",
       "source": {
         "model": "Qwen/Qwen3-Embedding-0.6B",
         "revision": "dd3e37eb506b3addbd930037796e25d349ae9010",
         "provider": "modelscope.cn"
       },
       "argv": [
-        "python3",
-        "-m",
-        "vllm.entrypoints.cli.main",
+        "vllm",
         "serve",
-        "/quantization/models/Qwen3-Embedding-0.6B",
+        "/models/Qwen3-Embedding-0.6B",
         "--served-model-name",
         "Qwen3-Embedding-0.6B",
         "--runner",
         "pooling",
+        "--tensor-parallel-size",
+        "2",
+        "--pipeline-parallel-size",
+        "1",
         "--host",
-        "192.168.162.24",
+        "192.168.162.58",
         "--port",
-        "18427",
+        "18458",
         "--dtype",
         "bfloat16",
         "--max-model-len",
@@ -99,17 +103,34 @@
         "2048",
         "--gpu-memory-utilization",
         "0.15",
-        "--no-enable-prefix-caching",
+        "--disable-custom-all-reduce",
         "--seed",
         "20261010"
       ],
       "env": {
-        "ASCEND_RT_VISIBLE_DEVICES": "2",
+        "CUDA_VISIBLE_DEVICES": "12,13",
+        "IX_VISIBLE_DEVICES": "12,13",
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
         "VLLM_NO_USAGE_STATS": "1",
         "OMP_NUM_THREADS": "4",
-        "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "NCCL_IB_DISABLE": "1",
+        "NCCL_CUMEM_ENABLE": "0",
+        "NCCL_SOCKET_IFNAME": "enp147s0f0",
+        "GLOO_SOCKET_IFNAME": "enp147s0f0",
+        "VLLM_NCCL_SO_PATH": "/usr/local/corex/lib64/libixsysnccl.so"
+      },
+      "runtime_profile": {
+        "image": "sha256:b01fe538df482b10418548d9d43ac15a348e2e30c218c9d75eb7c12ae195dbc4",
+        "logical_devices": [
+          12,
+          13
+        ],
+        "tp": 2,
+        "pp": 1,
+        "runner": "pooling",
+        "execution_mode": "Default vendor execution mode; verify actual startup and request evidence before claiming graph execution"
       }
     },
     "router": {
@@ -186,6 +207,7 @@
           1
         ],
         [
+          2,
           3
         ],
         [
@@ -217,9 +239,7 @@
       "reuse": {
         "0,1": "ascend-awq"
       },
-      "reserved_devices": [
-        2
-      ],
+      "reserved_devices": [],
       "communication_port_start": 40000,
       "cudagraph_metrics": true
     },
@@ -309,24 +329,9 @@
         [
           6,
           7
-        ],
-        [
-          8,
-          9
-        ],
-        [
-          10,
-          11
-        ],
-        [
-          12,
-          13
-        ],
-        [
-          14,
-          15
         ]
       ],
+      "reserved_devices": [8, 9, 10, 11, 12, 13, 14, 15],
       "model_path": "/models/Qwen3-14B-AWQ",
       "reuse": {
         "2,3": "iluvatar-awq"
@@ -335,8 +340,23 @@
     {
       "name": "iluvatar-58",
       "node": "iluvatar150-01",
-      "enabled": false,
-      "pending_reason": "SSH unreachable; hardware inventory, old task cancellation and model/runtime verification required before activation"
+      "container": "heteroserve-iluvatar",
+      "template": "iluvatar-awq",
+      "host": "192.168.162.58",
+      "interface": "enp147s0f0",
+      "port_start": 18800,
+      "device_count": 16,
+      "device_sets": [[0, 3], [4, 5], [6, 7], [8, 9]],
+      "reserved_devices": [1, 2, 10, 11, 12, 13, 14, 15],
+      "reserved_usage": {
+        "1,2": "Preserve existing vllm-g9-w8a8",
+        "12,13": "Qwen3-Embedding-0.6B TP2; disjoint from AWQ",
+        "15": "Preserve existing mineru-api",
+        "10,11,14": "Outside the current AWQ and Embedding budget"
+      },
+      "model_path": "/models/Qwen3-14B-AWQ",
+      "enforce_eager": false,
+      "engine_args": ["--disable-custom-all-reduce", "--cudagraph-metrics"]
     }
   ]
 }

@@ -15,6 +15,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--peer', action='append', help='Transfer only the named configured peer; repeat for several peers')
+    parser.add_argument('--report-dir', type=Path, help='Retain this transfer report separately from earlier runs')
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
     completion_marker = config.get('completion_marker', 'DOWNLOAD_COMPLETE')
@@ -26,8 +28,15 @@ def main():
     if not metadata_files or metadata_files[-1] != completion_marker:
         raise ValueError('Publish the completion marker last')
     source, task, report = (Path(config[k]) for k in ['source_directory', 'task_directory', 'report_directory'])
+    if args.report_dir is not None:
+        report = args.report_dir
     report.mkdir(parents=True, exist_ok=True)
     peers = config['peers']
+    if args.peer:
+        unknown = set(args.peer) - {p[0] for p in peers}
+        if unknown:
+            parser.error('Unknown configured peer: ' + ', '.join(sorted(unknown)))
+        peers = [p for p in peers if p[0] in args.peer]
     version = subprocess.run(['ssh', '-V'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     match = re.search(r'OpenSSH_(\d+)\.(\d+)', version.stdout+version.stderr)
     legacy = ['-O'] if match and tuple(map(int, match.groups())) >= (8, 7) else []

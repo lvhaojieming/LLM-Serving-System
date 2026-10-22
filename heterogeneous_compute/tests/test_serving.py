@@ -74,17 +74,22 @@ def test_start_refuses_live_retired_experiments(monkeypatch):
         local(config(), 'start', 'musa-awq')
 
 
-def test_expansion_covers_all_devices_on_five_active_nodes_without_embedding_overlap():
+def test_expansion_respects_six_node_awq_budgets_and_embedding_reservations():
     cfg = expand_config(config())
     assert len(generation_workers(cfg)) == 32
-    assert not any(s['node'] == 'iluvatar150-01' for s in cfg['services'].values())
     used = {}
     for worker in cfg['workers'].values():
         entries = used.setdefault(worker['node'], [])
         assert not set(entries).intersection(worker['devices'])
         entries.extend(worker['devices'])
-    used['ascend910c-02'].append(2)  # Embedding reservation.
-    assert {n:len(d) for n,d in used.items()} == {'ascend910c-01':16,'ascend910c-02':16,'s5000-01':8,'s5000-02':8,'iluvatar150-02':16}
+    assert cfg['services']['embedding']['node'] == 'iluvatar150-01'
+    assert cfg['services']['embedding']['runtime_profile']['tp'] == 2
+    embedding_devices = cfg['services']['embedding']['runtime_profile']['logical_devices']
+    assert embedding_devices == [12, 13]
+    assert not set(embedding_devices).intersection(used['iluvatar150-01'])
+    assert not {1, 2, 15}.intersection(used['iluvatar150-01'])
+    assert all(len(w['devices']) == 2 for w in cfg['workers'].values())
+    assert {n:len(d) for n,d in used.items()} == {'ascend910c-01':16,'ascend910c-02':16,'s5000-01':8,'s5000-02':8,'iluvatar150-02':8,'iluvatar150-01':8}
     assert len(gateway_config(cfg)['worker_registry']['expected_urls']) == 32
 
 
@@ -105,7 +110,8 @@ def test_replica_overrides_keep_vendor_runtime_and_select_new_node_devices():
     assert spec['tp'] == 2 and target['host'] == '192.168.162.96' and target['port'] == 18762
     assert target['env']['MUSA_VISIBLE_DEVICES'] == '4,5'
     assert target['env']['GLOO_SOCKET_IFNAME'] == 'ens21f0'
-    assert cfg['services']['ascend-24-1']['overrides']['tp'] == 1
+    assert cfg['services']['ascend-24-1']['overrides']['tp'] == 2
+    assert cfg['services']['ascend-24-1']['overrides']['devices'] == [2,3]
 
 
 def test_worker_acceptance_retains_failures_and_tests_reachable_workers(monkeypatch):
@@ -148,3 +154,20 @@ def test_all_musa_replicas_use_standard_mccl_and_disable_custom_allreduce():
         argv, _ = commands(cfg, name)
         assert '--disable-custom-all-reduce' in argv
         assert '--enforce-eager' in argv and argv[argv.index('--tensor-parallel-size') + 1] == '2'
+
+
+def test_new_iluvatar_node_defaults_to_graph_without_changing_retained_eager_workers():
+    cfg = expand_config(config())
+    for name in ['iluvatar-58-0', 'iluvatar-58-1', 'iluvatar-58-2', 'iluvatar-58-3']:
+        argv, env = commands(cfg, name)
+        assert '--enforce-eager' not in argv
+        assert '--disable-custom-all-reduce' in argv and '--cudagraph-metrics' in argv
+        assert env['NCCL_SOCKET_IFNAME'] == 'enp147s0f0'
+        assert not {1, 2, 12, 13, 15}.intersection(map(int, env['CUDA_VISIBLE_DEVICES'].split(',')))
+    retained, _ = commands(cfg, 'iluvatar-awq')
+    assert '--enforce-eager' in retained
+    embedding = cfg['services']['embedding']
+    assert embedding['argv'][embedding['argv'].index('--runner') + 1] == 'pooling'
+    assert '--enforce-eager' not in embedding['argv']
+    assert embedding['env']['CUDA_VISIBLE_DEVICES'] == '12,13'
+    assert 'HETEROSERVE_ILUVATAR_POOLING_ONLY' not in embedding['env']

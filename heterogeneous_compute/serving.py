@@ -46,6 +46,8 @@ def expand_config(config):
         active_nodes.add(group["node"])
         used = list(group.get("reserved_devices", []))
         for index, devices in enumerate(group["device_sets"]):
+            if config.get("required_awq_tp") is not None and len(devices) != config["required_awq_tp"]:
+                raise ValueError("AWQ partition does not match required tensor parallel size")
             if not devices or any(d in used for d in devices) or len(set(devices)) != len(devices):
                 raise ValueError("Overlapping or empty device partition: " + group["name"])
             used.extend(devices)
@@ -79,6 +81,9 @@ def expand_config(config):
                 port = group["port_start"] + index
                 service["overrides"] = dict(host=group["host"], port=port, devices=devices,
                                             model_path=group["model_path"], tp=len(devices), env=env)
+                for option in ("enforce_eager", "engine_args"):
+                    if option in group:
+                        service["overrides"][option] = copy.deepcopy(group[option])
                 result["services"][name] = service
                 endpoint = f"http://{group['host']}:{port}/v1"
             workers[name] = dict(base_url=endpoint, model="Qwen3-14B-AWQ", node=group["node"], devices=devices)
@@ -88,6 +93,9 @@ def expand_config(config):
     result["services"] = {**{n:s for n,s in result["services"].items() if s["driver"] not in {"gateway","router"}},
                           **{n:s for n,s in result["services"].items() if s["driver"] in {"router","gateway"}}}
     result["workers"] = workers
+    disabled = {n for n,s in result["services"].items() if s.get("enabled", True) is False}
+    result["services"] = {n:s for n,s in result["services"].items() if n not in disabled}
+    result["backends"] = {n:s for n,s in result["backends"].items() if n not in disabled}
     return result
 
 
@@ -101,7 +109,7 @@ def native_spec(service):
     for key, value in service.get("overrides", {}).items():
         if key == "env":
             target["env"].update(value)
-        elif key in {"host", "port", "devices"}:
+        elif key in {"host", "port", "devices", "engine_args"}:
             target[key] = value
         else:
             spec[key] = value
@@ -249,7 +257,8 @@ def legacy_processes():
             if not argv:
                 continue
             old_script = any(x in roots for x in argv)
-            old_model = "serve" in argv and ("/models/Qwen3-14B" in argv or "/workspace/deploy/baselines/vllm.yaml" in argv)
+            old_model = "serve" in argv and any(x in argv for x in (
+                "/models/Qwen3-14B", "/workspace/deploy/baselines/vllm.yaml", "/workspace/deploy/iluvatar/vllm.yaml"))
             if old_script or old_model:
                 found.append({"pid": int(path.name), "argv": argv})
         except (FileNotFoundError, ProcessLookupError, PermissionError):
@@ -471,19 +480,22 @@ def verify(config):
     assert sum(dispatched.values()) >= pooled_count, dispatched
     if config["router"]["policy"] == "round_robin":
         assert all(dispatched[url] > 0 for url in registered_healthy), dispatched
-    embedding = http(base + "/v1/embeddings", {"model": "embedding", "input": ["The capital of China is Beijing.", "The capital of China is Beijing.", "An apple is a fruit."]}, timeout=120)
-    vectors = [row["embedding"] for row in embedding["data"]]
-    import math
-    assert embedding["model"] == "embedding" and len(vectors) == 3
-    assert all(len(v) == 1024 and all(math.isfinite(x) for x in v) for v in vectors)
-    assert max(abs(x-y) for x, y in zip(vectors[0], vectors[1])) < .001
-    assert sum((x-y)**2 for x,y in zip(vectors[0], vectors[2])) > .01
+    embedding_result = {"skipped": True, "reason": "Embedding disabled in the active configuration"}
+    if "embedding" in config["backends"]:
+        embedding = http(base + "/v1/embeddings", {"model": "embedding", "input": ["The capital of China is Beijing.", "The capital of China is Beijing.", "An apple is a fruit."]}, timeout=120)
+        vectors = [row["embedding"] for row in embedding["data"]]
+        import math
+        assert embedding["model"] == "embedding" and len(vectors) == 3
+        assert all(len(v) == 1024 and all(math.isfinite(x) for x in v) for v in vectors)
+        assert max(abs(x-y) for x, y in zip(vectors[0], vectors[1])) < .001
+        assert sum((x-y)**2 for x,y in zip(vectors[0], vectors[2])) > .01
+        embedding_result = {"count": 3, "dimensions": 1024, "finite": True, "duplicate_consistency": True}
     report = {"passed": bool(coverage_complete and all(r["passed"] for r in direct_results)),
               "ready": ready, "generation": tests, "direct_workers": direct_results,
               "missing_healthy_workers": sorted(expected - registered_healthy),
               "unexpected_healthy_workers": sorted(registered_healthy - expected),
               "official_router": {"policy": config["router"]["policy"], "pooled_requests": pooled_count, "concurrency": 4, "worker_dispatch_deltas": dispatched},
-              "embedding": {"count": 3, "dimensions": 1024, "finite": True, "duplicate_consistency": True},
+              "embedding": embedding_result,
               "scope": "Functional acceptance only; no throughput/stability/Kubernetes or cross-vendor PP claim",
               "completed_at": datetime.now(timezone.utc).isoformat()}
     save(ROOT / config["result_dir"] / "acceptance.json", report)
@@ -527,6 +539,9 @@ def main():
                    ROOT / "heterogeneous_compute/tests/test_serving.py", ROOT / "shared/download_model.py", ROOT / "shared/ascend_int4/vllm_adapter.py",
                    ROOT / "heterogeneous_compute/probes/communication_probe.py",
                    ROOT / "shared/ascend_int4/layout.py", ROOT / "shared/ascend_int4/sitecustomize.py"]
+        sources += [ROOT / "heterogeneous_compute/benchmark.py",
+                    ROOT / "heterogeneous_compute/system_benchmark.py", ROOT / "heterogeneous_compute/benchmark_telemetry.py",
+                    ROOT / "heterogeneous_compute/configs/system_benchmark.json", ROOT / "heterogeneous_compute/tests/test_system_benchmark.py"]
         manifest = ROOT / config["result_dir"] / "source-manifest.json"
         save(manifest, {"git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                         "source_sha256": {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}})

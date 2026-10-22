@@ -2,6 +2,7 @@
 
 Runs inside an existing container with the installed official benchmark client.
 Only synthetic random-token workload is used; it is not ShareGPT throughput.
+With --system-config, run the unified Gateway's open-loop SLO experiment instead.
 """
 import argparse
 import concurrent.futures
@@ -154,7 +155,8 @@ def native_matrix(config, vendor, config_path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--config', type=Path)
+    parser.add_argument('--system-config', type=Path, help='Open-loop unified-system SLO capacity and stability configuration')
     parser.add_argument('--vendor', help='Native vendor key from the configuration')
     parser.add_argument('--result-dir', type=Path, help='Cross-vendor validation output; never overwrites an existing run')
     parser.add_argument('--concurrencies', type=int, nargs='+', default=[1, 2, 4, 8])
@@ -163,6 +165,15 @@ def main():
     parser.add_argument('--output-tokens', type=int, default=64)
     parser.add_argument('--seed', type=int, default=20261010)
     args = parser.parse_args()
+    if args.system_config:
+        if args.config or args.vendor or not args.result_dir:
+            parser.error('--system-config requires --result-dir and cannot combine with --config/--vendor')
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from heterogeneous_compute.system_benchmark import main as system_main
+        return system_main(args.system_config, args.result_dir)
+    if args.config is None:
+        parser.error('--config or --system-config is required')
     config = json.loads(args.config.read_text())
     if args.vendor:
         if args.vendor not in config.get('vendors', {}):
@@ -228,4 +239,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

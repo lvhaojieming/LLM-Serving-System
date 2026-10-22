@@ -1,0 +1,113 @@
+{
+  "recorded_at": "2026-10-22T07:53:02.424646+00:00",
+  "scope": "Functional acceptance after assigning eight logical AWQ devices per Iluvatar node and two additional Embedding devices on .58",
+  "configuration": "heterogeneous_compute/configs/serving.json",
+  "code_base": "b9bea3544a5f88fab1afed826a76b3ad26825fcb",
+  "source_sha256": {
+    "heterogeneous_compute/serving.py": "1ebcd31d3ff2d4da763ad66b44f002dbed983031e634f2282e8b79ccd648342a",
+    "heterogeneous_compute/configs/serving.json": "dc9ac02f3dcabc26091f3d23ce3d4ec9193885e000c6d1a2dce8a99897f108ee",
+    "heterogeneous_compute/configs/native_awq.json": "4d00046b7be6c824dcea173999757faf3daa9f5f610ab7e0be2ff248f35f6474"
+  },
+  "seed": 20261010,
+  "resource_limits_enabled": false,
+  "containers_recreated": false,
+  "nodes": {
+    "iluvatar150-01": {
+      "address": "192.168.162.58",
+      "hardware": "Iluvatar BI-V150, 16 logical devices, 32768 MiB per device",
+      "container": "heteroserve-iluvatar",
+      "awq_device_sets": [[0, 3], [4, 5], [6, 7], [8, 9]],
+      "awq_replicas_verified": 4,
+      "tp": 2,
+      "pp": 1,
+      "execution_mode": "Vendor FULL_DECODE_ONLY; graph capture and FULL decode replay verified on all four replicas",
+      "graph_replay_counts_during_acceptance": [29, 27, 27, 27],
+      "awq_device_memory_mib_approximate": 20600,
+      "embedding_devices": [12, 13],
+      "preserved_services": {"vllm-g9-w8a8": [1, 2], "mineru-api": [15]},
+      "preserved_services_health_http": {"vllm-g9-w8a8": 200, "mineru-api": 200}
+    },
+    "iluvatar150-02": {
+      "address": "192.168.162.60",
+      "hardware": "Iluvatar BI-V150, 16 logical devices, 32768 MiB per device",
+      "container": "heteroserve-iluvatar-pp",
+      "awq_device_sets": [[0, 1], [2, 3], [4, 5], [6, 7]],
+      "awq_replicas_verified": 4,
+      "tp": 2,
+      "pp": 1,
+      "execution_mode": "Retained eager profile; no graph performance claim",
+      "stopped_project_replica_devices": [[8, 9], [10, 11], [12, 13], [14, 15]]
+    }
+  },
+  "runtime": {
+    "image": "sha256:b01fe538df482b10418548d9d43ac15a348e2e30c218c9d75eb7c12ae195dbc4",
+    "corex": "4.5",
+    "torch": "2.10.0+corex.4.5.0.20260619",
+    "transformers": "5.12.1",
+    "vllm": "0.23.0",
+    "awq_kernel": "Vendor cuinfer awq_gemm; torch awq_gemm fallback disabled",
+    "new_node_communication": "Standard vendor libixsysnccl.so; --disable-custom-all-reduce",
+    "awq_manifest_sha256": "0c3ff63c17092c3354c0faf12c4664e3fc7116a7f45683d96e98b134487ea6f9"
+  },
+  "embedding": {
+    "model": "Qwen/Qwen3-Embedding-0.6B",
+    "revision": "dd3e37eb506b3addbd930037796e25d349ae9010",
+    "dtype": "bfloat16",
+    "runner": "pooling",
+    "tp": 2,
+    "pp": 1,
+    "native_endpoint": "http://192.168.162.58:18458/v1/embeddings",
+    "gateway_endpoint": "http://192.168.162.60:18600/v1/embeddings",
+    "gateway_model_alias": "embedding",
+    "native_and_gateway_http": 200,
+    "vectors": 3,
+    "dimensions": 1024,
+    "finite": true,
+    "duplicate_max_abs_difference": 0.0,
+    "gateway_different_text_squared_distance": 1.2918863329289136,
+    "device_memory_mib": [5088, 5084],
+    "graph_capture_confirmed": true,
+    "pooling_graph_replay_verified": false
+  },
+  "unified_acceptance": {
+    "configured_awq_workers": 32,
+    "healthy_and_direct_generation_passed": 29,
+    "generation_alias_json_and_sse_passed": ["ascend-awq", "musa-awq", "iluvatar-awq", "awq"],
+    "round_robin_pooled_requests": 64,
+    "all_healthy_workers_received_requests": true,
+    "full_coverage_passed": false,
+    "missing_workers": ["http://192.168.162.23:18702", "http://192.168.162.23:18703", "http://192.168.162.23:18704"],
+    "missing_reason": "Existing Ascend .23 device-initialization faults; not repaired by this layout change",
+    "capacity_and_stability_experiment_completed": false
+  },
+  "cleanup": {
+    "stopped_legacy_project_processes_on_58": 17,
+    "awq_transfer_ephemeral_authorization_removed": true,
+    "failed_tg_v200_embedding_container_removed": true,
+    "failed_tg_v200_model_and_diagnostics_preserved": true,
+    "unused_hygon_project_container_restored_to_stopped": true,
+    "external_services_stopped": false
+  },
+  "validation": {
+    "serving_and_gateway_tests_passed": 75,
+    "system_benchmark_tests_passed": 13,
+    "observer_short_request_smoke": {
+      "requests": 64,
+      "associated_request_ids": 64,
+      "packet_drops": 0,
+      "actual_socket_receive_buffer_bytes": 33554432,
+      "scope": "Short requests only; fixed-length preflight and sustained high-pressure capture remain to be tested"
+    }
+  },
+  "reproduce": [
+    "python heterogeneous_compute/serving.py sync --ssh-config ~/.ssh/config",
+    "python heterogeneous_compute/serving.py start --ssh-config ~/.ssh/config",
+    "python heterogeneous_compute/serving.py verify --ssh-config ~/.ssh/config"
+  ],
+  "limitations": [
+    "This result verifies functionality and routing, not maximum stable request rate or long-term stability",
+    "The current deployment mixes Ascend/.58 AWQ graph execution with retained MUSA/.60 AWQ eager execution",
+    "Embedding pooling graph replay is not established by decode-graph startup capture",
+    "The three known .23 failures keep full device-coverage acceptance false"
+  ]
+}
