@@ -30,7 +30,7 @@
   "telemetry_max_age_seconds": 25,
   "transition_seconds": 60,
   "coarse_seconds": 300,
-  "coarse_rates": [0.25, 0.5, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64],
+  "coarse_rates": [8, 12, 16, 24, 32, 48, 64],
   "fine_seconds": 900,
   "fine_repeats": 3,
   "fine_resolution": 0.25,
