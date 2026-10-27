@@ -349,8 +349,9 @@ class Experiment:
             expected_backends={router['backend'] for router in routers.values()}
             if len(selected)!=len(expected_backends) or set(selected)!=expected_backends:
                 raise RuntimeError('Gateway does not uniformly select the configured hardware pools')
-            if any(router['policy']!='round_robin' for router in routers.values()):
-                raise RuntimeError('Expected round_robin L2 policy in every hardware pool')
+            expected_router=self.config.get('required_router',{'policy':'round_robin'})
+            if any(any(router.get(key)!=value for key,value in expected_router.items()) for router in routers.values()):
+                raise RuntimeError('L2 Router policy/parameters differ from the frozen experiment configuration')
         vendors=set();direct=[]
         self.identities={};self.process_identities={}
         for node in r.nodes:
@@ -397,10 +398,18 @@ class Experiment:
         pooled=[];mapped=set();limit=8*len(self.expected) if multi_pool else 2*len(self.expected)
         backend_by_worker={w['base_url'].removesuffix('/v1'):router.get('backend')
             for name,router in routers.items() for w in router_workers(self.serving,name).values()}
+        require_all_workers=all(router['policy']=='round_robin' for router in routers.values())
+        required_pools={backend_by_worker[w] for w in self.expected}
+        def pooled_covered():
+            if require_all_workers:return self.expected.issubset(mapped)
+            # Low-concurrency adaptive routing need not visit every idle replica.
+            # Each replica already passed direct generation; require genuine L1
+            # requests through every pool, and retain actual worker coverage.
+            return len(pooled)>=2*len(self.expected) and {backend_by_worker[w] for w in mapped}==required_pools
         # A random L1 does not visit each hardware pool equally in a short sample.
         # Bound additional genuine alias requests rather than mistaking chance
         # undercoverage for a broken worker, or bypassing L1 to force coverage.
-        while len(pooled)<limit and not self.expected.issubset(mapped):
+        while len(pooled)<limit and not pooled_covered():
             count=min(2*len(self.expected),limit-len(pooled));offset=len(pooled)
             batch=await asyncio.gather(*(pooled_check(i) for i in range(offset,offset+count)))
             pooled.extend(batch)
@@ -411,15 +420,17 @@ class Experiment:
                 worker=r.routes.get(row['request_id'],{}).get('worker')
                 if not row['request_id'] or not worker:
                     raise RuntimeError('Successful pooled request has no request-ID-to-worker association')
+                if worker not in self.expected:raise RuntimeError('Pooled request reached a worker outside the frozen healthy set')
                 if multi_pool and row['selected_pool']!=backend_by_worker.get(worker):
                     raise RuntimeError('L1 selected pool and observed L2 worker disagree')
                 mapped.add(worker)
             if r.workers()!=self.expected or r.router_health()!=self.router_identities:
                 raise RuntimeError('Healthy Router pool set changed during preflight')
-        if not self.expected.issubset(mapped):raise RuntimeError('Random-pool preflight exhausted its request budget before covering every healthy worker')
+        if not pooled_covered():raise RuntimeError('Random-pool preflight exhausted its request budget before meeting policy-specific coverage')
         self.frozen={'healthy_workers':sorted(self.expected),'expected_workers':len(all_workers),'missing_workers':sorted({w['base_url'].removesuffix('/v1') for w in all_workers.values()}-self.expected),
             'identities':self.identities,'service_processes':self.process_identities,'direct_smoke':direct,
             'pooled_requests':len(pooled),'pooled_worker_coverage':sorted(mapped),'samples':dict(r.latest),
+            'pooled_coverage_requirement':'every healthy worker' if require_all_workers else 'every pool; every healthy worker separately checked by direct generation',
             'router_pools':{name:sorted(workers) for name,workers in self.router_identities.items()},
             'routing':{'random_routes':routing.get('random_routes',{}),'routers':routers},
             'admission':self.serving.get('admission'),
@@ -593,23 +604,25 @@ class Experiment:
                 if lower==0:
                     # Determine whether the SLO is already infeasible at sparse
                     # arrivals rather than silently relaxing it or reporting 0.
-                    for rate in [self.config['coarse_rates'][0]/2,self.config['coarse_rates'][0]/4]:
+                    for rate in [r for r in [self.config['coarse_rates'][0]/2,self.config['coarse_rates'][0]/4]
+                                 if r>=self.config.get('minimum_search_rate',0)]:
                         result=await self.stage(session,rate,self.config['fine_seconds'],'low-rate-slo-check')
                         if result['passed']:lower=rate;break
-                    if lower==0:raise RuntimeError('No stable rate meets the frozen SLO, including sparse-arrival checks; no capacity claim')
+                    if lower==0:raise RuntimeError('No tested rate at or above the configured minimum passes all experiment conditions; no capacity claim')
                 for step in range(self.config['fine_max_steps']):
                     if upper-lower<=self.config['fine_resolution']:break
                     rate=round((upper+lower)/2,4)
                     result=await self.stage(session,rate,self.config['fine_seconds'],'fine',step)
                     if result['passed']:lower=rate
                     else:upper=rate
-                while lower>0:
+                minimum=self.config.get('minimum_search_rate',0)
+                while lower>0 and lower>=minimum:
                     repeats=[await self.stage(session,lower,self.config['fine_seconds'],'boundary-repeat',i) for i in range(self.config['fine_repeats'])]
                     if all(x['passed'] for x in repeats):
                         steady=await self.stage(session,lower,self.config['steady_seconds'],'steady-2h')
                         if steady['passed']:break
                     upper=lower;lower=round(lower-self.config['fine_resolution'],4)
-                if lower<=0:raise RuntimeError('No candidate passed repeated/long stability verification')
+                if lower<=0 or lower<minimum:raise RuntimeError('No candidate at or above the minimum search rate passed repeated/long stability verification')
                 save(self.directory/'capacity.json',{'max_stable_rate':lower,'first_failing_or_unverified_upper':upper,
                     'slo':self.config['slo'],'validated_seconds':self.config['steady_seconds'],'healthy_workers':len(self.expected),
                     'workload':self.config.get('workload',{'name':'fixed'}),

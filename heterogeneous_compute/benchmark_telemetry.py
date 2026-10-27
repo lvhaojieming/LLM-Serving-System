@@ -55,6 +55,7 @@ METRIC_NAMES = {
         'vllm_router_processed_requests_total', 'vllm_router_requests_total',
         'vllm_router_policy_decisions_total', 'vllm_router_cb_outcomes_total',
         'vllm_router_cb_state',
+        'vllm_router_running_requests', 'vllm_router_worker_load',
     }),
 }
 

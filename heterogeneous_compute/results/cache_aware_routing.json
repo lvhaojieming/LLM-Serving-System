@@ -1,0 +1,118 @@
+{
+  "validated_at": "2026-10-27T08:45:34.007364+00:00",
+  "policy": "cache_aware",
+  "parameters": {
+    "policy": "cache_aware",
+    "cache_threshold": 1.0,
+    "balance_abs_threshold": 0,
+    "balance_rel_threshold": 1.0,
+    "library_sha256": "30644ad292b43f77f893fc6773ce606ae7a9bdbf43d21615d1c8d52d67db257a"
+  },
+  "load_scope": "Router-local in-flight requests held through the SSE body. Native official minimum-load branch with zero absolute and 1.0 relative imbalance threshold; prefix selection only on load ties. Does not claim token-cost prediction, real backend prefix cache hits, or GPU-utilization-aware routing.",
+  "runtime": {
+    "base_version": "0.1.15",
+    "source": {
+      "url": "https://codeload.github.com/vllm-project/router/tar.gz/refs/tags/v0.1.15",
+      "sha256": "bfa18bb4ced6ea55e568a872ebcb493f7873c1059e9178240ab3396e3c7b5474"
+    },
+    "upstream_patch": {
+      "url": "https://patch-diff.githubusercontent.com/raw/vllm-project/router/pull/216.diff",
+      "sha256": "e6ac54556ca94e5f993935350dd2a609c4bfa9a7800de8504cf93e6ef3d7742b"
+    },
+    "upstream_pin": {
+      "head_sha": "9e6fce282a877c65185468692c6ba8a483409d9b",
+      "base_sha": "5002469c5a208837d351e9d56a8f0a2c63693692",
+      "state": "open",
+      "merged": false,
+      "head_repository": "wuhang2014/router"
+    },
+    "excluded_patch_path": "src/routers/http/vllm_pd_router.rs",
+    "rust_toolchain": "1.90.0",
+    "build_command": [
+      "cargo",
+      "build",
+      "--release",
+      "--lib",
+      "--locked",
+      "-j",
+      "4"
+    ],
+    "library_sha256": "30644ad292b43f77f893fc6773ce606ae7a9bdbf43d21615d1c8d52d67db257a",
+    "acceptance_passed": true,
+    "regression_tests_passed": 181,
+    "real_router_acceptance": {
+      "without_vendor_get_load": true,
+      "health_check_cycles": 12,
+      "sse_inflight_preserved": true,
+      "idle_worker_preferred": true,
+      "cancel_cleanup": true,
+      "normal_completion_cleanup": true
+    },
+    "scope": "Official cache_aware implementation with ordinary-HTTP subset of open upstream PR216; locally built and tested, not an unmodified official release.",
+    "cargo_lock_sha256": "06800955d5a6332891e66c2e0bd13a37812faf8372407ec181113de32d3a9082"
+  },
+  "rollout": {
+    "only_restarted": [
+      "router-ascend",
+      "router-musa",
+      "router-iluvatar"
+    ],
+    "healthy_workers": 29,
+    "configured_workers": 32,
+    "model_gateway_admission_processes_unchanged": true,
+    "all_six_container_and_model_identities_verified": true,
+    "model_max_num_seqs_unchanged": 16,
+    "resource_limits_enabled": false,
+    "embedding_and_l1_random_pool_selection_unchanged": true
+  },
+  "experiment": {
+    "previous_run": "20261027T073431Z",
+    "previous_run_action": "User-authorized STOP for the policy switch; completed 8/12/14 pass and 16 queue-fail results retained separately. Unfinished 15 stage is not a completed result.",
+    "coarse_rates": [
+      16,
+      24,
+      32,
+      48,
+      64
+    ],
+    "minimum_search_rate": 16,
+    "seed": 20261022,
+    "mixed": {
+      "name": "mixed",
+      "profiles": [
+        {
+          "name": "short",
+          "input_tokens": 256,
+          "output_tokens": 64,
+          "weight": 40
+        },
+        {
+          "name": "long-input",
+          "input_tokens": 2048,
+          "output_tokens": 64,
+          "weight": 30
+        },
+        {
+          "name": "long-output",
+          "input_tokens": 256,
+          "output_tokens": 1024,
+          "weight": 30
+        }
+      ]
+    },
+    "slo": {
+      "tpot_seconds": 0.1
+    },
+    "timeout_seconds": 150,
+    "queue_stability_rule_unchanged": true,
+    "capacity_and_long_stability": "Pending a new independent run beginning at 16 req/s; no capacity claim from bounded acceptance.",
+    "preflight_coverage": "Direct exact-answer generation for all healthy replicas; at least 58 unified mixed requests, all three pools, request-ID-to-worker validation. Load-sensitive low-concurrency routing is not forced to visit all idle replicas."
+  },
+  "artifacts": "artifacts/optimization/load-aware-routing; new run also retains router-load-accounting.json",
+  "maintenance": {
+    "environments_and_containers_reused": true,
+    "build_tools": "Rust 1.90.0 installed once under existing project runtime because the published Router binaries retain the load-reset bug. Model environments were not rebuilt.",
+    "retained": "Fixed official source archive, open upstream PR diff and commit pin, Cargo.lock checksum, built library checksum, build evidence, real-router acceptance and rollout evidence.",
+    "cleaned": "Unused 0.1.16 wheel removed; source distribution retained as evidence that the published version still contains the reset path."
+  }
+}

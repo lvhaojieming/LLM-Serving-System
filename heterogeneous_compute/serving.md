@@ -3,7 +3,7 @@
 `serving.py` 复用三个厂商的独立原生 AWQ 实例、现有 Gateway 和官方
 `vllm-router==0.1.15`。配置集中在 `configs/serving.json`，不创建 K8s 集群或容器。
 当前 `awq` 完整路径为：HAProxy 官方有界排队 → 实际 Embedding → 一级等概率随机选厂商池 →
-该池自己的官方 vLLM Router 按轮询选择健康实例。三个厂商池概率相同，
+该池自己的官方 vLLM Router 按 cache_aware 策略选择健康实例。三个厂商池概率相同，
 不按池中的副本数量加权；Embedding 向量暂不参与随机决策。
 最新两级路径验收见 [`results/two_level_routing.json`](results/two_level_routing.json)，
 此前的单 Router 和天数分配结果作为历史验收保留。
@@ -125,8 +125,10 @@ V1 则因 PH1 KV block-size 与 attention backend 的要求冲突而未能初始
 输入是按消息顺序用换行连接的 `role: content`。Embedding 失败则不发送 AWQ，
 向量暂不作为选池依据。独立 `/v1/embeddings` 接口继续保留。
 响应头记录选池、请求 ID 和 Embedding 阶段耗时。
-摩尔原生后端不提供 `/get_load`，因此使用官方轮询策略，不把策略名当成已经完成
-设备负载感知；路由继续使用官方健康检查排除故障副本。
+摩尔原生后端不提供 `/get_load`。池内使用官方 `cache_aware` 的本地在途计数，
+`balance_abs_threshold=0`、`balance_rel_threshold=1.0`，有负载差时优先最少在途实例；
+`cache_threshold=1.0` 仅在负载相同时保留原生前缀选择，不宣称后端 KV 缓存命中。
+这不依赖厂商 `/get_load`，也不把观测到的利用率当路由负载。路由继续用官方健康检查排除故障副本。
 每厂商独立复用一个官方 Router 进程，API／指标端口为 18601/18602、
 18603/18604、18605/18606，均仅绑定本机。一级健康快照缓存 5 秒，
 使用官方 `/readiness` 判断池是否仍有可用实例；`/health` 的全量健康语义
@@ -188,7 +190,8 @@ HTTP 200 也可能只表示部分服务可用。Gateway 还核对官方 `/worker
 验收要求全部副本逐一完成真实生成、
 各入口普通与完整 SSE 请求正确，并通过官方 Router 的 worker 计数验证小批
 并发请求覆盖三个厂商池；统一入口发出 `max(24, 2 × 预期副本数)` 个随机请求，
-再通过显式厂商入口逐池核对轮询覆盖，避免把有限随机样本要求成确定的均匀分布。
+再通过显式厂商入口逐池核对实际分配。轮询策略要求覆盖全部健康副本；
+自适应策略保留实际覆盖，不把有限低并发样本要求成确定的均匀分布。
 并发 4，仅为功能验证。
 设备缺失时仍记录全部 worker 的逐一生成结果，最终 `passed=false` 并返回非零状态，
 不能把可用部分的功能通过当成全设备验收。Embedding 检查批量数量、1024 维、有限数值、
@@ -319,3 +322,30 @@ python3 heterogeneous_compute/system_benchmark.py \
 预检核对正在运行的 AWQ 上下文和冻结负载所需长度，防止配置改了而进程未更新。
 172 项回归通过，包含三类混合请求的 token 预算、比例、复现性、失败分组和端口复用。
 正式容量和稳定性结论以新实验 `preflight.json`、逐请求数据、遥测与最终状态为准。
+
+## cache_aware 路由切换
+
+本轮只变更池内策略，模型并发仍为 16；一级厂商池等概率随机选择、Embedding、
+29 个健康实例、设备与容器、mixed、TPOT 和超时预算保持一致。新的实验从 16 请求/秒开始，
+`minimum_search_rate=16` 禁止重测更低档位。旧轮询数据独立保留，不充当新策略的容量下界。
+低并发自适应路由不保证访问每个空闲副本：每个健康副本先直连生成验收，统一入口再完成
+至少 58 个真实 mixed 请求并覆盖三个池，保留实际副本覆盖及请求 ID 对应关系。
+
+官方发布版 0.1.15/0.1.16 的健康检查每 10 轮会清零本地在途计数。采用官方仓库
+[PR #216](https://github.com/vllm-project/router/pull/216) 的普通 HTTP 路由修复回移到
+0.1.15；该 PR 尚未合并，必须标注为本地带补丁构建，不宣称官方发布版已经修复。
+完整 diff 和来源、SHA-256、固定上游提交保留在 `artifacts/optimization/load-aware-routing`；
+仅排除与本次普通 HTTP 部署无关且上下文不同的 `src/routers/http/vllm_pd_router.rs`。
+源码复用官方 v0.1.15 压缩包，在原 `.60` 容器内构建；没有重建模型环境或容器。
+
+构建复现：在 `artifacts/runtime/vllm-router-source` 解包固定源码，执行
+`git apply --exclude=src/routers/http/vllm_pd_router.rs <固定补丁路径>`；
+设置 `CARGO_HOME=/workspace/artifacts/runtime/cargo`、
+`RUSTUP_HOME=/workspace/artifacts/runtime/rustup`、`PYO3_PYTHON=/usr/local/bin/python3`，
+使用 Rust 1.90.0 执行 `cargo build --release --lib --locked -j 4`。
+验收后原子替换现有 Router target 中的 `vllm_router_rs.abi3.so`，复用 Python 包及依赖。
+`load-accounting.json` 记录二进制校验与验收；启动器核对配置中的 SHA-256，避免误用旧二进制。
+
+真实官方 Router 的 CPU 模拟后端测试覆盖：长 SSE 返回响应头后仍占用计数，
+跨越至少 12 轮健康检查保持计数、后续请求选择空闲实例、取消和正常结束后归零。
+该测试不请求模型、不查询 SMI；模型与整系统功能验收另行记录。

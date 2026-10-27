@@ -113,6 +113,17 @@ def router_workers(config, name):
             if nodes is None or value["node"] in nodes}
 
 
+def validate_router_runtime(router):
+    """A load-sensitive deployment must use its accepted, pinned runtime."""
+    manifest=router.get('load_accounting_manifest')
+    if not manifest:return
+    report=json.loads(Path(manifest).read_text())
+    library=Path(router['runtime'])/'vllm_router_rs.abi3.so'
+    digest=hashlib.sha256(library.read_bytes()).hexdigest()
+    if not report.get('acceptance_passed') or digest!=report.get('library_sha256') or digest!=router.get('library_sha256'):
+        raise RuntimeError('Router load-accounting runtime is not accepted or its checksum changed')
+
+
 def expand_config(config):
     """Expand device partitions into replicas without duplicating deployment code."""
     result = copy.deepcopy(config)
@@ -334,6 +345,8 @@ def commands(config, name):
                 "--request-timeout-secs", "180", "--health-check-interval-secs", "10",
                 "--worker-startup-check-interval", "5", "--worker-startup-timeout-secs", "600",
                 "--prometheus-host", "127.0.0.1", "--prometheus-port", str(router["metrics_port"]), "--max-payload-size", "2097152"]
+        for key in ['cache_threshold','balance_abs_threshold','balance_rel_threshold']:
+            if key in router:argv.extend(['--'+key.replace('_','-'),str(router[key])])
         bootstrap += repr(argv) + "; runpy.run_module('vllm_router.launch_router',run_name='__main__')"
         return [sys.executable, "-c", bootstrap], {}
     raise ValueError("Unknown service driver")
@@ -431,6 +444,7 @@ def local(config, action, name):
     directory = ROOT / config["result_dir"] / name
     marker = directory / "process.json"
     service = config["services"][name]
+    if action=='start' and service['driver']=='router':validate_router_runtime(router_configs(config)[name])
     if action == "start" and config.get("legacy_baselines_enabled") is False:
         old = legacy_processes()
         if old:

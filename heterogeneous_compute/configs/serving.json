@@ -31,9 +31,14 @@
   "router": {
     "host": "127.0.0.1",
     "port": 18601,
-    "policy": "round_robin",
+    "policy": "cache_aware",
     "runtime": "/workspace/artifacts/runtime/vllm-router",
     "version": "0.1.15",
+    "cache_threshold": 1.0,
+    "balance_abs_threshold": 0,
+    "balance_rel_threshold": 1.0,
+    "library_sha256": "30644ad292b43f77f893fc6773ce606ae7a9bdbf43d21615d1c8d52d67db257a",
+    "load_accounting_manifest": "/workspace/artifacts/runtime/vllm-router/load-accounting.json",
     "pools": {
       "ascend": {"port": 18601, "metrics_port": 18602, "backend": "ascend-awq", "nodes": ["ascend910c-01", "ascend910c-02"]},
       "musa": {"port": 18603, "metrics_port": 18604, "backend": "musa-awq", "nodes": ["s5000-01", "s5000-02"]},

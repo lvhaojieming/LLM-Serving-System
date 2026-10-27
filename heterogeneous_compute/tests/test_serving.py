@@ -2,7 +2,7 @@ import copy
 import json
 from pathlib import Path
 import pytest
-from heterogeneous_compute.serving import admission_config, commands, expand_config, fingerprint, gateway_config, generation_workers, live, local, native_spec, router_configs, router_workers, serve_signature
+from heterogeneous_compute.serving import admission_config, commands, expand_config, fingerprint, gateway_config, generation_workers, live, local, native_spec, router_configs, router_workers, serve_signature, validate_router_runtime
 
 
 def config():
@@ -38,6 +38,108 @@ def test_admission_preserves_cleanup_headroom_and_configured_time_budgets():
     with pytest.raises(ValueError,match='internal Gateway budget'):admission_config(cfg)
     cfg['admission'].pop('max_inflight')
     assert 'maxconn 640 maxqueue 128' in admission_config(cfg)
+
+
+def test_official_cache_aware_stream_load_survives_health_checks_and_cancel(tmp_path):
+    """Use the real official Rust router with two CPU-only streaming workers."""
+    import os,sys,threading,time,socket,subprocess,http.server
+    import httpx
+    from heterogeneous_compute.benchmark_telemetry import parse_metrics
+    runtime=os.environ.get('HETEROSERVE_ROUTER_RUNTIME')
+    if not runtime:pytest.skip('Select the accepted Router runtime for Linux integration')
+    gate=threading.Event();servers=[]
+    class Backend(http.server.BaseHTTPRequestHandler):
+        def log_message(self,*args):pass
+        def do_GET(self):
+            if self.path=='/health':self.server.health_checks+=1
+            if self.path=='/get_load':self.send_error(404);return
+            payload=json.dumps({'data':[{'id':'test-model'}]} if self.path=='/v1/models' else {}).encode()
+            self.send_response(200);self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload)
+        def do_POST(self):
+            payload=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if not payload.get('stream'):
+                data=json.dumps({'worker':self.server.label}).encode();self.send_response(200)
+                self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+            self.send_response(200);self.send_header('Content-Type','text/event-stream')
+            self.send_header('x-test-worker',self.server.label);self.end_headers()
+            try:
+                self.wfile.write(b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n');self.wfile.flush()
+                while not gate.wait(.05):self.wfile.write(b': heartbeat\n\n');self.wfile.flush()
+                self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
+            except (BrokenPipeError,ConnectionResetError):pass
+    def port():
+        with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
+    for label in ['a','b']:
+        s=http.server.ThreadingHTTPServer(('127.0.0.1',0),Backend);s.daemon_threads=True;s.label=label;s.health_checks=0
+        threading.Thread(target=s.serve_forever,daemon=True).start();servers.append(s)
+    endpoint='http://127.0.0.1:'+str(port());metrics_port=port()
+    argv=['launch_router','--host','127.0.0.1','--port',endpoint.rsplit(':',1)[1],
+        '--worker-urls',*[f'http://127.0.0.1:{s.server_port}' for s in servers],
+        '--policy','cache_aware','--cache-threshold','1.0','--balance-abs-threshold','0',
+        '--balance-rel-threshold','1.0','--disable-retries','--health-check-interval-secs','1',
+        '--health-success-threshold','1','--worker-startup-check-interval','1',
+        '--worker-startup-timeout-secs','15','--prometheus-host','127.0.0.1',
+        '--prometheus-port',str(metrics_port),'--log-level','warning']
+    bootstrap=f"import sys,runpy;sys.path.insert(0,{runtime!r});sys.argv={argv!r};runpy.run_module('vllm_router.launch_router',run_name='__main__')"
+    log=(tmp_path/'router.log').open('w');process=subprocess.Popen([sys.executable,'-c',bootstrap],stdout=log,stderr=log)
+    def wait_for(predicate,seconds=5):
+        deadline=time.monotonic()+seconds
+        while time.monotonic()<deadline:
+            try:
+                if predicate():return
+            except (httpx.HTTPError,ValueError):pass
+            time.sleep(.05)
+        raise AssertionError((tmp_path/'router.log').read_text()[-3000:])
+    try:
+        with httpx.Client(trust_env=False,timeout=5) as client:
+            wait_for(lambda:client.get(endpoint+'/readiness').status_code==200,20)
+            def load():
+                rows=parse_metrics(client.get(f'http://127.0.0.1:{metrics_port}/metrics').text)
+                values=[r['value'] for r in rows if r['name']=='vllm_router_worker_load']
+                return sum(values) if values else None
+            body={'model':'test-model','messages':[{'role':'user','content':'hold'}],'max_tokens':64,'stream':True}
+            with client.stream('POST',endpoint+'/v1/chat/completions',json=body) as response:
+                assert response.status_code==200;busy=response.headers['x-test-worker']
+                held_lines=response.iter_lines()
+                assert next(held_lines).startswith('data:')
+                wait_for(lambda:load()==1)
+                baseline=min(s.health_checks for s in servers)
+                def probe():
+                    for _ in range(12):
+                        r=client.post(endpoint+'/v1/chat/completions',json={**body,'stream':False,'messages':[{'role':'user','content':'quick'}]})
+                        assert r.status_code==200 and r.json()['worker']!=busy
+                probe()
+                wait_for(lambda:min(s.health_checks for s in servers)>=baseline+12,25)
+                assert load()==1,'Health checks erased the active SSE request'
+                probe()
+            wait_for(lambda:load()==0)
+            with client.stream('POST',endpoint+'/v1/chat/completions',json=body) as response:
+                lines=response.iter_lines();assert next(lines).startswith('data:');wait_for(lambda:load()==1)
+                gate.set();assert any('[DONE]' in line for line in lines)
+            wait_for(lambda:load()==0)
+    finally:
+        gate.set();process.terminate()
+        try:process.wait(5)
+        except subprocess.TimeoutExpired:process.kill();process.wait(5)
+        for s in servers:s.shutdown();s.server_close()
+        log.close()
+
+
+def test_cache_aware_commands_keep_strict_load_thresholds_and_runtime_pin(tmp_path):
+    import hashlib
+    cfg=expand_config(config())
+    for name in router_configs(cfg):
+        argv,_=commands(cfg,name)
+        assert "'cache_aware'" in argv[-1]
+        assert "'--balance-abs-threshold', '0'" in argv[-1]
+        assert "'--balance-rel-threshold', '1.0'" in argv[-1]
+    library=tmp_path/'vllm_router_rs.abi3.so';library.write_bytes(b'accepted')
+    digest=hashlib.sha256(library.read_bytes()).hexdigest();manifest=tmp_path/'load-accounting.json'
+    manifest.write_text(json.dumps({'acceptance_passed':True,'library_sha256':digest}))
+    router={'runtime':str(tmp_path),'load_accounting_manifest':str(manifest),'library_sha256':digest}
+    validate_router_runtime(router)
+    library.write_bytes(b'changed')
+    with pytest.raises(RuntimeError,match='checksum changed'):validate_router_runtime(router)
 
 
 @pytest.mark.parametrize('queue_size', [0, 2])

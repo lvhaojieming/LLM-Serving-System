@@ -21,6 +21,22 @@ from heterogeneous_compute.benchmark_telemetry import (
 SLO={'ttft_seconds':2,'tpot_seconds':.1,'e2e_seconds':20}
 
 
+def test_user_minimum_rate_prevents_repeating_lower_baseline_rates():
+    experiment=Experiment.__new__(Experiment)
+    experiment.config={'coarse_rates':[16,24],'coarse_seconds':1,'fine_seconds':1,'minimum_search_rate':16}
+    experiment.active=set();rates=[]
+    async def noop(*args):pass
+    async def timeline():
+        while True:await asyncio.sleep(1)
+    async def stage(session,rate,*args):
+        rates.append(rate);return {'load_valid':True,'passed':False}
+    experiment.preflight=noop;experiment.drain=noop;experiment.timeline=timeline;experiment.stage=stage
+    try:asyncio.run(experiment.execute())
+    except RuntimeError as exc:assert 'configured minimum' in str(exc)
+    else:raise AssertionError('A failed initial rate must not become a capacity claim')
+    assert rates==[16]
+
+
 def utilization_fixture():
     workers={name:{'base_url':f'http://{name}/v1','node':node,'devices':devices} for name,node,devices in
         [('a1','a',[0,1]),('a2','b',[0]),('stopped','a',[2,3]),('m1','m',[0,1]),('i1','i',[0,1])]}
