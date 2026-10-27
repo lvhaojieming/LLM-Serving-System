@@ -102,5 +102,33 @@
     "interpretation": "Gateway control response exceeded the old three-second scrape deadline under overload. This does not establish the deeper latency cause or a measured capacity boundary.",
     "change": "Read Gateway metrics on the existing loopback application port using canonical gateway_config; configurable ten-second timeout and matching future wait budget. Scrape failures still stop the benchmark; never zero-fill. Business SLO, admission limits and client timeout remain unchanged.",
     "validation": "58 system-benchmark/serving regression tests passed, including retained real HAProxy and official Router CPU fixtures. Confirmed telemetry configuration changes no service fingerprint. Renewed real descending scan required for overload acceptance."
+  },
+  "startup_acceptance": {
+    "run_id": "20261027T105055Z",
+    "code_version": "0e90c00b5102349f1d112125ad50bc537144335f",
+    "healthy_workers": 28,
+    "pool_worker_counts": {
+      "ascend": 13,
+      "musa": 7,
+      "iluvatar": 8
+    },
+    "gateway_measurement_scrapes": 60,
+    "gateway_measurement_scrape_failures": 0,
+    "gateway_measurement_tcp_established_peak": 1046,
+    "observer_packet_drops": 0,
+    "scope": "One full high-load stage completed and the next lower stage started automatically. This does not validate the remaining scan or long-term capacity.",
+    "complete_64rps_stage": {
+      "sent": 19200,
+      "planned": 19200,
+      "actual_rate": 64.0,
+      "success_ratio": 0.2568229166666667,
+      "slo_ratio": 0.2568229166666667,
+      "goodput": 16.433333333333334,
+      "passed": false,
+      "load_valid": true,
+      "resource_stable": true,
+      "queue_stability_required": false
+    },
+    "automatically_advanced_to_rate": 48
   }
 }
