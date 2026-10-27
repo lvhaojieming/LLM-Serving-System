@@ -217,5 +217,60 @@
       "path": "artifacts/serving/system-benchmark/20261027T105055Z",
       "retained": "All final server artifacts, source.zip at the measured code version, local checksum manifest and offline analysis guide. Raw artifacts remain outside Git."
     }
+  },
+  "completed_18rps_test": {
+    "run_id": "20261027T113010Z",
+    "code_version": "efeeff2c2b545944da2df06075fe206d177e5f5a",
+    "healthy_workers": 28,
+    "result": {
+      "rate": 18,
+      "sent": 5400,
+      "actual_rate": 18.0,
+      "success_ratio": 1.0,
+      "slo_ratio": 1.0,
+      "goodput": 17.166666666666668,
+      "cohort_success": 5400,
+      "cohort_good": 5400,
+      "passed": true,
+      "load_valid": true,
+      "resource_stable": true,
+      "errors": {},
+      "queue_stable": false,
+      "queue_changes": {
+        "ascend910c-01": 0.0,
+        "s5000-01": 67.35000000000001,
+        "iluvatar150-02": 0.0,
+        "iluvatar150-01": 0.0,
+        "ascend910c-02": 0.0,
+        "s5000-02": 90.65,
+        "gateway_queue": 0.0
+      },
+      "queue_stability_required": false
+    },
+    "comparison_to_20261027T105055Z": {
+      "only_benchmark_configuration_difference": "coarse_rates changed from [64,48,32,24] to [18]",
+      "same_serving_snapshot_and_exact_workload": true,
+      "same_frozen_identities": {
+        "healthy_workers": true,
+        "router_pools": true,
+        "identities": true,
+        "service_processes": true
+      },
+      "interpretation": "18 req/s passes this short measurement while 24 req/s failed the preceding scan. No finer point or long-duration stable capacity is established."
+    },
+    "limitation": "MUSA waiting queues grew substantially at both nodes. Queue stability was observation-only by user instruction. A five-minute complete-cohort success/SLO pass is not a stationary-queue or long-term capacity claim.",
+    "offline_copy": {
+      "completed_at_utc": "2026-10-27T11:41:13.227578+00:00",
+      "server_files_sha256_verified": 38,
+      "bytes": 42563358,
+      "jsonl_validated_records": {
+        "requests.jsonl": 6564,
+        "timeline.jsonl": 619,
+        "routes.jsonl": 306,
+        "telemetry.jsonl": 752
+      },
+      "path": "artifacts/serving/system-benchmark/20261027T113010Z",
+      "temporary_sync_script_removed": true
+    }
   }
 }
