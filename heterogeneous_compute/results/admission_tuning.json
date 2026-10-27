@@ -81,15 +81,71 @@
     "regression_tests_passed": 175,
     "real_haproxy_tests": "SSE slot occupancy, bounded queue, overflow, timeout, cancellation, control bypass and graceful drain using retained official HAProxy 2.8.30",
     "six_containers_reused": true,
-    "all_model_and_router_process_identities_unchanged": true,
     "healthy_workers_after_frontend_restart": 29,
     "configured_workers": 32,
     "only_restarted": [
       "gateway",
-      "admission"
+      "admission",
+      "musa-97-1"
     ],
     "resource_limits_restored": false,
-    "system_capacity_and_stability": "Pending the new independent benchmark; larger limits are a candidate configuration, not an optimality claim."
+    "system_capacity_and_stability": "Pending the new independent benchmark; larger limits are a candidate configuration, not an optimality claim.",
+    "frontend_rollout_kept_all_model_router_processes": true,
+    "post_rollout_recovery": {
+      "failed_preflight_run": "20261027T072645Z",
+      "worker": "musa-97-1",
+      "endpoint": "192.168.162.97:18741",
+      "devices": [
+        2,
+        3
+      ],
+      "failure": "Repeated exact-answer probe returned 5!!!!!!!!!!!!!!! with length termination; other seven MUSA workers returned 5 and stopped.",
+      "action": "Restarted this owned worker inside its original retained container, with unchanged runtime flags, devices and model files.",
+      "post_restart_exact_checks": 6,
+      "mixed_concurrent_cases": [
+        {
+          "workload_name": "short",
+          "passed": true,
+          "usage": {
+            "prompt_tokens": 256,
+            "total_tokens": 320,
+            "completion_tokens": 64
+          },
+          "done": true,
+          "finish_reason": "length",
+          "tpot_ms": 69.02759598423948
+        },
+        {
+          "workload_name": "long-output",
+          "passed": true,
+          "usage": {
+            "prompt_tokens": 256,
+            "total_tokens": 1280,
+            "completion_tokens": 1024
+          },
+          "done": true,
+          "finish_reason": "length",
+          "tpot_ms": 47.38551725516003
+        },
+        {
+          "workload_name": "long-input",
+          "passed": true,
+          "usage": {
+            "prompt_tokens": 2048,
+            "total_tokens": 2112,
+            "completion_tokens": 64
+          },
+          "done": true,
+          "finish_reason": "length",
+          "tpot_ms": 63.59351774592633
+        }
+      ],
+      "exact_checks_after_mixed": 3,
+      "all_acceptance_passed": true,
+      "cause": "Root cause remains undetermined. Restart recovery is established; this is not proof of a permanent runtime fix.",
+      "raw_evidence": "artifacts/optimization/admission-tuning/musa-recovery",
+      "retention": "Keep failed preflight as diagnostic evidence, separate from capacity results."
+    }
   },
   "reproduction": {
     "config": "heterogeneous_compute/configs/system_benchmark.json",
