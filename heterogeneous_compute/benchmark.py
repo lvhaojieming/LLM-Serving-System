@@ -11,19 +11,20 @@ import hashlib
 import importlib.metadata
 import json
 from pathlib import Path
+import statistics
 import subprocess
 import time
 import urllib.request
 
 
-def request(endpoint, body):
+def request(endpoint, body, timeout=180):
     query = urllib.request.Request(endpoint+'/v1/chat/completions',
         data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(query, timeout=180) as response:
+    with urllib.request.urlopen(query, timeout=timeout) as response:
         return json.load(response)
 
 
-def acceptance(endpoint, directory, served_model='Qwen3-14B', require_kv_state=True):
+def acceptance(endpoint, directory, served_model='Qwen3-14B', require_kv_state=True, timeout=180):
     cases = [('2+3等于多少？只输出数字。', '5'),
              ('法国的首都是哪里？只回答城市名。', '巴黎'),
              ('What is 7 minus 4? Reply with only the digit.', '3')]
@@ -33,7 +34,7 @@ def acceptance(endpoint, directory, served_model='Qwen3-14B', require_kv_state=T
         started = time.perf_counter()
         response = request(endpoint, dict(model=served_model,
             messages=[dict(role='user', content=prompt)], temperature=0, max_tokens=16,
-            chat_template_kwargs=dict(enable_thinking=False)))
+            chat_template_kwargs=dict(enable_thinking=False)), timeout=timeout)
         actual = response['choices'][0]['message']['content'].strip()
         row = dict(prompt=prompt, expected=expected, actual=actual,
                     passed=actual == expected, seconds=time.perf_counter()-started,
@@ -153,10 +154,126 @@ def native_matrix(config, vendor, config_path):
         raise
 
 
+def fixed_stream(endpoint, served_model, messages, input_tokens, output_tokens, seed, timeout=60):
+    """Validate a complete fixed-token SSE response and measure decode TPOT."""
+    body = dict(model=served_model, messages=messages, temperature=0, seed=seed,
+                max_tokens=output_tokens, ignore_eos=True, stream=True,
+                stream_options={'include_usage': True},
+                chat_template_kwargs={'enable_thinking': False})
+    query = urllib.request.Request(endpoint + '/v1/chat/completions',
+        data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'})
+    arrivals, content, usage, finish, done = [], [], None, None, False
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(query, timeout=timeout) as response:
+        for line in response:
+            if not line.startswith(b'data:'):
+                continue
+            payload = line[5:].strip()
+            if payload == b'[DONE]':
+                done = True
+                continue
+            event = json.loads(payload)
+            if event.get('error'):
+                raise RuntimeError('Backend stream error: ' + str(event['error']))
+            if event.get('usage'):
+                usage = event['usage']
+            for choice in event.get('choices', []):
+                if choice.get('finish_reason'):
+                    finish = choice['finish_reason']
+                text = choice.get('delta', {}).get('content')
+                if text:
+                    arrivals.append(time.perf_counter())
+                    content.append(text)
+    if not (done and usage and finish == 'length' and len(arrivals) > 1
+            and usage.get('prompt_tokens') == input_tokens
+            and usage.get('completion_tokens') == output_tokens):
+        raise RuntimeError('Incomplete SSE or fixed-token budget mismatch: ' + str(usage))
+    return dict(passed=True, usage=usage, done=done, finish_reason=finish,
+                tpot_ms=1000 * (arrivals[-1] - arrivals[0]) / (output_tokens - 1),
+                content_sha256=hashlib.sha256(''.join(content).encode()).hexdigest())
+
+
+def runtime_acceptance(args):
+    """Reuse the exact-answer checks for selected live workers, then probe SSE.
+
+    This bounded rollout check is separate from the open-loop capacity experiment.
+    A frozen workload file makes the token budget identical across vendor clients.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from heterogeneous_compute.serving import expand_config, generation_workers
+    config = expand_config(json.loads(args.serving_config.read_text()))
+    workers = generation_workers(config)
+    names = args.services or list(workers)
+    if not set(names).issubset(workers):
+        raise ValueError('Unknown generation worker')
+    if args.num_prompts < 1 or any(n < 1 for n in args.concurrencies):
+        raise ValueError('Request counts and concurrencies must be positive')
+    if args.output_tokens < 2 or args.input_tokens < 1:
+        raise ValueError('Runtime probes need positive input and at least two output tokens')
+    prompts = json.loads(args.workload.read_text())
+    if not prompts:
+        raise ValueError('Empty frozen workload')
+    directory = args.result_dir
+    directory.mkdir(parents=True, exist_ok=True)
+    marker = directory / 'status.json'
+    with marker.open('x') as stream:
+        stream.write('{}')
+    report = dict(status='running', seed=args.seed, input_tokens=args.input_tokens,
+                  output_tokens=args.output_tokens, requests_per_concurrency=args.num_prompts,
+                  workload_sha256=hashlib.sha256(args.workload.read_bytes()).hexdigest(),
+                  runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                  scope='Exact-answer and fixed-token SSE rollout acceptance; not capacity or long-term stability',
+                  workers={})
+    timeout = getattr(args, 'timeout_seconds', 60)
+    marker.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    try:
+        for name in names:
+            report['current_worker'] = name
+            marker.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+            worker = workers[name]
+            endpoint = worker['base_url'].removesuffix('/v1')
+            output = directory / name
+            output.mkdir()
+            checks = acceptance(endpoint, output, worker['model'], require_kv_state=False, timeout=timeout)
+            row = dict(worker=worker, exact_answer_passed=checks['passed'], cases={})
+            # The warmup is retained separately and excluded from the comparison.
+            row['warmup'] = fixed_stream(endpoint, worker['model'], prompts[0],
+                args.input_tokens, args.output_tokens, args.seed, timeout)
+            for concurrency in args.concurrencies:
+                def one(index):
+                    return fixed_stream(endpoint, worker['model'], prompts[index % len(prompts)],
+                        args.input_tokens, args.output_tokens, args.seed, timeout)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+                    rows = list(pool.map(one, range(args.num_prompts)))
+                times = [r['tpot_ms'] for r in rows]
+                row['cases'][str(concurrency)] = dict(requests=rows,
+                    median_tpot_ms=statistics.median(times), max_tpot_ms=max(times),
+                    tpot_slo_ms=args.tpot_slo_ms,
+                    slo_pass=sum(t <= args.tpot_slo_ms for t in times))
+            report['workers'][name] = row
+            marker.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+            print(json.dumps(dict(event='runtime_worker_accepted', name=name,
+                cases={c:{k:v for k,v in r.items() if k != 'requests'} for c,r in row['cases'].items()})), flush=True)
+        report['status'] = 'complete'
+    except Exception as error:
+        report.update(status='failed', error=str(error))
+        raise
+    finally:
+        report['finished_at'] = datetime.now(timezone.utc).isoformat()
+        marker.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path)
     parser.add_argument('--system-config', type=Path, help='Open-loop unified-system SLO capacity and stability configuration')
+    parser.add_argument('--serving-config', type=Path, help='Bounded acceptance of selected live generation workers')
+    parser.add_argument('--services', nargs='+', help='Worker names for --serving-config')
+    parser.add_argument('--workload', type=Path, help='Frozen chat-message workloads for --serving-config')
+    parser.add_argument('--tpot-slo-ms', type=float, default=100)
+    parser.add_argument('--timeout-seconds', type=float, default=60)
     parser.add_argument('--vendor', help='Native vendor key from the configuration')
     parser.add_argument('--result-dir', type=Path, help='Cross-vendor validation output; never overwrites an existing run')
     parser.add_argument('--concurrencies', type=int, nargs='+', default=[1, 2, 4, 8])
@@ -165,6 +282,11 @@ def main():
     parser.add_argument('--output-tokens', type=int, default=64)
     parser.add_argument('--seed', type=int, default=20261010)
     args = parser.parse_args()
+    if args.serving_config:
+        if args.config or args.system_config or args.vendor or not args.result_dir or not args.workload:
+            parser.error('--serving-config requires --workload/--result-dir and is a separate mode')
+        runtime_acceptance(args)
+        return 0
     if args.system_config:
         if args.config or args.vendor or not args.result_dir:
             parser.error('--system-config requires --result-dir and cannot combine with --config/--vendor')

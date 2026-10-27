@@ -1,0 +1,413 @@
+{
+  "recorded_at_utc": "2026-10-27T05:14:26.321684+00:00",
+  "status": "deployed_with_documented_musa_graph_exception",
+  "scope": "Retained six-node AWQ TP2/PP1 deployment; validate MUSA shared-memory transport, Iluvatar .60 decode graphs, and installed MUSA graph compatibility. Not a global optimum claim.",
+  "configuration": "heterogeneous_compute/configs/native_awq.json",
+  "source_sha256": {
+    "heterogeneous_compute/serving.py": "ee28c7601fabfa2caa17c098dd77fa14738d7f65533a190280e73e79294681e9",
+    "heterogeneous_compute/benchmark.py": "53974a76f50d1f59c9c0a389fa04a6b672f19e8b81d132baf353284ae882b922",
+    "heterogeneous_compute/configs/native_awq.json": "ea420c83e4943b911d47d52ed510e299c58dc7b5c8bc98247ccf3fc1b7bd75ae",
+    "heterogeneous_compute/configs/serving.json": "39664a205a5c90a07ad071af59d4ff997ab020eef4368c9c4e6f575bb9366de0",
+    "heterogeneous_compute/configs/system_benchmark.json": "d52de2437652c17a229bd8501963a5af31d427120ce7ca4d963a8abdbf0b8906"
+  },
+  "seed": 20261022,
+  "workload": {
+    "input_tokens": 256,
+    "output_tokens": 128,
+    "temperature": 0,
+    "ignore_eos": true,
+    "prefix_caching": false,
+    "concurrencies": [
+      1,
+      4
+    ],
+    "measured_requests_per_concurrency_per_worker": 4,
+    "warmups_per_worker": 1,
+    "exact_answer_checks_per_worker": 6,
+    "client_timeout_seconds": 60
+  },
+  "musa_shared_memory": {
+    "passed": true,
+    "replicas": 8,
+    "actual_commands_and_environment_verified": true,
+    "execution_mode": "V0 eager; explicit vendor exception",
+    "standard_mccl": true,
+    "custom_all_reduce": false,
+    "MCCL_SHM_DISABLE": "0",
+    "MCCL_P2P_DISABLE": "1",
+    "before_tpot_ms_range": [
+      74.53,
+      117.32
+    ],
+    "after_c1_median_tpot_ms_range": {
+      "minimum": 45.589,
+      "maximum": 51.261
+    },
+    "after_c4_median_tpot_ms_range": {
+      "minimum": 49.589,
+      "maximum": 57.931
+    },
+    "workers": [
+      {
+        "node": "s5000-01",
+        "service": "musa-awq",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 46.90506060307068,
+            "max_tpot_ms": 49.1249842686564,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 57.930721894023925,
+            "max_tpot_ms": 57.93182335163313,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        }
+      },
+      {
+        "node": "s5000-01",
+        "service": "musa-97-0",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 48.26460743513633,
+            "max_tpot_ms": 49.59553323583457,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 51.334091636359574,
+            "max_tpot_ms": 51.33441962507062,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        }
+      },
+      {
+        "node": "s5000-01",
+        "service": "musa-97-1",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 45.73777248334932,
+            "max_tpot_ms": 47.78294090738916,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 49.58851802287491,
+            "max_tpot_ms": 49.58902401702962,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        }
+      },
+      {
+        "node": "s5000-01",
+        "service": "musa-97-2",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 45.589125707862884,
+            "max_tpot_ms": 45.71229402401199,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 49.6648257821945,
+            "max_tpot_ms": 50.72056601835987,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        }
+      },
+      {
+        "node": "s5000-02",
+        "service": "musa-96-2",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 49.84587580323087,
+            "max_tpot_ms": 51.54643515739077,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 51.30869111822603,
+            "max_tpot_ms": 52.422867409562265,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        }
+      },
+      {
+        "node": "s5000-02",
+        "service": "musa-96-0",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 50.986059279525726,
+            "max_tpot_ms": 52.46807011000181,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 54.57608794883319,
+            "max_tpot_ms": 54.97987532308032,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        }
+      },
+      {
+        "node": "s5000-02",
+        "service": "musa-96-1",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 51.26061573222199,
+            "max_tpot_ms": 52.15039329903978,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 54.97554121639829,
+            "max_tpot_ms": 55.39519555901551,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        }
+      },
+      {
+        "node": "s5000-02",
+        "service": "musa-96-3",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 49.51087776782343,
+            "max_tpot_ms": 50.978333551315664,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 53.094811334667035,
+            "max_tpot_ms": 53.5082982359894,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        }
+      }
+    ]
+  },
+  "iluvatar_60_graph": {
+    "passed": true,
+    "replicas": 4,
+    "mode": "FULL decode graph replay; prefill remains NONE for this workload",
+    "before_eager_median_tpot_ms_range": [
+      26.24,
+      26.63
+    ],
+    "after_c1_median_tpot_ms_range": {
+      "minimum": 12.957,
+      "maximum": 13.34
+    },
+    "after_c4_median_tpot_ms_range": {
+      "minimum": 17.666,
+      "maximum": 18.255
+    },
+    "workers": [
+      {
+        "service": "iluvatar-60-0",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 12.957306026928421,
+            "max_tpot_ms": 12.979438821748486,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 17.672237349806103,
+            "max_tpot_ms": 19.27575359384962,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        },
+        "graph_capture_and_full_decode_replay_verified": true
+      },
+      {
+        "service": "iluvatar-awq",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 12.979819443018183,
+            "max_tpot_ms": 12.994481111312007,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 17.68802687723747,
+            "max_tpot_ms": 19.297033984683395,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        },
+        "graph_capture_and_full_decode_replay_verified": true,
+        "graph_evidence": [
+          "(Worker_TP0 pid=68919) INFO 10-27 12:45:40 [gpu_model_runner.py:6585] Graph capturing finished in 1 secs, took 0.20 GiB",
+          "(APIServer pid=68870) INFO 10-27 12:45:53 [cuda_graph.py:123] | 1               | 1             | 0            | FULL         | 618   |",
+          "(APIServer pid=68870) INFO 10-27 12:45:53 [cuda_graph.py:123] | 3               | 4             | 1            | FULL         | 2     |"
+        ]
+      },
+      {
+        "service": "iluvatar-60-2",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 13.340113169374312,
+            "max_tpot_ms": 13.368118048359559,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 18.254549226056284,
+            "max_tpot_ms": 19.865601070547903,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        },
+        "graph_capture_and_full_decode_replay_verified": true,
+        "graph_evidence": [
+          "(Worker_TP0 pid=70067) INFO 10-27 12:46:51 [gpu_model_runner.py:6585] Graph capturing finished in 1 secs, took 0.20 GiB",
+          "(APIServer pid=70019) INFO 10-27 12:47:03 [cuda_graph.py:123] | 1               | 1             | 0            | FULL         | 627   |",
+          "(APIServer pid=70019) INFO 10-27 12:47:03 [cuda_graph.py:123] | 3               | 4             | 1            | FULL         | 2     |"
+        ]
+      },
+      {
+        "service": "iluvatar-60-3",
+        "cases": {
+          "1": {
+            "median_tpot_ms": 12.984994798898697,
+            "max_tpot_ms": 12.987598857483057,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          },
+          "4": {
+            "median_tpot_ms": 17.665976154302633,
+            "max_tpot_ms": 19.23437988913552,
+            "tpot_slo_ms": 100,
+            "slo_pass": 4
+          }
+        },
+        "graph_capture_and_full_decode_replay_verified": true,
+        "graph_evidence": [
+          "(Worker_TP0 pid=71215) INFO 10-27 12:48:00 [gpu_model_runner.py:6585] Graph capturing finished in 1 secs, took 0.20 GiB",
+          "(APIServer pid=71167) INFO 10-27 12:48:13 [cuda_graph.py:123] | 1               | 1             | 0            | FULL         | 601   |",
+          "(APIServer pid=71167) INFO 10-27 12:48:13 [cuda_graph.py:123] | 3               | 4             | 1            | FULL         | 2     |"
+        ]
+      }
+    ]
+  },
+  "musa_graph_compatibility": {
+    "passed": false,
+    "default_v0_on_96": "Five graph shapes captured and sequential exact answers passed; concurrent exact-answer requests timed out.",
+    "v0_record_streams_on_96": "TORCH_MCCL_AVOID_RECORD_STREAMS=1 did not resolve the concurrent timeout.",
+    "v1_on_96": "Installed PH1 capability 3.1 platform code overrides KV block_size to 64; its V1 non-MLA attention selector accepts only 32. Model initialization failed despite CLI --block-size 32.",
+    "p2p_graph_both_nodes": {
+      "s5000-01": "failed",
+      "s5000-02": "failed"
+    },
+    "all_failed_candidates_stopped": true,
+    "both_canaries_restored_and_revalidated": true,
+    "production_mode": "Explicit V0 eager with standard MCCL and shared memory"
+  },
+  "deployment": {
+    "healthy_awq_workers": 29,
+    "configured_awq_workers": 32,
+    "known_missing_workers": [
+      "ascend-23-2",
+      "ascend-23-3",
+      "ascend-23-4"
+    ],
+    "containers": {
+      "ascend910c-01": {
+        "id": "24d0e0f73fb1027bb7112a5eed971b20d9bf2a3f654d4cd77a549e525a0d4c4e",
+        "healthy_awq_workers": 5,
+        "configured_awq_workers": 8,
+        "versions": {
+          "torch": "2.7.1+cpu",
+          "torch-npu": "2.7.1",
+          "vllm": "0.11.0+empty",
+          "vllm-ascend": "0.11.0",
+          "transformers": "4.57.1"
+        }
+      },
+      "ascend910c-02": {
+        "id": "76e39f09b67d9307dd24c3f41dcb17dd99b16e1675ef762cfab429572e096201",
+        "healthy_awq_workers": 8,
+        "configured_awq_workers": 8,
+        "versions": {
+          "torch": "2.10.0+cpu",
+          "torch-npu": "2.10.0.post4",
+          "vllm": "0.26.0+empty",
+          "vllm-ascend": "0.1.dev4525+g155f68974",
+          "transformers": "5.14.1"
+        }
+      },
+      "s5000-01": {
+        "id": "a725763f7114c94a7f113a162f27d421db6b611ed008e4690c36261114de1032",
+        "healthy_awq_workers": 4,
+        "configured_awq_workers": 4,
+        "versions": {
+          "torch": "2.5.0",
+          "torch-musa": "2.5.0",
+          "vllm": "0.9.3.dev0+ga5dd03c1e.d20260309.empty",
+          "transformers": "4.52.4"
+        }
+      },
+      "s5000-02": {
+        "id": "8bdb98d38602655af5d84e0424a99c61a9aaf0413a33546283ec9eb979c38a0c",
+        "healthy_awq_workers": 4,
+        "configured_awq_workers": 4,
+        "versions": {
+          "torch": "2.5.0",
+          "torch-musa": "2.5.0",
+          "vllm": "0.9.3.dev0+ga5dd03c1e.d20260309.empty",
+          "transformers": "4.52.4"
+        }
+      },
+      "iluvatar150-01": {
+        "id": "3b1a689e8564e59c1065dc08d63c5b4ce2cf1ac6465bf306d910ae0e5e1ab710",
+        "healthy_awq_workers": 4,
+        "configured_awq_workers": 4,
+        "versions": {
+          "torch": "2.10.0+corex.4.5.0.20260619",
+          "vllm": "0.23.0",
+          "vllm-iluvatar": "0.23.0",
+          "transformers": "5.12.1"
+        }
+      },
+      "iluvatar150-02": {
+        "id": "a5eb6100dd54ad96957e07c13e59a06d53d4e6e4647c454a6a4ce85bb76986af",
+        "healthy_awq_workers": 4,
+        "configured_awq_workers": 4,
+        "versions": {
+          "torch": "2.10.0+corex.4.5.0.20260619",
+          "vllm": "0.23.0",
+          "vllm-iluvatar": "0.23.0",
+          "transformers": "5.12.1"
+        }
+      }
+    },
+    "resource_limits_enabled": false,
+    "containers_recreated": false,
+    "device_budgets_changed": false,
+    "original_legacy_services_restarted": false
+  },
+  "validation": {
+    "linux_unit_tests_passed": 39,
+    "fixed_length_measured_requests": 96,
+    "fixed_length_warmups": 12,
+    "exact_answer_checks": 72,
+    "measured_requests_with_tpot_at_most_100ms": 96,
+    "long_term_stability_verified": false,
+    "capacity_verified": false
+  },
+  "reproduction": {
+    "runtime_probe_command": "python3 heterogeneous_compute/benchmark.py --serving-config heterogeneous_compute/configs/serving.json --services <WORKER> --workload artifacts/optimization/awq-runtime/workload.json --result-dir artifacts/optimization/<UNIQUE_ID> --num-prompts 4 --concurrencies 1 4 --input-tokens 256 --output-tokens 128 --seed 20261022 --timeout-seconds 60",
+    "raw_evidence_directory": "artifacts/optimization/awq-runtime",
+    "note": "Do not merge previous eager/Socket capacity points with this deployment. A new system run must freeze the updated actual execution modes and process identities."
+  }
+}

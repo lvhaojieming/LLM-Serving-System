@@ -40,13 +40,21 @@ embedding 用 `/v1/embeddings`。昇腾容器映射八张物理卡对应的十�
 配置清单不表示全部设备已经验收通过。
 驱动暴露的逻辑设备数不等于物理板卡数。
 
-AWQ 权重来源与算子差异见 `configs/native_awq.json`。摩尔和天数现有实例
-显式保留原配置的 eager；`.58` 新副本默认厂商图模式并开启 cudagraph metrics，
-昇腾新启动默认厂商图模式，`.24` 开启 cudagraph metrics。
+AWQ 权重来源与算子差异见 `configs/native_awq.json`。厂商图模式为默认设置，
+`vendors.<vendor>.enforce_eager` 可记录经过验证的厂商例外；副本级配置优先。
+昇腾和天数两台的 AWQ 使用厂商图模式，天数开启 cudagraph metrics。
+摩尔暂时显式保留 V0 eager：当前安装栈的 V0 图模式在并发请求下超时，
+V1 则因 PH1 KV block-size 与 attention backend 的要求冲突而未能初始化。
+这些失败不能视为图模式验收通过；复现和最终落地结果见
+[`results/runtime_optimization.json`](results/runtime_optimization.json)。
 两台摩尔节点的全部 AWQ 副本必须显式设置 `--disable-custom-all-reduce`，
-统一使用标准 MCCL。`MCCL_P2P_DISABLE=1` 仅约束 MCCL，不能替代这个 vLLM 参数。
+统一使用标准 MCCL，保留 `MCCL_P2P_DISABLE=1`，并设置 `MCCL_SHM_DISABLE=0`
+启用同机共享内存通道。此前同时关闭 P2P 和 SHM 的 Socket 路径已被实测确认
+会显著增加 TP2 通信开销。`MCCL_P2P_DISABLE=1` 不能替代这个 vLLM 参数。
 启动验收同时核对实际命令和日志中的 `disable_custom_all_reduce=True`。
 实际图捕获／回放必须依据运行证据，不能仅凭省略 eager 参数判断。
+天数当前验证的是 FULL decode 图回放，256-token prefill 仍为 NONE；
+这不是全阶段都使用图执行的声明。
 本轮不启用原 AWQ/GPTQ 学习路由头，其标签不代表三家硬件。`auto` 不开放。
 `route_embeddings={"awq":"embedding"}` 要求 `awq` 每次先完成真实向量计算，
 输入是按消息顺序用换行连接的 `role: content`。Embedding 失败则不发送 AWQ，
@@ -125,7 +133,7 @@ HTTP 200 也可能只表示部分服务可用。Gateway 还核对官方 `/worker
 功能验收不代表完成吞吐上限、持续稳定性、同条件性能比较或 K8s 生命周期验收。
 
 本轮全设备部署结果摘要见 [`results/all_devices_serving.json`](results/all_devices_serving.json)。
-当前天数每节点八设备 AWQ 与 `.58` 独立 Embedding 的验收摘要见
+2026-10-22 天数每节点八设备 AWQ 与 `.58` 独立 Embedding 的历史验收摘要见
 [`results/iluvatar_serving.json`](results/iluvatar_serving.json)。两台天数各四个 TP2 副本均完成
 真实生成；`.58` 四个 AWQ 副本均验证 FULL decode 图回放。Embedding 原生与 Gateway
 接口均返回有效的 1024 维向量；pooling 图回放尚未证明，不宣称其图模式性能。
@@ -150,7 +158,25 @@ HTTP 200 也可能只表示部分服务可用。Gateway 还核对官方 `/worker
 达标比例至少 95%。TTFT 与端到端延迟不再统计、展示或用于 SLO，60 秒仍是
 请求超时界限。保留发送、完成及生成 token 所需内部时间，用于请求率、TPOT、
 积压和恢复。容量搜索、两小时验证、三档过载恢复均由配置控制。
-实际执行模式混合，不能把本系统结果解释为三厂商在相同图模式下的硬件比较。
+当前实际执行模式为昇腾／天数 AWQ 图模式、摩尔共享内存 V0 eager。
+不能把本系统结果解释为三厂商在相同图模式下的硬件比较。
+
+优化或滚动更新后，可先对指定的健康副本执行有界验收，复用已有的精确答案检查，
+再验证固定 token 预算、完整 SSE、单请求与小批并发的 TPOT。`--workload` 使用
+之前冻结的聊天消息列表，响应中的实际 input/output tokens 必须与参数完全一致：
+
+```bash
+python3 heterogeneous_compute/benchmark.py \
+ --serving-config heterogeneous_compute/configs/serving.json \
+ --services musa-96-2 \
+ --workload artifacts/optimization/awq-runtime/workload.json \
+ --result-dir artifacts/optimization/<UNIQUE_ACCEPTANCE_ID> \
+ --num-prompts 4 --concurrencies 1 4 --input-tokens 256 --output-tokens 128 \
+ --seed 20261022 --timeout-seconds 60
+```
+
+此检查不替代完整容量、过载恢复和两小时稳定性实验。配置或执行模式变化后，
+必须使用新 run ID，重新冻结健康清单；不把旧 eager／Socket 结果与新结果拼接。
 
 在 `.96` 现有容器内，以 `/workspace` 为工作目录启动控制器；结果目录每次使用唯一
 实验标识，不覆盖旧结果：

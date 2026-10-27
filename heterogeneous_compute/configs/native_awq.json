@@ -9,7 +9,7 @@
   "max_num_seqs": 16,
   "max_num_batched_tokens": 4096,
   "gpu_memory_utilization": 0.6,
-  "enforce_eager": true,
+  "enforce_eager": false,
   "prefix_caching": false,
   "resource_limits_enabled": false,
   "weight_provenance": "Existing project-generated standard AWQ GEMM/group128; not Qwen-published AWQ weights",
@@ -41,6 +41,7 @@
   },
   "vendors": {
     "musa": {
+      "enforce_eager": true,
       "ssh_alias": "s5000-01",
       "host": "192.168.162.97",
       "container": "heteroserve-musa",
@@ -59,12 +60,13 @@
         "MCCL_IB_DISABLE": "1",
         "MCCL_NET": "Socket",
         "MCCL_P2P_DISABLE": "1",
-        "MCCL_SHM_DISABLE": "1",
+        "MCCL_SHM_DISABLE": "0",
         "GLOO_SOCKET_IFNAME": "ens18f0",
         "OMP_NUM_THREADS": "4"
       }
     },
     "iluvatar": {
+      "engine_args": ["--cudagraph-metrics"],
       "ssh_alias": "iluvatar150-02",
       "host": "192.168.162.60",
       "container": "heteroserve-iluvatar-pp",

@@ -134,6 +134,8 @@ def generation_workers(config):
 def native_spec(service):
     spec = json.loads((ROOT / service["config"]).read_text())
     target = spec["vendors"][service["vendor"]]
+    # A verified vendor exception can retain eager while other vendors use graphs.
+    spec["enforce_eager"] = target.get("enforce_eager", spec.get("enforce_eager", False))
     for key, value in service.get("overrides", {}).items():
         if key == "env":
             target["env"].update(value)

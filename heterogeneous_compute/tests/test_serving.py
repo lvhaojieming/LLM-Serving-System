@@ -98,8 +98,8 @@ def test_native_lifecycle_uses_retained_vendor_configuration(name, vendor):
     argv, env = commands(config(), name)
     assert argv[argv.index('--quantization') + 1] == 'awq'
     assert argv[argv.index('--tensor-parallel-size') + 1] == '2'
-    # These existing native profiles explicitly retain eager; no implicit mode switch.
-    assert '--enforce-eager' in argv
+    # Graphs are the default; MUSA retains a documented vendor exception.
+    assert ('--enforce-eager' in argv) == (vendor == 'musa')
     if vendor == 'musa':
         assert env['MUSA_VISIBLE_DEVICES'] == '6,7' and '--block-size' in argv
     else:
@@ -190,12 +190,13 @@ def test_all_musa_replicas_use_standard_mccl_and_disable_custom_allreduce():
     names = [name for name, service in cfg['services'].items() if service.get('vendor') == 'musa']
     assert len(names) == 8
     for name in names:
-        argv, _ = commands(cfg, name)
+        argv, env = commands(cfg, name)
         assert '--disable-custom-all-reduce' in argv
         assert '--enforce-eager' in argv and argv[argv.index('--tensor-parallel-size') + 1] == '2'
+        assert env['MCCL_SHM_DISABLE'] == '0' and env['MCCL_P2P_DISABLE'] == '1'
 
 
-def test_new_iluvatar_node_defaults_to_graph_without_changing_retained_eager_workers():
+def test_iluvatar_nodes_use_graphs_and_keep_embedding_device_isolation():
     cfg = expand_config(config())
     for name in ['iluvatar-58-0', 'iluvatar-58-1', 'iluvatar-58-2', 'iluvatar-58-3']:
         argv, env = commands(cfg, name)
@@ -203,10 +204,20 @@ def test_new_iluvatar_node_defaults_to_graph_without_changing_retained_eager_wor
         assert '--disable-custom-all-reduce' in argv and '--cudagraph-metrics' in argv
         assert env['NCCL_SOCKET_IFNAME'] == 'enp147s0f0'
         assert not {1, 2, 12, 13, 15}.intersection(map(int, env['CUDA_VISIBLE_DEVICES'].split(',')))
-    retained, _ = commands(cfg, 'iluvatar-awq')
-    assert '--enforce-eager' in retained
+    for name in ['iluvatar-awq', 'iluvatar-60-0', 'iluvatar-60-2', 'iluvatar-60-3']:
+        argv, _ = commands(cfg, name)
+        assert '--enforce-eager' not in argv and '--cudagraph-metrics' in argv
     embedding = cfg['services']['embedding']
     assert embedding['argv'][embedding['argv'].index('--runner') + 1] == 'pooling'
     assert '--enforce-eager' not in embedding['argv']
     assert embedding['env']['CUDA_VISIBLE_DEVICES'] == '12,13'
     assert 'HETEROSERVE_ILUVATAR_POOLING_ONLY' not in embedding['env']
+
+
+def test_service_mode_override_takes_precedence_over_vendor_exception():
+    cfg = expand_config(config())
+    cfg['services']['musa-96-2']['overrides']['enforce_eager'] = False
+    argv, _ = commands(cfg, 'musa-96-2')
+    assert '--enforce-eager' not in argv
+    other, _ = commands(cfg, 'musa-96-3')
+    assert '--enforce-eager' in other

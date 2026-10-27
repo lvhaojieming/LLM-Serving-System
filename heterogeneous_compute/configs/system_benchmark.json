@@ -41,7 +41,7 @@
   ],
   "supplementary_policy": "Only after the main run; require context compatibility and separately frozen SLO. Never silently truncate inputs or invent SLO.",
   "stop_policy": "Stop benchmark load on frozen worker/container/process identity change, stale telemetry, OOM, client saturation, stop file, or unexpired residual requests. Never restart model services.",
-  "execution_mode": "Current retained deployment: Ascend and .58 Iluvatar AWQ graph; MUSA and .60 Iluvatar AWQ eager. This is a mixed-mode system capacity result, not a graph-mode vendor comparison. Each awq request first executes Embedding on separate .58 devices; pooling graph replay is not established.",
+  "execution_mode": "Ascend AWQ ACL graph and both Iluvatar AWQ nodes FULL decode graph; MUSA V0 eager with standard MCCL and SHM enabled after graph concurrency incompatibility. Mixed-mode system capacity, not a graph-mode vendor comparison. Each awq request first executes Embedding on separate .58 devices; pooling graph replay is not established.",
   "scope": "Full pipeline: actual Embedding, then uniform random selection among healthy vendor pools, then a pool-specific official vLLM round_robin Router selects one AWQ instance. No model service/container replacement; no CPU/memory/PID limits.",
   "load_generator": {"node": "s5000-02", "container": "heteroserve-musa-pp", "shares_compute_node": true}
 }

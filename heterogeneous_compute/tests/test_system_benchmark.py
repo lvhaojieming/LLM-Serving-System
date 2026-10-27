@@ -26,6 +26,31 @@ def row(sent,finished,success=True,**extra):
                 input_tokens=256,output_tokens=128,**extra)
 
 
+def test_runtime_probe_requires_done_exact_budgets_and_no_backend_error():
+    from heterogeneous_compute.benchmark import fixed_stream
+    import urllib.request
+    import pytest
+
+    def payload(done=True, input_tokens=256, error=False):
+        events = [{'choices': [{'delta': {'content': 'a'}, 'finish_reason': None}]},
+                  {'choices': [{'delta': {'content': 'b'}, 'finish_reason': 'length'}]},
+                  {'choices': [], 'usage': {'prompt_tokens': input_tokens, 'completion_tokens': 128}}]
+        if error:
+            events.append({'error': {'message': 'worker failed'}})
+        data = ''.join('data: ' + json.dumps(event) + '\n\n' for event in events)
+        return (data + ('data: [DONE]\n\n' if done else '')).encode()
+
+    def run(data):
+        opener = SimpleNamespace(open=lambda *args, **kwargs: io.BytesIO(data))
+        with patch.object(urllib.request, 'build_opener', return_value=opener):
+            return fixed_stream('http://unused', 'model', [], 256, 128, 1)
+
+    assert run(payload())['passed']
+    for data in [payload(done=False), payload(input_tokens=255), payload(error=True)]:
+        with pytest.raises(RuntimeError):
+            run(data)
+
+
 def test_goodput_completion_window_and_sent_cohort_are_not_confused():
     rows=[row(8,11),row(12,15),row(19,21),row(14,15,False,error='429')]
     result=summarize(rows,10,20,SLO)
