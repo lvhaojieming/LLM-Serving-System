@@ -11,7 +11,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from heterogeneous_compute.system_benchmark import Experiment, Receiver, build_workload, export_results, meets_slo, summarize, workload_profiles
+from heterogeneous_compute.system_benchmark import Experiment, Receiver, build_workload, export_results, meets_slo, resolved_cohort_window, summarize, workload_profiles
 from heterogeneous_compute.benchmark_telemetry import (
     METRIC_NAMES, PacketObserver, admission_waiting, device_values, ipv4_tcp, metric_sum, packet_filter, parse_metrics,
     router_worker_snapshot,
@@ -19,6 +19,19 @@ from heterogeneous_compute.benchmark_telemetry import (
 
 
 SLO={'ttft_seconds':2,'tpot_seconds':.1,'e2e_seconds':20}
+
+
+def test_recovery_does_not_omit_pending_requests_with_long_total_deadline():
+    # The old fixed 60-second lookback would judge the first minute successful
+    # while a 150-second request could still time out later.
+    assert resolved_cohort_window(1000,1120,150) is None
+    assert resolved_cohort_window(1000,1209,150) is None
+    cohort=resolved_cohort_window(1000,1210,150)
+    assert cohort==(1000,1060)
+    pending_then_failed=row(1020,1170,False,error='timeout')
+    result=summarize([row(1001,1002),pending_then_failed],*cohort,SLO)
+    assert result['sent']==2 and result['success_ratio']==.5
+    assert resolved_cohort_window(1000,1120,60)==(1000,1060)
 
 
 def test_mixed_workload_is_reproducible_exact_per_block_and_validates_proportions():

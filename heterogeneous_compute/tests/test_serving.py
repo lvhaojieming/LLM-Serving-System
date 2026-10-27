@@ -25,6 +25,21 @@ def test_admission_keeps_public_address_and_loopback_application_distinct():
         admission_config({**cfg, 'admission': {**cfg['admission'], 'max_queue': -1}})
 
 
+def test_admission_preserves_cleanup_headroom_and_configured_time_budgets():
+    cfg=expand_config(config())
+    rendered=admission_config(cfg)
+    assert 'maxconn 512 maxqueue 128' in rendered
+    assert 'timeout queue 10s' in rendered
+    assert 'timeout client 180s' in rendered and 'timeout server 180s' in rendered
+    assert 'timeout http-keep-alive 75s' in rendered
+    assert 'hard-stop-after 190s' in rendered
+    assert cfg['gateway']['max_inflight']==640
+    cfg['admission']['max_inflight']=641
+    with pytest.raises(ValueError,match='internal Gateway budget'):admission_config(cfg)
+    cfg['admission'].pop('max_inflight')
+    assert 'maxconn 640 maxqueue 128' in admission_config(cfg)
+
+
 @pytest.mark.parametrize('queue_size', [0, 2])
 def test_official_haproxy_queue_stream_cancel_overflow_and_timeout(tmp_path, queue_size):
     """Exercise the real proxy, not a reimplementation of its scheduler.
@@ -84,7 +99,7 @@ def test_official_haproxy_queue_stream_cancel_overflow_and_timeout(tmp_path, que
     threading.Thread(target=server.serve_forever, daemon=True).start()
     cfg = config()
     cfg['gateway'].update(host='127.0.0.1', port=port(), internal_port=server.server_port, max_inflight=1)
-    cfg['admission'].update(max_queue=queue_size, queue_timeout_seconds=1, metrics_port=port())
+    cfg['admission'].update(max_inflight=1, max_queue=queue_size, queue_timeout_seconds=1, metrics_port=port())
     path = tmp_path/'haproxy.cfg'; path.write_text(admission_config(cfg))
     subprocess.run([binary, '-c', '-f', str(path)], check=True)
     log = (tmp_path/'proxy.log').open('w')

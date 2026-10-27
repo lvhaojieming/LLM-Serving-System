@@ -41,6 +41,12 @@ def percentile(values,q):
     return values[i]+(values[j]-values[i])*(x-i)
 
 
+def resolved_cohort_window(start,now,timeout_seconds,window_seconds=60):
+    """Select only sent cohorts whose complete total deadline has elapsed."""
+    end=now-timeout_seconds
+    return (end-window_seconds,end) if end-window_seconds>=start else None
+
+
 def meets_slo(row,slo):
     if not slo or set(slo)-set(SLO_FIELDS):raise ValueError('Configure at least one supported latency SLO')
     return bool(row.get('success') and all(row.get(SLO_FIELDS[key]) is not None and row[SLO_FIELDS[key]]<=limit
@@ -429,7 +435,8 @@ class Experiment:
 
     async def drain(self):
         self.receiver.phase('draining',case=self.case)
-        for _ in range(185):
+        budget=math.ceil(max(self.config['timeout_seconds'],self.serving['gateway'].get('timeout_seconds',180)))+30
+        for _ in range(budget):
             self.check();q=self.receiver.queue()
             if not self.active and q['gateway_inflight']==0 and q['gateway_waiting']==0 and q['running']==0 and q['waiting']==0:return
             await asyncio.sleep(1)
@@ -549,10 +556,10 @@ class Experiment:
         good_since=None;restored=None;windows=[]
         while time.time()-recovery_start<c['recovery_max_seconds']:
             start,end,planned=await self.send_window(session,candidate*.5,60,'recovery')
-            # Evaluate the preceding sent cohort only after its full 60-second
-            # total deadline. Pending requests are never silently omitted.
-            cohort_start=max(recovery_start,start-60);cohort_end=start
-            window=summarize(self.completed,cohort_start,cohort_end,c['slo']) if cohort_end>cohort_start else {}
+            # Total deadlines vary with the workload. A short fixed lookback
+            # would omit still-pending long requests and overstate recovery.
+            cohort=resolved_cohort_window(recovery_start,end,c['timeout_seconds'])
+            window=summarize(self.completed,*cohort,c['slo']) if cohort else {}
             windows.append({'start':start,'end':end,'resolved_cohort':window,'queue':r.queue()})
             normal=bool(window and window['success_ratio']>=c['minimum_success_ratio'] and window['slo_ratio']>=c['minimum_slo_ratio']
                 and window['send_lag_p99']<=c['max_send_lag_seconds'] and r.queue()['waiting']<=baseline+2
@@ -570,7 +577,8 @@ class Experiment:
 
     async def execute(self):
         import aiohttp
-        connector=aiohttp.TCPConnector(limit=0,limit_per_host=0,ttl_dns_cache=300)
+        connector=aiohttp.TCPConnector(limit=0,limit_per_host=0,ttl_dns_cache=300,
+                                      keepalive_timeout=self.config.get('client_keepalive_seconds',15))
         async with aiohttp.ClientSession(connector=connector,trust_env=False) as session:
             timeline=asyncio.create_task(self.timeline())
             try:

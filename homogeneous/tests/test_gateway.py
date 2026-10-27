@@ -13,6 +13,17 @@ def config():
     return json.loads((Path(__file__).resolve().parents[1] / "deploy/gateway.json").read_text())
 
 
+def test_upstream_connection_pool_scales_with_the_pipeline_budget():
+    cfg=config();cfg.update(max_inflight=640,max_upstream_connections=672,upstream_keepalive_seconds=2)
+    app=create_app(cfg,httpx.MockTransport(lambda request:httpx.Response(200)),Runtime())
+    with TestClient(app):
+        assert app.state.upstream_limits.max_connections==672
+        assert app.state.upstream_limits.max_keepalive_connections==640
+        assert app.state.upstream_limits.keepalive_expiry==2
+    cfg['max_upstream_connections']=100
+    with pytest.raises(ValueError,match='connection pool'):validate(cfg)
+
+
 class Runtime:
     chat_template = "canonical-template"
     def __init__(self, expert="awq"):

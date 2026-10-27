@@ -68,6 +68,13 @@ def validate(config):
         raise ValueError("random_route_health_seconds must be a finite nonnegative number")
     if type(config.get("max_inflight", 16)) is not int or config.get("max_inflight", 16) < 1:
         raise ValueError("Gateway requires a positive request budget")
+    if (type(config.get('max_upstream_connections',config.get('max_inflight',16)+32)) is not int
+            or config.get('max_upstream_connections',config.get('max_inflight',16)+32)<config.get('max_inflight',16)):
+        raise ValueError('Upstream connection pool must cover the request budget')
+    for key,default in [('upstream_keepalive_seconds',2),('keep_alive_seconds',5)]:
+        value=config.get(key,default)
+        if type(value) not in (int,float) or not math.isfinite(value) or value<=0:
+            raise ValueError(key+' must be a positive finite number')
     registry = config.get("worker_registry")
     if registry is not None:
         if not isinstance(registry, dict):
@@ -104,8 +111,12 @@ def create_app(config, transport=None, router_runtime=None):
             else:
                 from .routing.ascend import AscendRouterRuntime
                 runtime = await asyncio.to_thread(AscendRouterRuntime, settings)
-        async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(config.get("timeout_seconds", 180)), trust_env=False) as client:
+        budget=config.get('max_inflight',16)
+        limits=httpx.Limits(max_connections=config.get('max_upstream_connections',budget+32),
+                            max_keepalive_connections=budget,keepalive_expiry=config.get('upstream_keepalive_seconds',2))
+        async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(config.get("timeout_seconds", 180)), limits=limits, trust_env=False) as client:
             app.state.client = client
+            app.state.upstream_limits = limits
             app.state.runtime = runtime
             yield
             state["draining"] = True
@@ -420,6 +431,7 @@ def main():
     config = json.loads(Path(args.config).read_text())
     logging.basicConfig(level=logging.INFO)
     uvicorn.run(create_app(config), host=config.get("host", "0.0.0.0"), port=config.get("port", 8000), workers=1,
+                timeout_keep_alive=config.get('keep_alive_seconds',5),
                 timeout_graceful_shutdown=config.get("drain_seconds", 240) + 10)
 
 

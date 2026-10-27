@@ -30,8 +30,10 @@ embedding 用 `/v1/embeddings`。昇腾容器映射八张物理卡对应的十�
 容器和模型进程不替换。公网入口仍为 18600，Gateway 移至回环 18610，
 HAProxy 指标仅监听回环 18612。现有官方 vLLM Router 继续负责池内路由。
 
-`configs/serving.json` 中 `admission` 配置初始等待容量 32、等待上限 2 秒，
-并发数复用 `gateway.max_inflight=32`。这些是待压测的初始参数，不宣称最优。
+`configs/serving.json` 中 `admission.max_inflight=512`、等待容量 128、等待上限 10 秒。
+Gateway 内部保护上限为 640，为客户端取消后仍在清理的流预留空间，避免内外同为 32 时
+发生二次 429；对外正常准入仍由 HAProxy 的 512 控制。这些是待压测参数，不宣称最优。
+HTTPX 上游连接池显式配置为 672，避免默认 100 连接形成新的隐藏瓶颈。
 采用 HAProxy `server maxconn`、`timeout queue`、`option abortonclose`；
 `queue(gateway)` ACL 拒绝超额请求，单调度线程串行执行准入与入队。
 不能仅依靠 `server maxqueue`：溢出还可能进入 backend 队列。
@@ -42,8 +44,12 @@ HAProxy 指标仅监听回环 18612。现有官方 vLLM Router 继续负责池�
 健康、模型列表和指标接口不排队；管理接口不通过代理暴露。
 服务管理器先启动 Gateway 再启动 admission；停止顺序相反，HAProxy 用 SIGUSR1
 软停止并等存量响应完成，然后排空 Gateway。只改前端时使用 `--only gateway admission`。
-HAProxy 的 client/server 60 秒是空闲超时，不是总时限；压测客户端保持
-`aiohttp.ClientTimeout(total=60)`，从发出请求开始计时，包含排队、Embedding 和生成。
+HAProxy 的 client/server 空闲超时为 180 秒，软停止预算为 190 秒。
+压测客户端使用 `aiohttp.ClientTimeout(total=150)`，从发出请求开始计时，包含排队、
+Embedding 和生成。长输出 1,024 token 在 TPOT 100ms 下仅生成就约需 102 秒，
+历史 60 秒总超时会提前截断这类合格请求。新旧超时策略必须分轮保存，不合并容量结果。
+客户端连接保活 15 秒，入口保活 75 秒，Gateway 保活 90 秒；Gateway 访问上游的闲置连接
+2 秒后退役。恢复判断仅统计完整 150 秒期限已结束的发送批次，避免遗漏仍在途的长请求。
 TPOT SLO 仍为 100ms，不包含排队；单独记录 `x-heteroserve-queue-ms`，不恢复 TTFT/E2E 指标。
 
 遥测保留 `haproxy_backend_current_queue{proxy="gateway"}` 与累计最大队列值；
@@ -72,9 +78,12 @@ dpkg-deb -x liblua5.4-0_5.4.6-3build2_amd64.deb .
 没有修改或复制其源码。HAProxy 真实代理行为测试复用 `tests/test_serving.py`，
 设置 `HETEROSERVE_HAPROXY` 和相应 `LD_LIBRARY_PATH` 后运行 pytest；
 覆盖 SSE 占用、32 请求突发拒绝、等待超时、取消清理和控制接口。
-本轮实际结果见 [`results/gateway_admission.json`](results/gateway_admission.json)：
+初始 32/32/2 秒配置的历史验收见 [`results/gateway_admission.json`](results/gateway_admission.json)：
 170 项回归通过；80 请求真实模型突发中 42 个完整成功、22 个等待超时、16 个容量拒绝，
 在途和等待采样峰值均为 32。此处超时和拒绝是有意触发的过载验收，不代表正常负载失败率。
+当前 mixed 配置调整及历史瓶颈证据见 [`results/admission_tuning.json`](results/admission_tuning.json)：
+175 项回归通过，入口重启后仍有 29 个健康 AWQ 实例；六个容器、模型和 Router 进程身份
+保持不变。新容量和稳定性结论仍需独立实验，不能由配置放大直接推断。
 
 `replica_groups` 按设备集合展开服务和 Router worker，不复制项目或实现。
 启动前验证 AWQ 分区与预留设备无重叠且覆盖完整清单。天数的“AWQ 使用 8 张卡”
