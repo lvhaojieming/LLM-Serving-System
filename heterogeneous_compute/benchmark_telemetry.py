@@ -43,6 +43,13 @@ METRIC_NAMES = {
         'heteroserve_gateway_inflight', 'heteroserve_gateway_router_calls_total',
         'heteroserve_gateway_rejected_total',
     }),
+    'admission': frozenset({
+        'haproxy_backend_current_queue', 'haproxy_backend_max_queue',
+        'haproxy_server_current_queue', 'haproxy_server_max_queue',
+        'haproxy_backend_current_sessions', 'haproxy_backend_http_responses_total',
+        'haproxy_frontend_http_responses_total', 'haproxy_backend_connection_errors_total',
+        'haproxy_backend_queue_time_average_seconds', 'haproxy_backend_queue_time_max_seconds',
+    }),
     'router': frozenset({
         'vllm_router_active_workers', 'vllm_router_worker_health',
         'vllm_router_processed_requests_total', 'vllm_router_requests_total',
@@ -98,6 +105,15 @@ def metric_sum(rows, name, exclude_reasons=()):
     return sum(selected) if selected else None
 
 
+def admission_waiting(snapshot):
+    rows = snapshot.get('admission_metrics', [])
+    if not isinstance(rows, list):
+        return None
+    # Backend qcur already includes its server queue; never add both gauges.
+    return metric_sum([r for r in rows if r['labels'].get('proxy') == 'gateway'],
+                      'haproxy_backend_current_queue')
+
+
 def router_worker_snapshot(reports):
     """Retain pool identity while exposing the legacy combined workers list."""
     result={'workers':[],'pools':{},'errors':{}}
@@ -120,7 +136,8 @@ def process_sample():
         try:
             stat = (d / 'stat').read_text().rsplit(')', 1)[1].split()
             cmd = (d / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
-            role = ('gateway' if 'heteroserve.gateway' in cmd else 'router' if ('vllm_router.launch_router' in cmd or cmd.strip() == 'vllm::router') else
+            role = ('admission' if cmd.split(' ',1)[0].endswith('/haproxy') else
+                    'gateway' if 'heteroserve.gateway' in cmd else 'router' if ('vllm_router.launch_router' in cmd or cmd.strip() == 'vllm::router') else
                     'benchmark' if ('benchmark.py' in cmd or 'benchmark_telemetry.py' in cmd) else 'model' if 'serve ' in cmd else None)
             procs[int(d.name)] = dict(pid=int(d.name), ppid=int(stat[1]), role=role,
                 start_ticks=int(stat[19]), cpu_seconds=(int(stat[11])+int(stat[12]))/os.sysconf('SC_CLK_TCK'),
@@ -434,6 +451,8 @@ def collect(config_path,node,central,max_seconds=86400):
                 jobs['router_workers:'+label]=pool.submit(fetch,f"http://{host}:{router['port']}/workers")
                 jobs['router_metrics:'+label]=pool.submit(fetch,f"http://{host}:{router['metrics_port']}/metrics")
             jobs['gateway_metrics']=pool.submit(fetch,f"http://127.0.0.1:{config['gateway']['port']}/metrics")
+            if config.get('admission'):
+                jobs['admission_metrics']=pool.submit(fetch,f"http://127.0.0.1:{config['admission']['metrics_port']}/metrics")
         for name,future in jobs.items():
             try:
                 value=future.result(timeout=5)
@@ -450,6 +469,8 @@ def collect(config_path,node,central,max_seconds=86400):
                     sample['router_metrics'].extend({**row,'labels':{**row['labels'],'router_pool':label}} for row in rows)
                 elif name=='gateway_metrics':
                     sample[name]=parse_metrics(value,METRIC_NAMES['gateway'])
+                elif name=='admission_metrics':
+                    sample[name]=parse_metrics(value,METRIC_NAMES['admission'])
                 elif name=='container':
                     data=json.loads(value['stdout']); state=data['State']
                     sample['container']={'id':data['Id'],'image':data['Image'],'restart_count':data['RestartCount'],

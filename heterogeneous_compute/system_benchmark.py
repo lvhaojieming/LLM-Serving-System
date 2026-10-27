@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from heterogeneous_compute.serving import expand_config, generation_workers, gateway_config, router_configs, router_workers
-from heterogeneous_compute.benchmark_telemetry import metric_sum
+from heterogeneous_compute.benchmark_telemetry import admission_waiting, metric_sum
 
 
 SLO_FIELDS={'ttft_seconds':'ttft','tpot_seconds':'tpot','e2e_seconds':'e2e'}
@@ -74,6 +74,7 @@ class Receiver:
         nodes={w['node'] for w in generation_workers(serving).values()} | {serving['services']['gateway']['node']}
         self.nodes=nodes
         self.gateway_node=serving['services']['gateway']['node']
+        self.admission_enabled=bool(serving.get('admission'))
         self.router_members={router.get('pool',name):{w['base_url'].removesuffix('/v1')
             for w in router_workers(serving,name).values()} for name,router in router_configs(serving).items()}
         receiver=self
@@ -141,8 +142,10 @@ class Receiver:
             for name,worker in node.get('workers',{}).items():
                 if worker.get('running') is None or worker.get('waiting') is None:missing.append(name)
                 else:running+=worker['running'];waiting+=worker['waiting']
-        gw=metric_sum(self.latest.get(self.gateway_node,{}).get('gateway_metrics',[]),'heteroserve_gateway_inflight')
-        return {'running':running,'waiting':waiting,'gateway_inflight':gw,'missing_workers':missing}
+        snapshot=self.latest.get(self.gateway_node,{})
+        gw=metric_sum(snapshot.get('gateway_metrics',[]),'heteroserve_gateway_inflight')
+        queued=admission_waiting(snapshot) if getattr(self,'admission_enabled',False) else 0
+        return {'running':running,'waiting':waiting,'gateway_inflight':gw,'gateway_waiting':queued,'missing_workers':missing}
 
 
 class Experiment:
@@ -161,6 +164,10 @@ class Experiment:
         if time.time()>self.deadline:raise RuntimeError('Experiment lifetime exceeded')
         if self.abort:raise RuntimeError(self.abort)
         if not self.frozen:return
+        if getattr(self,'serving',{}).get('admission') and self.receiver.queue()['gateway_waiting'] is None:
+            raise RuntimeError('Admission queue telemetry is missing')
+        if getattr(self,'serving',{}).get('admission') and self.receiver.queue()['gateway_waiting']>self.serving['admission']['max_queue']:
+            raise RuntimeError('Admission queue exceeded its frozen capacity')
         if self.receiver.network.get('error'):raise RuntimeError('Request route observer failed')
         if self.receiver.network.get('packet_drops_total',0):raise RuntimeError('Route observer dropped packets; stop before claiming per-worker attribution')
         if self.receiver.workers()!=self.expected:raise RuntimeError('Frozen healthy worker set changed; no data concatenation across configurations')
@@ -173,7 +180,7 @@ class Experiment:
             identity=(c.get('id'),c.get('restart_count'),c.get('started_at'))
             if identity!=self.identities[node] or not c.get('running') or c.get('oom_killed'):
                 raise RuntimeError('Container identity/restart/OOM event: '+node)
-            current={p['pid']:p['start_ticks'] for p in row.get('process',{}).get('processes',[]) if p.get('role') in {'gateway','router','model'}}
+            current={p['pid']:p['start_ticks'] for p in row.get('process',{}).get('processes',[]) if p.get('role') in {'admission','gateway','router','model'}}
             for pid,stamp in self.process_identities[node].items():
                 if current.get(pid)!=stamp:raise RuntimeError('Frozen service process exited or restarted: '+node+'/'+str(pid))
 
@@ -195,7 +202,7 @@ class Experiment:
         c=self.config;output_tokens=output_tokens or c['output_tokens']
         sent=time.time();row={'index':index,'case':self.case,'phase':phase,'scheduled_at':scheduled,'sent_at':sent,
             'send_lag':max(0,sent-scheduled),'success':False,'request_id':None,'vendor':None,'worker':None,'selected_pool':None,'embedding_ms':None,
-            'tpot':None,'input_tokens':None,'output_tokens':None}
+            'tpot':None,'input_tokens':None,'output_tokens':None,'gateway_queue_ms':None}
         if 'ttft_seconds' in c['slo']:row['ttft']=None
         if 'e2e_seconds' in c['slo']:row['e2e']=None
         body={'model':model or c['model'],'messages':prompt,'temperature':0,'max_tokens':output_tokens,
@@ -207,6 +214,12 @@ class Experiment:
                 timeout=aiohttp.ClientTimeout(total=c['timeout_seconds'],connect=5),headers={'x-benchmark-request-id':str(index)}) as response:
                 row['http_status']=response.status;row['request_id']=response.headers.get('x-request-id')
                 row['selected_pool']=response.headers.get('x-moqe-expert')
+                queue_header=response.headers.get('x-heteroserve-queue-ms')
+                if queue_header is not None:
+                    try:
+                        elapsed=float(queue_header)
+                        if math.isfinite(elapsed) and elapsed>=0:row['gateway_queue_ms']=elapsed
+                    except ValueError:pass
                 embedding_header=response.headers.get('x-heteroserve-embedding-ms')
                 if embedding_header is not None:
                     try:
@@ -243,6 +256,8 @@ class Experiment:
                         elif finish in {'abort','error'}:row['error']='backend_abort'
                         elif endpoint is None and getattr(self,'embedding_required',False) and row['embedding_ms'] is None:
                             row['error']='missing_embedding_measurement' if embedding_header is None else 'invalid_embedding_measurement'
+                        elif endpoint is None and c.get('gateway_admission') and row['gateway_queue_ms'] is None:
+                            row['error']='missing_admission_measurement'
                         else:row['success']=True
         except asyncio.TimeoutError:row['error']='timeout'
         except aiohttp.ClientConnectionError as exc:row.update(error='connection_error',detail=type(exc).__name__)
@@ -282,7 +297,7 @@ class Experiment:
         self.identities={};self.process_identities={}
         for node in r.nodes:
             snapshot=r.latest[node];c=snapshot['container'];self.identities[node]=(c['id'],c['restart_count'],c['started_at'])
-            self.process_identities[node]={p['pid']:p['start_ticks'] for p in snapshot.get('process',{}).get('processes',[]) if p.get('role') in {'gateway','router','model'}}
+            self.process_identities[node]={p['pid']:p['start_ticks'] for p in snapshot.get('process',{}).get('processes',[]) if p.get('role') in {'admission','gateway','router','model'}}
             if c['limits']['Memory'] or c['limits']['CpuQuota'] not in {0,-1,None} or c['limits']['PidsLimit'] not in {0,-1,None}:
                 raise RuntimeError('Unexpected resource limits: '+node)
         for name,w in all_workers.items():
@@ -295,6 +310,11 @@ class Experiment:
             if not row['success']:raise RuntimeError('Direct generation failed: '+name+' '+str(row.get('error')))
         if vendors!={'ascend','musa','iluvatar'}:raise RuntimeError('All three vendors are required')
         if self.serving['gateway']['max_inflight']!=self.config['gateway_max_inflight']:raise RuntimeError('Gateway budget configuration mismatch')
+        if self.serving.get('admission'):
+            expected=self.config.get('gateway_admission',{})
+            if not expected or any(self.serving['admission'].get(key)!=value for key,value in expected.items()):
+                raise RuntimeError('Admission configuration is not frozen consistently')
+            if r.queue()['gateway_waiting'] is None:raise RuntimeError('Admission queue telemetry is missing')
         for node,snapshot in r.latest.items():
             for proc in snapshot.get('process',{}).get('processes',[]):
                 parameters=proc.get('inference_parameters')
@@ -357,6 +377,7 @@ class Experiment:
             'pooled_requests':len(pooled),'pooled_worker_coverage':sorted(mapped),'samples':dict(r.latest),
             'router_pools':{name:sorted(workers) for name,workers in self.router_identities.items()},
             'routing':{'random_routes':routing.get('random_routes',{}),'routers':routers},
+            'admission':self.serving.get('admission'),
             'pipeline':{'route_embeddings':routing.get('route_embeddings',{}),
                 'embedding_timing':'x-heteroserve-embedding-ms, finite nonnegative milliseconds',
                 'recorded_slo_metrics':[SLO_FIELDS[key] for key in self.config['slo']],
@@ -369,7 +390,7 @@ class Experiment:
         self.receiver.phase('draining',case=self.case)
         for _ in range(185):
             self.check();q=self.receiver.queue()
-            if not self.active and q['gateway_inflight']==0 and q['running']==0 and q['waiting']==0:return
+            if not self.active and q['gateway_inflight']==0 and q['gateway_waiting']==0 and q['running']==0 and q['waiting']==0:return
             await asyncio.sleep(1)
         raise RuntimeError('Residual server requests did not drain; subsequent load stopped')
 
@@ -403,12 +424,29 @@ class Experiment:
             first=[sum(w['waiting'] for w in r.get('workers',{}).values() if w.get('waiting') is not None) for r in values if r['received_at']<start+(end-start)/3]
             last=[sum(w['waiting'] for w in r.get('workers',{}).values() if w.get('waiting') is not None) for r in values if r['received_at']>=end-(end-start)/3]
             changes[node]=statistics.mean(last)-statistics.mean(first) if first and last else None
+        if self.serving.get('admission'):
+            values=[r for r in self.receiver.history if r['node']==self.receiver.gateway_node and start<=r.get('received_at',0)<end]
+            first=[admission_waiting(r) for r in values if r['received_at']<start+(end-start)/3]
+            last=[admission_waiting(r) for r in values if r['received_at']>=end-(end-start)/3]
+            changes['gateway_queue']=statistics.mean(last)-statistics.mean(first) if first and last and None not in first+last else None
         return all(v is not None and v<=2 for v in changes.values()),changes
+
+    def queue_statistics(self,start,end):
+        values={}
+        for snapshot in self.receiver.history:
+            if not start<=snapshot.get('received_at',0)<end:continue
+            for name,worker in snapshot.get('workers',{}).items():
+                if worker.get('waiting') is not None:values.setdefault(name,[]).append(worker['waiting'])
+            if self.serving.get('admission') and snapshot['node']==self.receiver.gateway_node:
+                value=admission_waiting(snapshot)
+                if value is not None:values.setdefault('gateway',[]).append(value)
+        return {name:{'sample_mean':statistics.mean(samples),'sample_peak':max(samples),'samples':len(samples)}
+                for name,samples in values.items()}
 
     def resources_stable(self,start,end):
         report={};stable=True
         for node in self.receiver.nodes:
-            for role in ['gateway','router','model']:
+            for role in ['admission','gateway','router','model']:
                 points=[]
                 for r in self.receiver.history:
                     t=r.get('received_at',0)
@@ -439,7 +477,7 @@ class Experiment:
         resources_ok,resources=self.resources_stable(start,end)
         result=summarize(self.completed,start,end,self.config['slo'])
         result.update(label=label,rate=rate,repeat=repeat,case=self.case,start=start,end=end,planned=planned,
-            queue_stable=stable,queue_changes=changes,healthy_workers=len(self.expected))
+            queue_stable=stable,queue_changes=changes,queue_statistics=self.queue_statistics(start,end),healthy_workers=len(self.expected))
         result['resource_trends']=resources;result['resource_stable']=resources_ok
         result['load_valid']=result['sent']>=planned*self.config['minimum_send_ratio'] and (result['send_lag_p99'] or 0)<=self.config['max_send_lag_seconds']
         result['passed']=bool(result['load_valid'] and result['success_ratio']>=self.config['minimum_success_ratio'] and result['slo_ratio']>=self.config['minimum_slo_ratio'] and stable and resources_ok)
@@ -456,7 +494,7 @@ class Experiment:
     async def recovery(self,session,candidate,multiplier):
         c=self.config;r=self.receiver
         await self.stage(session,candidate*.5,c['overload_baseline_seconds'],'recovery-baseline')
-        q=r.queue();baseline=q['waiting']
+        q=r.queue();baseline=q['waiting'];gateway_baseline=q['gateway_waiting']
         self.case+=1;self.completed.clear()
         r.phase('overload',rate=candidate*multiplier,multiplier=multiplier,case=self.case)
         overload_start,overload_end,_=await self.send_window(session,candidate*multiplier,c['overload_seconds'],'overload')
@@ -472,7 +510,8 @@ class Experiment:
             window=summarize(self.completed,cohort_start,cohort_end,c['slo']) if cohort_end>cohort_start else {}
             windows.append({'start':start,'end':end,'resolved_cohort':window,'queue':r.queue()})
             normal=bool(window and window['success_ratio']>=c['minimum_success_ratio'] and window['slo_ratio']>=c['minimum_slo_ratio']
-                and window['send_lag_p99']<=c['max_send_lag_seconds'] and r.queue()['waiting']<=baseline+2)
+                and window['send_lag_p99']<=c['max_send_lag_seconds'] and r.queue()['waiting']<=baseline+2
+                and r.queue()['gateway_waiting'] is not None and r.queue()['gateway_waiting']<=gateway_baseline+2)
             if normal:
                 good_since=good_since or start
                 if end-good_since>=c['recovery_hold_seconds']:restored=good_since-recovery_start;break
@@ -554,7 +593,7 @@ def export_results(directory,config,stages,routes,plots=True):
             node=w.get('node','')
             vendor='ascend' if node.startswith('ascend') else 'musa' if node.startswith('s5000') else 'iluvatar' if node.startswith('iluvatar') else None
             if vendor:vendors_by_worker.setdefault(w['base_url'].removesuffix('/v1'),vendor)
-    request_fields=['index','case','phase','request_id','selected_pool','worker','vendor','embedding_ms','scheduled_at','sent_at','send_lag','completed_at','input_tokens','output_tokens','http_status','error','success','slo_pass',
+    request_fields=['index','case','phase','request_id','selected_pool','worker','vendor','embedding_ms','gateway_queue_ms','scheduled_at','sent_at','send_lag','completed_at','input_tokens','output_tokens','http_status','error','success','slo_pass',
                     *[field for key,field in SLO_FIELDS.items() if key in config['slo']]]
     with (directory/'requests.csv').open('w',newline='',encoding='utf-8') as out:
         writer=csv.DictWriter(out,fieldnames=request_fields,extrasaction='ignore');writer.writeheader()
@@ -613,13 +652,13 @@ def export_results(directory,config,stages,routes,plots=True):
     if timeline:
         t0=timeline[0]['time'];x=[(r['time']-t0)/60 for r in timeline]
         fig,ax=plt.subplots(figsize=(10,4))
-        for key in ['client_active','gateway_inflight','waiting','running']:ax.plot(x,[r.get(key) for r in timeline],label=key)
+        for key in ['client_active','gateway_inflight','gateway_waiting','waiting','running']:ax.plot(x,[r.get(key) for r in timeline],label=key)
         ax.set(xlabel='Time (minutes)',ylabel='Requests');ax.legend();finish(fig,'backlog-time')
     resources={};devices={};health={}
     if (directory/'telemetry.jsonl').exists():
         for line in (directory/'telemetry.jsonl').open():
             r=json.loads(line);t=r['received_at'];node=r['node']
-            for role in ['gateway','router','model']:
+            for role in ['admission','gateway','router','model']:
                 ps=[p for p in r.get('process',{}).get('processes',[]) if p.get('role')==role]
                 if ps:resources.setdefault(node+'/'+role,[]).append((t,sum(p['rss_bytes'] for p in ps)/1024**2,sum(p['cpu_seconds'] for p in ps),sum(p['tcp_established'] for p in ps)))
             for d in r.get('device',{}).get('values',[]):devices.setdefault(node+'/'+str(d['device']),[]).append((t,d['utilization_percent'],d['memory_used_mib']))

@@ -2,7 +2,7 @@
 
 `serving.py` 复用三个厂商的独立原生 AWQ 实例、现有 Gateway 和官方
 `vllm-router==0.1.15`。配置集中在 `configs/serving.json`，不创建 K8s 集群或容器。
-当前 `awq` 完整路径为：实际 Embedding → 一级等概率随机选厂商池 →
+当前 `awq` 完整路径为：HAProxy 官方有界排队 → 实际 Embedding → 一级等概率随机选厂商池 →
 该池自己的官方 vLLM Router 按轮询选择健康实例。三个厂商池概率相同，
 不按池中的副本数量加权；Embedding 向量暂不参与随机决策。
 最新两级路径验收见 [`results/two_level_routing.json`](results/two_level_routing.json)，
@@ -22,6 +22,59 @@ embedding 用 `/v1/embeddings`。昇腾容器映射八张物理卡对应的十�
 `ascend-awq`、`musa-awq`、`iluvatar-awq` 用于指定厂商池诊断，直接进入该池二级 Router；
 常规整系统测试使用 `awq`，包含实际 Embedding 和一级随机选择。
 保持 `resource_limits_enabled=false`。
+
+## 入口排队
+
+排队复用 [HAProxy 2.8 官方 HTTP 队列](https://docs.haproxy.org/2.8/configuration.html)，
+不在 Python Gateway 中重写队列。现有 `.60` 容器增加一个 HAProxy 进程；
+容器和模型进程不替换。公网入口仍为 18600，Gateway 移至回环 18610，
+HAProxy 指标仅监听回环 18612。现有官方 vLLM Router 继续负责池内路由。
+
+`configs/serving.json` 中 `admission` 配置初始等待容量 32、等待上限 2 秒，
+并发数复用 `gateway.max_inflight=32`。这些是待压测的初始参数，不宣称最优。
+采用 HAProxy `server maxconn`、`timeout queue`、`option abortonclose`；
+`queue(gateway)` ACL 拒绝超额请求，单调度线程串行执行准入与入队。
+不能仅依靠 `server maxqueue`：溢出还可能进入 backend 队列。
+流式请求从下游请求开始至响应体结束占用名额；正常排队先于 Embedding。
+队列满返回 429（Retry-After: 1），官方等待超时返回 503；压测均计入失败。
+`max_queue=0` 关闭等待，用于对照实验。每次切换必须开始独立实验，不拼接容量数据。
+
+健康、模型列表和指标接口不排队；管理接口不通过代理暴露。
+服务管理器先启动 Gateway 再启动 admission；停止顺序相反，HAProxy 用 SIGUSR1
+软停止并等存量响应完成，然后排空 Gateway。只改前端时使用 `--only gateway admission`。
+HAProxy 的 client/server 60 秒是空闲超时，不是总时限；压测客户端保持
+`aiohttp.ClientTimeout(total=60)`，从发出请求开始计时，包含排队、Embedding 和生成。
+TPOT SLO 仍为 100ms，不包含排队；单独记录 `x-heteroserve-queue-ms`，不恢复 TTFT/E2E 指标。
+
+遥测保留 `haproxy_backend_current_queue{proxy="gateway"}` 与累计最大队列值；
+不与 server 同一队列重复相加，也不和模型 waiting 相加作为唯一积压数。
+timeline 额外记录 `gateway_waiting`，每阶段按 Gateway 和实例分别记录采样均值与峰值。
+5 秒采样峰值可能漏掉短暂尖峰；官方累计最大值覆盖进程生命周期，不能冒充某阶段峰值。
+排空、稳定性、恢复判断同时检查入口与实例队列，采集缺失保留缺失并停止实验。
+
+运行时复用 Ubuntu 官方包 `haproxy=2.8.30-0ubuntu0.24.04.1` 和
+`liblua5.4-0=5.4.6-3build2`，仅解包到 `artifacts/runtime/haproxy`，不覆盖系统库，
+不安装 systemd 服务、不重建环境或容器。该目录的 `manifest.json` 保留包和二进制校验值。
+首次准备（后续复用该目录）在现有 `.60` 容器内执行：
+
+```bash
+mkdir -p /workspace/artifacts/runtime/haproxy
+cd /workspace/artifacts/runtime/haproxy
+apt-get download haproxy=2.8.30-0ubuntu0.24.04.1 liblua5.4-0=5.4.6-3build2
+dpkg-deb -x haproxy_2.8.30-0ubuntu0.24.04.1_amd64.deb .
+dpkg-deb -x liblua5.4-0_5.4.6-3build2_amd64.deb .
+```
+
+安装版本的 vLLM Router 0.1.15 虽带 queue 参数，但其准入使用可补充令牌桶，
+归还令牌发生在响应头返回时，队列处理器还会派生额外等待任务，不能作为本次
+严格流式并发和总等待容量的实现。依据是该版本的
+[`src/middleware.rs`](https://github.com/vllm-project/router/blob/v0.1.15/src/middleware.rs)，
+没有修改或复制其源码。HAProxy 真实代理行为测试复用 `tests/test_serving.py`，
+设置 `HETEROSERVE_HAPROXY` 和相应 `LD_LIBRARY_PATH` 后运行 pytest；
+覆盖 SSE 占用、32 请求突发拒绝、等待超时、取消清理和控制接口。
+本轮实际结果见 [`results/gateway_admission.json`](results/gateway_admission.json)：
+170 项回归通过；80 请求真实模型突发中 42 个完整成功、22 个等待超时、16 个容量拒绝，
+在途和等待采样峰值均为 32。此处超时和拒绝是有意触发的过载验收，不代表正常负载失败率。
 
 `replica_groups` 按设备集合展开服务和 Router worker，不复制项目或实现。
 启动前验证 AWQ 分区与预留设备无重叠且覆盖完整清单。天数的“AWQ 使用 8 张卡”

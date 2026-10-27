@@ -2,11 +2,162 @@ import copy
 import json
 from pathlib import Path
 import pytest
-from heterogeneous_compute.serving import commands, expand_config, fingerprint, gateway_config, generation_workers, live, local, native_spec, router_configs, router_workers, serve_signature
+from heterogeneous_compute.serving import admission_config, commands, expand_config, fingerprint, gateway_config, generation_workers, live, local, native_spec, router_configs, router_workers, serve_signature
 
 
 def config():
     return json.loads((Path(__file__).resolve().parents[1] / "configs/serving.json").read_text())
+
+
+def test_admission_keeps_public_address_and_loopback_application_distinct():
+    cfg = expand_config(config())
+    assert list(cfg['services'])[-1] == 'admission'
+    assert cfg['gateway']['port'] == 18600
+    assert gateway_config(cfg)['port'] == 18610
+    assert gateway_config(cfg)['host'] == '127.0.0.1'
+    altered = copy.deepcopy(cfg)
+    altered['admission']['max_queue'] = 0
+    assert fingerprint(cfg, 'admission') != fingerprint(altered, 'admission')
+    assert fingerprint(cfg, 'gateway') == fingerprint(altered, 'gateway')
+    altered['gateway']['internal_port'] = 18611
+    assert fingerprint(cfg, 'gateway') != fingerprint(altered, 'gateway')
+    with pytest.raises(ValueError):
+        admission_config({**cfg, 'admission': {**cfg['admission'], 'max_queue': -1}})
+
+
+@pytest.mark.parametrize('queue_size', [0, 2])
+def test_official_haproxy_queue_stream_cancel_overflow_and_timeout(tmp_path, queue_size):
+    """Exercise the real proxy, not a reimplementation of its scheduler.
+
+    HETEROSERVE_HAPROXY selects the retained Linux binary. Dependencies stay in
+    that binary's configured LD_LIBRARY_PATH. Temporary HTTP servers use no GPU.
+    """
+    import concurrent.futures
+    import http.server
+    import os
+    import signal
+    import socket
+    import subprocess
+    import threading
+    import time
+    import httpx
+    from heterogeneous_compute.benchmark_telemetry import parse_metrics
+
+    binary = os.environ.get('HETEROSERVE_HAPROXY')
+    if not binary:
+        pytest.skip('Select the retained HAProxy binary for Linux integration')
+    gate = threading.Event()
+    counts = {'active': 0, 'peak': 0}
+    lock = threading.Lock()
+
+    class Backend(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            with lock:
+                counts['active'] += 1
+                counts['peak'] = max(counts['peak'], counts['active'])
+            try:
+                if payload.get('stream'):
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    self.end_headers()
+                    self.wfile.write(b'data: {"choices":[]}\n\n'); self.wfile.flush()
+                    while not gate.wait(.02):
+                        self.wfile.write(b': heartbeat\n\n'); self.wfile.flush()
+                    self.wfile.write(b'data: [DONE]\n\n'); self.wfile.flush()
+                else:
+                    assert gate.wait(5)
+                    self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                with lock: counts['active'] -= 1
+
+    def port():
+        with socket.socket() as s:
+            s.bind(('127.0.0.1', 0)); return s.getsockname()[1]
+
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Backend)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    cfg = config()
+    cfg['gateway'].update(host='127.0.0.1', port=port(), internal_port=server.server_port, max_inflight=1)
+    cfg['admission'].update(max_queue=queue_size, queue_timeout_seconds=1, metrics_port=port())
+    path = tmp_path/'haproxy.cfg'; path.write_text(admission_config(cfg))
+    subprocess.run([binary, '-c', '-f', str(path)], check=True)
+    log = (tmp_path/'proxy.log').open('w')
+    process = subprocess.Popen([binary, '-db', '-f', str(path)], stdout=log, stderr=log)
+    endpoint = f"http://127.0.0.1:{cfg['gateway']['port']}"
+    metrics = f"http://127.0.0.1:{cfg['admission']['metrics_port']}/metrics"
+
+    def queued():
+        rows = parse_metrics(httpx.get(metrics, trust_env=False).text)
+        return sum(r['value'] for r in rows if r['name'] == 'haproxy_backend_current_queue' and r['labels'].get('proxy') == 'gateway')
+
+    def wait_for(predicate):
+        deadline = time.monotonic() + .7
+        while time.monotonic() < deadline:
+            try:
+                if predicate(): return
+            except httpx.TransportError: pass
+            time.sleep(.01)
+        raise AssertionError('Proxy did not reach expected state')
+
+    def post():
+        return httpx.post(endpoint+'/v1/chat/completions', json={}, timeout=4, trust_env=False)
+
+    try:
+        wait_for(lambda: httpx.get(metrics, trust_env=False).status_code == 200)
+        with httpx.Client(timeout=5, trust_env=False) as client, concurrent.futures.ThreadPoolExecutor(16) as pool:
+            if not queue_size:
+                with client.stream('POST', endpoint+'/v1/chat/completions', json={'stream': True}) as active:
+                    assert post().status_code == 429 and queued() == 0
+                    process.send_signal(signal.SIGUSR1)
+                    gate.set()
+                    assert b'[DONE]' in active.read()
+                process.wait(timeout=5)
+                return
+            with client.stream('POST', endpoint+'/v1/chat/completions', json={'stream': True}) as active:
+                assert active.status_code == 200
+                pending = [pool.submit(post) for _ in range(2)]
+                wait_for(lambda: queued() == 2)
+                # SSE headers have already arrived. Its generation still owns
+                # the only backend slot; all excess requests must be rejected.
+                rejected = list(pool.map(lambda _: post(), range(32)))
+                assert all(r.status_code == 429 and r.headers['retry-after'] == '1' for r in rejected)
+                assert client.get(endpoint+'/ready').status_code == 200
+                assert client.post(endpoint+'/%64rain').status_code == 403
+                assert counts['active'] == 1
+                gate.set()
+                assert b'[DONE]' in active.read()
+                responses = [future.result() for future in pending]
+                assert all(r.status_code == 200 and float(r.headers['x-heteroserve-queue-ms']) > 0 for r in responses)
+            wait_for(lambda: counts['active'] == 0 and queued() == 0)
+            gate.clear()
+            with client.stream('POST', endpoint+'/v1/chat/completions', json={'stream': True}):
+                start = time.monotonic()
+                expired = post()
+                assert expired.status_code == 503 and .8 <= time.monotonic()-start < 3
+                assert queued() == 0
+                with socket.create_connection(('127.0.0.1', cfg['gateway']['port'])) as cancelled:
+                    cancelled.sendall(b'POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}')
+                    wait_for(lambda: queued() == 1)
+                wait_for(lambda: queued() == 0)
+            wait_for(lambda: counts['active'] == 0)
+            assert counts['peak'] == 1
+            with client.stream('POST', endpoint+'/v1/chat/completions', json={'stream': True}) as active:
+                pending = pool.submit(post)
+                wait_for(lambda: queued() == 1)
+                process.send_signal(signal.SIGUSR1)
+                gate.set()
+                assert b'[DONE]' in active.read()
+                assert pending.result().status_code == 200
+            process.wait(timeout=5)
+    finally:
+        gate.set(); process.terminate(); process.wait(timeout=5)
+        log.close(); server.shutdown(); server.server_close()
 
 
 def test_gateway_aliases_keep_embedding_separate_from_generation_pool():

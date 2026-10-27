@@ -1,0 +1,95 @@
+{
+  "validated_at": "2026-10-27T05:36:10.736580+00:00",
+  "scope": "Six-node deployment; bounded admission acceptance, not maximum stable throughput or optimal queue sizing.",
+  "implementation": {
+    "engine": "HAProxy",
+    "version": "2.8.30-0ubuntu0.24.04.1",
+    "source": "Ubuntu noble-updates main; official packaged HAProxy",
+    "upstream_reference": "https://docs.haproxy.org/2.8/configuration.html",
+    "native_features": [
+      "HTTP server maxconn",
+      "timeout queue",
+      "option abortonclose",
+      "queue ACL",
+      "SIGUSR1 soft stop",
+      "Prometheus exporter"
+    ],
+    "application_queue_code_added": false,
+    "packages_sha256": {
+      "haproxy_2.8.30-0ubuntu0.24.04.1_amd64.deb": "5fd1e4206106a0b9ecd356f46d69d516274bcb0553f74450b34cb1d0622958a6",
+      "liblua5.4-0_5.4.6-3build2_amd64.deb": "6a520259e5b06e86191a25af6d448387cdd2b3d291a0aa956ce272e84d071260"
+    },
+    "binary_sha256": "2beb663f1fb491e2890d36a870eca5007b44f3d49aa00abf60f699720b6a7291"
+  },
+  "configuration": {
+    "public_port": 18600,
+    "gateway_loopback_port": 18610,
+    "metrics_loopback_port": 18612,
+    "max_inflight": 32,
+    "max_queue": 32,
+    "queue_timeout_seconds": 2,
+    "client_total_timeout_seconds": 60,
+    "total_timeout_includes_queue": true,
+    "proxy_timeout_scope": "60 seconds idle timeout, not a total request deadline.",
+    "queue_full_status": 429,
+    "queue_timeout_status": 503
+  },
+  "validation": {
+    "linux_regression_passed": 170,
+    "linux_regression_command": "LD_LIBRARY_PATH=/workspace/artifacts/runtime/haproxy/usr/lib/x86_64-linux-gnu HETEROSERVE_HAPROXY=/workspace/artifacts/runtime/haproxy/usr/sbin/haproxy python3 -c \"import sys; sys.path[:0]=['/workspace','/workspace/homogeneous/src']; import pytest; raise SystemExit(pytest.main(['heterogeneous_compute/tests/test_serving.py','heterogeneous_compute/tests/test_system_benchmark.py','homogeneous/tests/test_gateway.py','-q']))\"",
+    "real_proxy_behaviors": [
+      "SSE response body retains slot",
+      "bounded overflow returns 429 with Retry-After",
+      "native wait timeout returns 503",
+      "cancelled queued requests removed",
+      "queue disabled baseline rejects immediately",
+      "SIGUSR1 drains active and queued requests",
+      "encoded drain path blocked"
+    ],
+    "live": {
+      "attempted": 80,
+      "http_status_counts": {
+        "200": 42,
+        "503": 22,
+        "429": 16
+      },
+      "successful_complete_streams": 42,
+      "sample_peak_gateway_waiting": 32.0,
+      "sample_peak_gateway_inflight": 32.0,
+      "all_expected_behaviors_passed": true
+    },
+    "json_arithmetic_models": [
+      "ascend-awq",
+      "musa-awq",
+      "iluvatar-awq",
+      "awq"
+    ],
+    "fixed_token_stream": {
+      "input_tokens": 256,
+      "output_tokens": 128,
+      "requires_done": true
+    },
+    "ready_healthy_workers": 29,
+    "configured_workers": 32,
+    "existing_unhealthy_workers": "Three Ascend .23 TP2 partitions remain unavailable; not restarted.",
+    "container_ids_unchanged": true,
+    "resource_limits_remain_disabled": true,
+    "gateway_node_model_and_router_processes_unchanged": true
+  },
+  "telemetry": {
+    "gateway_waiting": "HAProxy backend current queue; does not add server qcur again.",
+    "gateway_inflight": "Existing Gateway pipeline requests, distinct from waiting.",
+    "queue_summaries": "Per-stage per-worker and Gateway sample mean/peak, plus raw official cumulative max.",
+    "sample_seconds": 5,
+    "failure_accounting": "All sent requests remain in success/SLO denominator, including 429 and 503.",
+    "missing_admission_metrics": "Stop experiment; do not substitute zero."
+  },
+  "artifacts": {
+    "raw_root": "artifacts/optimization/gateway-admission",
+    "reproduction": "python3 artifacts/optimization/gateway-admission/validate.py (fresh live output directory required)",
+    "validation_script_sha256": "61c40dd21018f7cde0a0d73010119dac63c3184d82ae89dcb5a68734dc4af392",
+    "workload_sha256": "0f346392e9bc3df88ef9491f3fd8b66b6146bcc756c45eeece39ecfd54752df8",
+    "runtime_manifest": "artifacts/runtime/haproxy/manifest.json"
+  },
+  "retention": "Useful implementation, configuration, regression tests, result summary and raw reproduction evidence retained; temporary proxy test processes stopped. No user resources deleted."
+}

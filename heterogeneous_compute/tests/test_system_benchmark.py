@@ -13,12 +13,28 @@ from unittest.mock import patch
 
 from heterogeneous_compute.system_benchmark import Experiment, Receiver, export_results, meets_slo, summarize
 from heterogeneous_compute.benchmark_telemetry import (
-    METRIC_NAMES, PacketObserver, device_values, ipv4_tcp, metric_sum, packet_filter, parse_metrics,
+    METRIC_NAMES, PacketObserver, admission_waiting, device_values, ipv4_tcp, metric_sum, packet_filter, parse_metrics,
     router_worker_snapshot,
 )
 
 
 SLO={'ttft_seconds':2,'tpot_seconds':.1,'e2e_seconds':20}
+
+
+def test_admission_samples_do_not_double_count_server_queue_or_hide_missing_metrics():
+    metrics=parse_metrics('''haproxy_backend_current_queue{proxy="gateway"} 3
+haproxy_server_current_queue{proxy="gateway",server="app"} 3
+haproxy_backend_current_queue{proxy="control"} 1
+''',METRIC_NAMES['admission'])
+    assert admission_waiting({'admission_metrics':metrics})==3
+    assert admission_waiting({'admission_metrics':{'error':'timeout'}}) is None
+    assert admission_waiting({}) is None
+    experiment=Experiment.__new__(Experiment)
+    experiment.serving={'admission':{}}
+    experiment.receiver=SimpleNamespace(gateway_node='g',history=[
+        {'node':'g','received_at':1,'workers':{'worker':{'waiting':2}}},
+        {'node':'g','received_at':2,'workers':{'worker':{'waiting':6}}}])
+    assert experiment.queue_statistics(0,3)['worker']=={'sample_mean':4,'sample_peak':6,'samples':2}
 
 
 def row(sent,finished,success=True,**extra):
