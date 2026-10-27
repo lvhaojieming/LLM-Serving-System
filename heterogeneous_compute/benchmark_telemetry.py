@@ -25,7 +25,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from heterogeneous_compute.serving import expand_config, generation_workers, router_configs
+from heterogeneous_compute.serving import expand_config, gateway_config, generation_workers, router_configs
 
 
 # Client event times supply latency distributions. Repeatedly retaining every
@@ -429,6 +429,10 @@ def collect(config_path,node,central,max_seconds=86400):
     script='/workspace/heterogeneous_compute/benchmark_telemetry.py'
     metrics={name:w for name,w in generation_workers(config).items() if w['node']==node}
     gateway_node=config['services']['gateway']['node']
+    gateway_metrics_timeout=config.get('telemetry',{}).get('gateway_metrics_timeout_seconds',3)
+    if not isinstance(gateway_metrics_timeout,(int,float)) or not 0<gateway_metrics_timeout<=15:
+        raise ValueError('Gateway metrics timeout must be within (0, 15] seconds')
+    gateway_metrics_url=f"http://127.0.0.1:{gateway_config(config)['port']}/metrics"
     disabled_smi=False; started=time.monotonic(); failures=0
     pool=concurrent.futures.ThreadPoolExecutor(max_workers=12)
     while time.monotonic()-started<max_seconds:
@@ -460,12 +464,14 @@ def collect(config_path,node,central,max_seconds=86400):
                 host=router.get('host','127.0.0.1')
                 jobs['router_workers:'+label]=pool.submit(fetch,f"http://{host}:{router['port']}/workers")
                 jobs['router_metrics:'+label]=pool.submit(fetch,f"http://{host}:{router['metrics_port']}/metrics")
-            jobs['gateway_metrics']=pool.submit(fetch,f"http://127.0.0.1:{config['gateway']['port']}/metrics")
+            sample['gateway_metrics_url']=gateway_metrics_url
+            sample['gateway_metrics_timeout_seconds']=gateway_metrics_timeout
+            jobs['gateway_metrics']=pool.submit(fetch,gateway_metrics_url,timeout=gateway_metrics_timeout)
             if config.get('admission'):
                 jobs['admission_metrics']=pool.submit(fetch,f"http://127.0.0.1:{config['admission']['metrics_port']}/metrics")
         for name,future in jobs.items():
             try:
-                value=future.result(timeout=5)
+                value=future.result(timeout=max(5,gateway_metrics_timeout) if name=='gateway_metrics' else 5)
                 if name.startswith('worker:'):
                     rows=parse_metrics(value,METRIC_NAMES['worker'])
                     sample['workers'][name[7:]]={'metrics':rows,'running':metric_sum(rows,'vllm:num_requests_running'),

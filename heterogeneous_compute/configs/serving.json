@@ -3,6 +3,7 @@
   "legacy_baselines_enabled": false,
   "required_awq_tp": 2,
   "result_dir": "artifacts/serving",
+  "telemetry": {"gateway_metrics_timeout_seconds": 10},
   "gateway": {
     "host": "0.0.0.0",
     "port": 18600,

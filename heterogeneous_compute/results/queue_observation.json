@@ -93,5 +93,14 @@
       "other_musa_workers_passed": 7,
       "other_workers_check": "Each worker produced 1024 output tokens and answered 2+3 correctly before and after."
     }
+  },
+  "gateway_scrape_incident": {
+    "run_id": "20261027T104317Z",
+    "stage": "64 req/s transition; no complete measured stage",
+    "failure": "Gateway inflight telemetry is unavailable; no valid capacity claim",
+    "evidence": "HAProxy control /metrics had zero queue/connect delay; response rose from 4ms to 2022ms, next scrape client disconnected at 3002ms. Collector recorded TimeoutError. Gateway soft FD limit remained 65536 and 28 workers remained healthy.",
+    "interpretation": "Gateway control response exceeded the old three-second scrape deadline under overload. This does not establish the deeper latency cause or a measured capacity boundary.",
+    "change": "Read Gateway metrics on the existing loopback application port using canonical gateway_config; configurable ten-second timeout and matching future wait budget. Scrape failures still stop the benchmark; never zero-fill. Business SLO, admission limits and client timeout remain unchanged.",
+    "validation": "58 system-benchmark/serving regression tests passed, including retained real HAProxy and official Router CPU fixtures. Confirmed telemetry configuration changes no service fingerprint. Renewed real descending scan required for overload acceptance."
   }
 }

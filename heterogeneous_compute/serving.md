@@ -388,3 +388,12 @@ python3 heterogeneous_compute/system_benchmark.py \
 `20261027T103740Z` 在预检结束、24 请求/秒初始阶段收到从高到低扫描要求，
 通过 STOP 文件停止；其未完成阶段仅保留中止证据，不合入新的降序扫描。
 每档先排空，避免高压档残留请求污染后续低压档。
+
+降序预检 `20261027T104317Z` 通过 28 个实例直接生成与 56 个 mixed 请求，
+但 64 请求/秒过渡期因 Gateway 指标请求超过原 3 秒读取上限而中断，未得到完整档位。
+HAProxy 日志显示控制请求排队、连接时间均为零，响应曾升至 2,022ms；
+下一次由采集客户端在约 3,002ms 断开。Gateway FD 软上限仍为 65,536。
+采集器现复用 `gateway_config` 解析已有 loopback 应用端口读取 `/metrics`，
+由 `serving.json` 的 `telemetry.gateway_metrics_timeout_seconds=10` 配置读取预算，
+Future 等待预算同步覆盖该值。采集错误仍会停止实验，不填零、不放宽业务 SLO；
+这是监控路径调整，深层响应变慢原因和新扫描结果仍需实测。
