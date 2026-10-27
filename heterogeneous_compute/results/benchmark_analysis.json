@@ -295,5 +295,23 @@
       "comparability": "29 healthy workers, including 8 MUSA; current 18/24/32/48/64 runs use 28 workers including 7 MUSA. Routing/FD budget also changed between historical runs. Do not pool the cohorts or infer a controlled routing A/B effect."
     }
   ],
-  "historical_16_interpretation": "16 req/s was tested three times with 29 workers. All 4800-request cohorts were 100% successful. One cache_aware stage also passed the original queue gate with 99.9167% SLO attainment; a later cache_aware stage had 100% SLO attainment but failed the original queue gate (.96 +3.15, .97 +3.85). These valid historical results must be reported, but are not an identical-configuration lower point for the current 28-worker experiment. Only their saved stage summaries are available locally; historical per-request logs were not recomputed."
+  "historical_16_interpretation": "16 req/s was tested three times with 29 workers. All 4800-request cohorts were 100% successful. One cache_aware stage also passed the original queue gate with 99.9167% SLO attainment; a later cache_aware stage had 100% SLO attainment but failed the original queue gate (.96 +3.15, .97 +3.85). These valid historical results must be reported, but are not an identical-configuration lower point for the current 28-worker experiment. Only their saved stage summaries are available locally; historical per-request logs were not recomputed.",
+  "queue_data": {
+    "units": "requests",
+    "scope": "Formal measurement windows only; model samples about 5s resampled to 1s timeline; reported peaks are sample peaks.",
+    "fields": [
+      "waiting mean / sample peak",
+      "first / last third waiting means and difference",
+      "running mean / sample peak, distinct from waiting",
+      "Gateway inflight mean / sample peak, distinct from admission waiting"
+    ],
+    "csv": "artifacts/serving/system-benchmark/analysis/queue-analysis.csv",
+    "rows": 20,
+    "limitations": [
+      "Gateway inflight overlaps backend running/waiting; do not sum all columns.",
+      "Admission queue cap128 is separate from backend model queues.",
+      "Router internal queue is not exposed.",
+      "Some historical16 summaries retain growth only; missing mean/peak are not guessed."
+    ]
+  }
 }

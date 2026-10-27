@@ -74,6 +74,9 @@ def historical_16_results(base):
                 source_path=str(source),source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
                 evidence_scope='Saved complete-stage summary; historical per-request logs were not downloaded into this offline package and are not recomputed here.',
                 comparability='29 healthy workers, including 8 MUSA; current 18/24/32/48/64 runs use 28 workers including 7 MUSA. Routing/FD budget also changed between historical runs. Do not pool the cohorts or infer a controlled routing A/B effect.')
+            if isinstance(snapshot,dict) and 'musa16_node_queues' in snapshot:
+                row['saved_musa_node_queue_statistics']=snapshot['musa16_node_queues']
+                row['saved_gateway_queue_statistics']=snapshot['queues16']['gateway']
             result.append(row)
     return result
 
@@ -241,6 +244,10 @@ def analyze(directory):
                 'utilization':u}
         points = [x for x in timeline if start <= x['time'] < end]
         r['gateway'] = {k:stats([x.get(k) for x in points]) for k in ['gateway_inflight','gateway_waiting']}
+        first=[x['gateway_waiting'] for x in points if x['time']<start+duration/3 and x.get('gateway_waiting') is not None]
+        last=[x['gateway_waiting'] for x in points if x['time']>=start+duration*2/3 and x.get('gateway_waiting') is not None]
+        r['gateway']['waiting_first_third_mean']=statistics.mean(first) if first else None
+        r['gateway']['waiting_last_third_mean']=statistics.mean(last) if last else None
         gp = [x for x in gateway_processes if start <= x['time'] < end]
         cpu = [(b['cpu']-a['cpu'])/(b['time']-a['time'])*100 for a,b in zip(gp,gp[1:])]
         r['gateway']['one_core_cpu_percent'] = stats(cpu)
@@ -282,6 +289,14 @@ def render_report(result, output):
          f"{h['slo_ratio']:.4%}",f"{h['goodput']:.2f}",'是' if h['queue_stable'] else '否',
          '通过' if h['passed'] else '未通过（队列门槛）'] for h in history])
     pool_rows=[]
+    queue_table=table(['请求/秒','入口waiting均值/峰值','入口inflight均值/峰值','摩尔waiting均值/峰值','昇腾waiting峰值','天数waiting峰值'],[
+        [s['rate'],f"{s['gateway']['gateway_waiting']['mean']:.1f} / {s['gateway']['gateway_waiting']['max']:.0f}",
+         f"{s['gateway']['gateway_inflight']['mean']:.1f} / {s['gateway']['gateway_inflight']['max']:.0f}",
+         f"{s['pools']['musa']['waiting']['mean']:.1f} / {s['pools']['musa']['waiting']['max']:.0f}",
+         s['pools']['ascend']['waiting']['max'],s['pools']['iluvatar']['waiting']['max']] for s in stages])
+    history_growth=table(['历史16档','摩尔.96平均队列变化','摩尔.97平均队列变化','入口平均队列变化'],[
+        [h['run_id'],f"{h['queue_changes']['s5000-02']:+.2f}",f"{h['queue_changes']['s5000-01']:+.2f}",
+         f"{h['queue_changes']['gateway_queue']:+.2f}"] for h in history])
     for name,label in [('ascend','昇腾'),('musa','摩尔'),('iluvatar','天数')]:
         p=single['pools'][name]
         pool_rows.append([label,p['healthy_workers'],f"{p['arrival_rps']:.3f}",f"{p['successful_completion_rps']:.3f}",
@@ -308,6 +323,8 @@ def render_report(result, output):
 <div class="lead"><strong>核心结论：</strong>18 req/s通过本轮短测，24及以上未通过。当前主要约束集中在摩尔池：其到达约6 req/s、测量窗口完成约5.17 req/s，等待持续增加。不能把18称为长期稳定容量，也不能把16～18的窗口Goodput称为硬件理论极限。</div>
 <h2>1. 当前28实例的五个完整测量档位</h2>{overall}<p>所有档位均产生了目标请求速率，失败不是客户端没有发够请求。这两轮总计55,800个正式测量请求；预检及过渡另存原始日志。成功率和SLO达标率在这些档位相同，因为成功完成的请求平均TPOT均低于100ms；拒绝、超时、HTTP错误仍使整体SLO达标率下降。</p>
 <h2>历史16请求/秒：已测，不能遗漏</h2>{historical_table}<p><strong>16档曾测过三次，均完成4,800个请求且成功率100%。</strong>cache_aware首次16档还通过了当时的队列稳定条件，SLO为99.9167%；另一次cache_aware 16档SLO为100%，但摩尔.96/.97平均队列变化分别+3.15/+3.85，按当时严格队列门槛未通过。按当前忽略队列增长的口径，其成功/SLO条件满足。轮询16档的摩尔队列也增长。</p><p>因此不能把16当成“没有测试过”，也不能把三次16档合并成一个稳定结论。历史16档有29个健康实例、摩尔8个；当前28实例、摩尔7个，且历史间路由与Gateway FD预算发生过变化。历史结果保留为证据，不能直接与当前18档构成相同配置的容量边界对照。这里依据本机已保存完整阶段摘要，未对未下载的历史逐请求日志重新核算；当前两轮55,800个请求则完成了原始日志重算。</p>
+<h2>队列数据总表</h2>{queue_table}<p>单位均为请求数，均值和峰值只取正式测量窗口。峰值是采样峰值：原始模型遥测约5秒，按1秒timeline对齐，并非逐请求事件精确最大值。running表示正在执行，waiting才是等待；Gateway inflight包含已进入入口、可能正在Embedding、路由、执行或模型排队的请求，不能与模型running/waiting直接相加。</p>
+<p>入口等待上限128只约束HAProxy入口队列；进入Gateway后，vLLM实例可以另外排队，所以摩尔waiting可以超过128。Router内部队列长度没有暴露，不把worker_load或模型running冒充独立Router排队。当前统一队列数据包含时间序列、均值、采样峰值、前后段均值及增长、实例running/waiting、入口inflight/waiting。</p>{history_growth}<p>历史16档增长值为最后100秒队列均值减最初100秒均值。首次cache_aware的本机摘要还保存：入口waiting均值/峰值0/0；摩尔.96均值0.133、采样峰值1，.97均值0.083、采样峰值2。两节点的峰值不能直接相加当作池峰值。后一次16档的均值/峰值未保存在本机摘要中，不猜测；其增长值保留如上。</p>
 {image}<h2>2. 18 req/s为什么成功，却不能称为队列稳定</h2>{pools}
 <p>全窗口观察到的AWQ到达率合计{single['routed_arrival_rps_total']:.3f} req/s，接近客户端18 req/s。按完整请求ID和观测时间去重；不是用完成响应数冒充到达率。摩尔到达与成功完成差约{musa['arrival_rps']-musa['successful_completion_rps']:.3f} req/s，其他两池基本平衡。</p>
 <p>摩尔池模型waiting的均值约{musa['waiting']['mean']:.1f}、峰值{musa['waiting']['max']:.0f}；前100秒均值{queue_start:.2f}，后100秒均值{queue_end:.2f}。入口Gateway等待始终为0，但在途均值{single['gateway']['gateway_inflight']['mean']:.1f}、峰值{single['gateway']['gateway_inflight']['max']:.0f}。这说明请求已经通过入口，随后积压在模型侧。</p>
@@ -323,7 +340,7 @@ def render_report(result, output):
 <ol><li>优先做池间容量分配对照：先测各池持续处理能力，再按能力分配入口流量；保留官方Router作池内选择。</li><li>在统一28实例配置下做低于18的较长验证，检查waiting斜率接近0，而不仅看最终成功率。</li><li>摩尔max_num_seqs调整应单独做受控对照，观察输出token/s、TPOT和队列；不要同时改路由、并发和执行模式。</li><li>将“短测成功/SLO”和“队列平稳”分别报告。若业务关心等待体验，另行定义排队/首token/总时延目标；当前实验没有恢复TTFT/E2E指标。</li></ol>
 <h2>7. 数据可信范围与复现</h2><p>两个实验的健康集合、容器/模型进程身份、精确workload与服务配置相同，实验配置只改变扫描速率；每档一次、固定seed。所有正式请求都已结束再统计，没有丢弃在途请求。路由观测丢包0，多worker关联冲突0。各池成功完成率相加与原始阶段完成率一致；各档成功数加错误数等于发送数。</p>
 <p>本实验使用重复的300个合成prompt，不能代表所有真实流量。Ascend为ACL图、Iluvatar为FULL decode图、MUSA为V0 eager；不构成同执行模式的厂商对比。.96还承担发压。正式负载强制固定输出长度，仅验收了协议、长度及完成状态；没有对每条完整生成内容做语义评分。没有用高利用率直接推导可扩展容量，也没有证明所有配置最优。</p>
-<p>原始数据目录保持完整，当前暂停状态不变。<a href="analysis.json">详细JSON</a> · <a href="stage-analysis.csv">各档CSV</a> · <a href="pool-analysis.csv">各池CSV</a> · <a href="worker-analysis.csv">各实例CSV</a> · <a href="analysis-inputs.json">输入校验清单</a>。复现命令：<code>python heterogeneous_compute/analyze_benchmark.py --runs artifacts/serving/system-benchmark/20261027T105055Z artifacts/serving/system-benchmark/20261027T113010Z --output artifacts/serving/system-benchmark/analysis</code>。报告复用原实验已导出的Matplotlib队列图，无需额外安装绘图库。</p></html>'''
+<p>原始数据目录保持完整，当前暂停状态不变。<a href="analysis.json">详细JSON</a> · <a href="stage-analysis.csv">各档CSV</a> · <a href="pool-analysis.csv">各池CSV</a> · <a href="queue-analysis.csv">各层队列CSV</a> · <a href="worker-analysis.csv">各实例CSV</a> · <a href="analysis-inputs.json">输入校验清单</a>。复现命令：<code>python heterogeneous_compute/analyze_benchmark.py --runs artifacts/serving/system-benchmark/20261027T105055Z artifacts/serving/system-benchmark/20261027T113010Z --output artifacts/serving/system-benchmark/analysis</code>。报告复用原实验已导出的Matplotlib队列图，无需额外安装绘图库。</p></html>'''
     (output/'report.html').write_text(document,encoding='utf-8')
 
 
@@ -371,6 +388,25 @@ def main():
                     row={k:p.get(k) for k in fields};row.update(run_id=run['run_id'],rate=stage['rate'],pool=pool,
                         waiting_mean=p['waiting']['mean'],waiting_peak=p['waiting']['max'],running_mean=p['running']['mean'])
                     writer.writerow(row)
+    queue_fields=['run_id','rate','scope','waiting_mean','waiting_sample_peak','waiting_first_third_mean',
+                  'waiting_last_third_mean','waiting_change','running_mean','running_sample_peak',
+                  'gateway_inflight_mean','gateway_inflight_sample_peak']
+    with (args.output/'queue-analysis.csv').open('w',encoding='utf-8-sig',newline='') as stream:
+        writer=csv.DictWriter(stream,fieldnames=queue_fields);writer.writeheader()
+        for run in result['runs']:
+            for stage in run['stages']:
+                for scope in ['gateway',*stage['pools']]:
+                    p=stage['gateway'] if scope=='gateway' else stage['pools'][scope]
+                    waiting=p['gateway_waiting'] if scope=='gateway' else p['waiting']
+                    first,last=p['waiting_first_third_mean'],p['waiting_last_third_mean']
+                    writer.writerow(dict(run_id=run['run_id'],rate=stage['rate'],scope=scope,
+                        waiting_mean=waiting['mean'],waiting_sample_peak=waiting['max'],
+                        waiting_first_third_mean=first,waiting_last_third_mean=last,
+                        waiting_change=last-first if first is not None and last is not None else None,
+                        running_mean=p['running']['mean'] if scope!='gateway' else None,
+                        running_sample_peak=p['running']['max'] if scope!='gateway' else None,
+                        gateway_inflight_mean=p['gateway_inflight']['mean'] if scope=='gateway' else None,
+                        gateway_inflight_sample_peak=p['gateway_inflight']['max'] if scope=='gateway' else None))
     stage_fields=['run_id','rate','sent','actual_rate','success_ratio','slo_ratio','goodput','passed',
                   'load_valid','queue_stable','429','5xx','timeout','tpot_p99_ms']
     with (args.output/'stage-analysis.csv').open('w',encoding='utf-8-sig',newline='') as stream:
