@@ -47,6 +47,45 @@ def resolved_cohort_window(start,now,timeout_seconds,window_seconds=60):
     return (end-window_seconds,end) if end-window_seconds>=start else None
 
 
+def stage_passes(config,result):
+    require_queue=config.get('require_queue_stability',True)
+    if type(require_queue) is not bool:raise ValueError('require_queue_stability must be boolean')
+    return bool(result['load_valid'] and result['resource_stable']
+        and result['success_ratio']>=config['minimum_success_ratio']
+        and result['slo_ratio']>=config['minimum_slo_ratio']
+        and (not require_queue or result['queue_stable']))
+
+
+def validated_search_reference(config,serving,frozen,workload):
+    """Reinterpret one complete stage only after checking frozen comparability."""
+    spec=config.get('search_reference')
+    if not spec:return None
+    directory=Path(spec['result_dir'])
+    if not directory.is_absolute():directory=ROOT/directory
+    old_config=json.loads((directory/'config.json').read_text())
+    allowed={'require_queue_stability','search_reference','coarse_rates','capacity_definition','run_mode'}
+    if {k:v for k,v in config.items() if k not in allowed}!={k:v for k,v in old_config.items() if k not in allowed}:
+        raise RuntimeError('Search reference workload/SLO/configuration mismatch')
+    if serving!=json.loads((directory/'serving-snapshot.json').read_text()):
+        raise RuntimeError('Search reference service configuration mismatch')
+    previous=json.loads((directory/'preflight.json').read_text())
+    normalize=lambda value:json.loads(json.dumps(value))
+    for key in ['healthy_workers','router_pools','identities','service_processes']:
+        if normalize(frozen.get(key))!=previous.get(key):raise RuntimeError('Search reference frozen identity mismatch: '+key)
+    if workload!=json.loads((directory/'workload.json').read_text()):
+        raise RuntimeError('Search reference token workload mismatch')
+    stages=json.loads((directory/'stages.json').read_text())
+    stage=next((s for s in stages if s['case']==spec['case']),None)
+    if not stage or not stage_passes(config,stage):raise RuntimeError('Search reference stage does not pass the current criteria')
+    rate=stage['rate']
+    if rate<config.get('minimum_search_rate',0) or rate>=min(config['coarse_rates']):
+        raise RuntimeError('Search reference must be a lower bracket below the first new test rate')
+    return {'source_directory':str(directory),'source_case':stage['case'],'rate':rate,
+        'original_passed':stage['passed'],'reinterpreted_passed':True,
+        'require_queue_stability':config.get('require_queue_stability',True),'source_stage':stage,
+        'scope':'Search bracket only; source raw requests/stages are not rewritten or merged. New candidate repeats and long stability tests remain required.'}
+
+
 def meets_slo(row,slo):
     if not slo or set(slo)-set(SLO_FIELDS):raise ValueError('Configure at least one supported latency SLO')
     return bool(row.get('success') and all(row.get(SLO_FIELDS[key]) is not None and row[SLO_FIELDS[key]]<=limit
@@ -450,6 +489,8 @@ class Experiment:
                 'latency_scope':'Only configured latency SLO metrics are persisted. TPOT measures generated-token intervals; Embedding duration is a separate observation.'},
             'execution_mode':self.config['execution_mode'],'all_devices_accepted':len(self.expected)==len(all_workers)}
         save(self.directory/'preflight.json',self.frozen)
+        self.search_reference_result=validated_search_reference(self.config,self.serving,self.frozen,self.prompts)
+        if self.search_reference_result:save(self.directory/'search-reference.json',self.search_reference_result)
         self.check();self.completed.clear()
 
     async def drain(self):
@@ -551,7 +592,8 @@ class Experiment:
             queue_stable=stable,queue_changes=changes,queue_statistics=self.queue_statistics(start,end),healthy_workers=len(self.expected))
         result['resource_trends']=resources;result['resource_stable']=resources_ok
         result['load_valid']=result['sent']>=planned*self.config['minimum_send_ratio'] and (result['send_lag_p99'] or 0)<=self.config['max_send_lag_seconds']
-        result['passed']=bool(result['load_valid'] and result['success_ratio']>=self.config['minimum_success_ratio'] and result['slo_ratio']>=self.config['minimum_slo_ratio'] and stable and resources_ok)
+        result['queue_stability_required']=self.config.get('require_queue_stability',True)
+        result['passed']=stage_passes(self.config,result)
         if seconds>=1800:
             rolling=[summarize(self.completed,t,min(t+300,end),self.config['slo']) for t in range(int(start),int(end)-299,300)]
             result['five_minute_cohorts']=rolling
@@ -602,12 +644,30 @@ class Experiment:
             timeline=asyncio.create_task(self.timeline())
             try:
                 await self.preflight(session);await self.drain()
-                lower=0;upper=None
+                reference=getattr(self,'search_reference_result',None)
+                lower=reference['rate'] if reference else 0;upper=None
+                sweep=self.config.get('run_mode','full')=='sweep'
                 for rate in self.config['coarse_rates']:
                     result=await self.stage(session,rate,self.config['coarse_seconds'],'coarse')
                     if not result['load_valid']:raise RuntimeError('Load generator failed to produce the requested arrival process')
+                    if sweep:continue
                     if not result['passed']:upper=rate;break
                     lower=rate
+                if sweep:
+                    passed=[s['rate'] for s in self.results if s['passed']]
+                    failed=[s['rate'] for s in self.results if not s['passed']]
+                    peak=max(self.results,key=lambda s:s['goodput'])
+                    report={'status':'capacity_sweep_complete','run_mode':'sweep',
+                        'scope':'Short measured points only; no repeated or long-duration capacity validation.',
+                        'require_queue_stability':self.config.get('require_queue_stability',True),
+                        'reference_rate':reference['rate'] if reference else None,
+                        'highest_passing_measured_rate':max(passed) if passed else None,
+                        'first_failing_measured_rate':min(failed) if failed else None,
+                        'highest_requested_rate':max(s['rate'] for s in self.results),
+                        'peak_goodput':{k:peak[k] for k in ['rate','actual_rate','goodput','success_ratio','slo_ratio','passed']},
+                        'long_stability_validated':False,'stages':self.results}
+                    save(self.directory/'sweep-summary.json',report);save(self.directory/'summary.json',report)
+                    return
                 if upper is None:raise RuntimeError('No failing upper bound found; verified lower bound only')
                 if lower==0:
                     # Determine whether the SLO is already infeasible at sparse
@@ -632,6 +692,8 @@ class Experiment:
                     upper=lower;lower=round(lower-self.config['fine_resolution'],4)
                 if lower<=0 or lower<minimum:raise RuntimeError('No candidate at or above the minimum search rate passed repeated/long stability verification')
                 save(self.directory/'capacity.json',{'max_stable_rate':lower,'first_failing_or_unverified_upper':upper,
+                    'require_queue_stability':self.config.get('require_queue_stability',True),
+                    'capacity_definition':self.config.get('capacity_definition','SLO, resource and queue stability constrained rate'),
                     'slo':self.config['slo'],'validated_seconds':self.config['steady_seconds'],'healthy_workers':len(self.expected),
                     'workload':self.config.get('workload',{'name':'fixed'}),
                     'deployment_scope':self.config['scope'],'execution_mode':self.config['execution_mode']})
@@ -749,7 +811,7 @@ def export_pool_utilization(directory):
 
 def export_results(directory,config,stages,routes,plots=True):
     """Standalone CSV and scientific PNG/PDF figures; no latency main plots."""
-    fields=['label','case','repeat','rate','actual_rate','goodput','completed_rate','slo_ratio','success_ratio','sent','planned','send_lag_p99','queue_stable','load_valid','passed','start','end']
+    fields=['label','case','repeat','rate','actual_rate','goodput','completed_rate','slo_ratio','success_ratio','sent','planned','send_lag_p99','queue_stable','queue_stability_required','load_valid','passed','start','end']
     with (directory/'pressure.csv').open('w',newline='',encoding='utf-8') as out:
         writer=csv.DictWriter(out,fieldnames=fields,extrasaction='ignore');writer.writeheader();writer.writerows(stages)
     with (directory/'workload-pressure.csv').open('w',newline='',encoding='utf-8') as out:

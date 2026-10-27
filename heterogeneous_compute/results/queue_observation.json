@@ -1,0 +1,48 @@
+{
+  "policy_change": "User requested ignoring average waiting-count growth and first scanning the boundary/maximum observed throughput.",
+  "require_queue_stability": false,
+  "retained_gates": {
+    "minimum_success_ratio": 0.99,
+    "minimum_slo_ratio": 0.95,
+    "tpot_seconds": 0.1,
+    "request_total_timeout_seconds": 150,
+    "admission_max_queue": 128,
+    "queue_timeout_seconds": 10,
+    "other_checks": "Valid offered load, service/container identity, telemetry coverage, OOM, resource growth and complete drain remain enforced."
+  },
+  "queue_reporting": "Queue histories, means, peaks, queue_changes and queue_stable remain recorded. queue_stability_required explicitly distinguishes the revised decision policy.",
+  "search_reference": {
+    "run_id": "20261027T092553Z",
+    "case": 1,
+    "rate": 16,
+    "requests": 4800,
+    "success_ratio": 1.0,
+    "slo_ratio": 1.0,
+    "original_passed": false,
+    "reinterpreted_passed": true,
+    "original_failure": "Average worker waiting growth exceeded the experimental threshold; all other stage gates passed.",
+    "scope": "Initial search bracket only. Original data are unchanged and are not merged into new measured cohorts. Fresh preflight must verify identical service configuration, workload/SLO, healthy pool sets, container and service-process identities."
+  },
+  "scan": {
+    "run_mode": "sweep",
+    "rates": [24, 32, 48, 64],
+    "transition_seconds": 60,
+    "measurement_seconds_per_rate": 300,
+    "continue_after_slo_failure": true,
+    "health_protections_remain_active": true,
+    "outputs": ["pressure.csv", "workload-pressure.csv", "sweep-summary.json", "pool-utilization.csv", "pool-utilization-summary.json"],
+    "interpretation": "Highest passing measured point and peak measured Goodput are short-duration observations, not validated long-term system capacity or an absolute hardware maximum.",
+    "long_stability_validated": false
+  },
+  "validation": {
+    "regression_tests_passed": 187,
+    "covered": [
+      "Queue observation mode cannot bypass success/SLO/resource/offered-load gates",
+      "Reference stage is reinterpreted without changing source artifacts",
+      "Reference workload/SLO or process-identity mismatch is rejected",
+      "A scan retains failing overload points, continues to later rates, records peak Goodput and does not run long stability phases"
+    ]
+  },
+  "reproduction": "Existing system_benchmark.json and benchmark.py --system-config entry; run snapshots and search-reference.json preserve both decision policies and reference provenance.",
+  "maintenance": "Existing code, runtime, containers, services and metrics reused. No extra monitoring automation. Stabilized the real HAProxy burst test by reusing its thread-safe HTTPX client rather than repeatedly constructing clients inside the one-second queue deadline. Temporary test servers/processes are cleaned up by their fixtures."
+}

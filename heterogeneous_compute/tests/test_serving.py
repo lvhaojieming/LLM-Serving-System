@@ -223,7 +223,7 @@ def test_official_haproxy_queue_stream_cancel_overflow_and_timeout(tmp_path, que
         raise AssertionError('Proxy did not reach expected state')
 
     def post():
-        return httpx.post(endpoint+'/v1/chat/completions', json={}, timeout=4, trust_env=False)
+        return client.post(endpoint+'/v1/chat/completions', json={}, timeout=4)
 
     try:
         wait_for(lambda: httpx.get(metrics, trust_env=False).status_code == 200)

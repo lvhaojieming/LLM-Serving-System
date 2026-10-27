@@ -11,7 +11,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from heterogeneous_compute.system_benchmark import Experiment, Receiver, build_workload, export_results, export_pool_utilization, meets_slo, pool_device_inventory, pool_utilization, resolved_cohort_window, summarize, workload_profiles
+from heterogeneous_compute.system_benchmark import Experiment, Receiver, build_workload, export_results, export_pool_utilization, meets_slo, pool_device_inventory, pool_utilization, resolved_cohort_window, stage_passes, summarize, validated_search_reference, workload_profiles
 from heterogeneous_compute.benchmark_telemetry import (
     METRIC_NAMES, PacketObserver, admission_waiting, device_values, ipv4_tcp, metric_sum, packet_filter, parse_metrics,
     router_worker_snapshot,
@@ -19,6 +19,58 @@ from heterogeneous_compute.benchmark_telemetry import (
 
 
 SLO={'ttft_seconds':2,'tpot_seconds':.1,'e2e_seconds':20}
+
+
+def test_queue_observation_policy_keeps_slo_and_resource_gates():
+    c={'minimum_success_ratio':.99,'minimum_slo_ratio':.95}
+    r={'load_valid':True,'resource_stable':True,'queue_stable':False,'success_ratio':1,'slo_ratio':1}
+    assert not stage_passes(c,r)
+    c['require_queue_stability']=False
+    assert stage_passes(c,r)
+    for key,value in [('load_valid',False),('resource_stable',False),('success_ratio',.98),('slo_ratio',.94)]:
+        assert not stage_passes(c,{**r,key:value})
+
+
+def test_reference_stage_is_reinterpreted_without_modifying_source_and_checks_identity(tmp_path):
+    import pytest
+    old={'minimum_success_ratio':.99,'minimum_slo_ratio':.95,'minimum_search_rate':16,
+        'coarse_rates':[16,24],'slo':{'tpot_seconds':.1}}
+    c={**old,'require_queue_stability':False,'coarse_rates':[24],
+        'search_reference':{'result_dir':str(tmp_path),'case':1}}
+    frozen={'healthy_workers':['w'],'router_pools':{'musa':['w']},'identities':{'n':['id',0,'time']},
+        'service_processes':{'n':{'1':2}}}
+    r={'case':1,'rate':16,'load_valid':True,'resource_stable':True,'queue_stable':False,
+        'success_ratio':1,'slo_ratio':1,'passed':False}
+    files={'config.json':old,'serving-snapshot.json':{},'preflight.json':frozen,'workload.json':[], 'stages.json':[r]}
+    for name,value in files.items():(tmp_path/name).write_text(json.dumps(value))
+    before={name:(tmp_path/name).read_bytes() for name in files}
+    reference=validated_search_reference(c,{},frozen,[])
+    assert reference['rate']==16 and not reference['original_passed'] and reference['reinterpreted_passed']
+    assert all((tmp_path/name).read_bytes()==data for name,data in before.items())
+    with pytest.raises(RuntimeError,match='configuration mismatch'):
+        validated_search_reference({**c,'slo':{'tpot_seconds':.2}},{},frozen,[])
+    changed={**frozen,'service_processes':{'n':{'1':3}}}
+    with pytest.raises(RuntimeError,match='identity mismatch'):validated_search_reference(c,{},changed,[])
+    with pytest.raises(RuntimeError,match='current criteria'):
+        validated_search_reference({**c,'require_queue_stability':True},{},frozen,[])
+
+
+def test_sweep_records_overload_points_without_starting_long_stability(tmp_path):
+    e=Experiment.__new__(Experiment);e.directory=tmp_path;e.active=set();e.results=[]
+    e.config={'run_mode':'sweep','coarse_rates':[24,32],'coarse_seconds':300,'require_queue_stability':False}
+    e.search_reference_result={'rate':16};rates=[]
+    async def noop(*args):pass
+    async def timeline():
+        while True:await asyncio.sleep(1)
+    async def stage(session,rate,*args):
+        rates.append(rate);r={'rate':rate,'actual_rate':rate,'load_valid':True,'passed':False,
+            'goodput':18 if rate==24 else 17,'success_ratio':.8,'slo_ratio':.7};e.results.append(r);return r
+    e.preflight=noop;e.drain=noop;e.timeline=timeline;e.stage=stage
+    asyncio.run(e.execute());assert rates==[24,32]
+    report=json.loads((tmp_path/'sweep-summary.json').read_text())
+    assert report['reference_rate']==16 and report['highest_requested_rate']==32
+    assert report['peak_goodput']['rate']==24 and report['first_failing_measured_rate']==24
+    assert not report['long_stability_validated'] and not (tmp_path/'capacity.json').exists()
 
 
 def test_user_minimum_rate_prevents_repeating_lower_baseline_rates():
