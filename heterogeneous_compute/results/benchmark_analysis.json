@@ -313,5 +313,703 @@
       "Router internal queue is not exposed.",
       "Some historical16 summaries retain growth only; missing mean/peak are not guessed."
     ]
+  },
+  "accounting_reconciliation": [
+    {
+      "run_id": "20261027T105055Z",
+      "rate": 64,
+      "success_ratio": 0.2568229166666667,
+      "slo_ratio": 0.2568229166666667,
+      "accounting": {
+        "measurement_seconds": 300.0,
+        "sent_cohort_count": 19200,
+        "cohort_success_count": 4931,
+        "cohort_slo_count": 4931,
+        "cohort_slo_rate": 16.436666666666667,
+        "cohort_slo_completed_in_window": 4291,
+        "transition_carry_in_slo_count": 639,
+        "cohort_carry_out_slo_count": 640,
+        "window_slo_completion_count": 4930,
+        "window_completion_goodput": 16.433333333333334
+      },
+      "post_window_settlement": {
+        "requests_ending_after_window": 640,
+        "success_after_window": 640,
+        "slo_after_window": 640,
+        "failed_after_window": {},
+        "seconds_until_all_sent_cohort_requests_resolved": 126.32888913154602,
+        "observed_server_draining_samples": 4,
+        "scope": "Post-window client cohort settlement includes success/failure. This is distinct from the later explicit server-draining phase, only observed at 1-second timeline resolution."
+      }
+    },
+    {
+      "run_id": "20261027T105055Z",
+      "rate": 48,
+      "success_ratio": 0.345625,
+      "slo_ratio": 0.345625,
+      "accounting": {
+        "measurement_seconds": 300.0,
+        "sent_cohort_count": 14400,
+        "cohort_success_count": 4977,
+        "cohort_slo_count": 4977,
+        "cohort_slo_rate": 16.59,
+        "cohort_slo_completed_in_window": 4339,
+        "transition_carry_in_slo_count": 640,
+        "cohort_carry_out_slo_count": 638,
+        "window_slo_completion_count": 4979,
+        "window_completion_goodput": 16.596666666666668
+      },
+      "post_window_settlement": {
+        "requests_ending_after_window": 640,
+        "success_after_window": 638,
+        "slo_after_window": 638,
+        "failed_after_window": {
+          "timeout": 2
+        },
+        "seconds_until_all_sent_cohort_requests_resolved": 133.2483057975769,
+        "observed_server_draining_samples": 3,
+        "scope": "Post-window client cohort settlement includes success/failure. This is distinct from the later explicit server-draining phase, only observed at 1-second timeline resolution."
+      }
+    },
+    {
+      "run_id": "20261027T105055Z",
+      "rate": 32,
+      "success_ratio": 0.5428125,
+      "slo_ratio": 0.5428125,
+      "accounting": {
+        "measurement_seconds": 300.0,
+        "sent_cohort_count": 9600,
+        "cohort_success_count": 5211,
+        "cohort_slo_count": 5211,
+        "cohort_slo_rate": 17.37,
+        "cohort_slo_completed_in_window": 4589,
+        "transition_carry_in_slo_count": 639,
+        "cohort_carry_out_slo_count": 622,
+        "window_slo_completion_count": 5228,
+        "window_completion_goodput": 17.426666666666666
+      },
+      "post_window_settlement": {
+        "requests_ending_after_window": 637,
+        "success_after_window": 622,
+        "slo_after_window": 622,
+        "failed_after_window": {
+          "timeout": 15
+        },
+        "seconds_until_all_sent_cohort_requests_resolved": 149.6998963356018,
+        "observed_server_draining_samples": 6,
+        "scope": "Post-window client cohort settlement includes success/failure. This is distinct from the later explicit server-draining phase, only observed at 1-second timeline resolution."
+      }
+    },
+    {
+      "run_id": "20261027T105055Z",
+      "rate": 24,
+      "success_ratio": 0.7834722222222222,
+      "slo_ratio": 0.7834722222222222,
+      "accounting": {
+        "measurement_seconds": 300.0,
+        "sent_cohort_count": 7200,
+        "cohort_success_count": 5641,
+        "cohort_slo_count": 5641,
+        "cohort_slo_rate": 18.803333333333335,
+        "cohort_slo_completed_in_window": 5005,
+        "transition_carry_in_slo_count": 317,
+        "cohort_carry_out_slo_count": 636,
+        "window_slo_completion_count": 5322,
+        "window_completion_goodput": 17.74
+      },
+      "post_window_settlement": {
+        "requests_ending_after_window": 640,
+        "success_after_window": 636,
+        "slo_after_window": 636,
+        "failed_after_window": {
+          "5xx": 3,
+          "timeout": 1
+        },
+        "seconds_until_all_sent_cohort_requests_resolved": 136.83834671974182,
+        "observed_server_draining_samples": 2,
+        "scope": "Post-window client cohort settlement includes success/failure. This is distinct from the later explicit server-draining phase, only observed at 1-second timeline resolution."
+      }
+    },
+    {
+      "run_id": "20261027T113010Z",
+      "rate": 18,
+      "success_ratio": 1.0,
+      "slo_ratio": 1.0,
+      "accounting": {
+        "measurement_seconds": 300.0,
+        "sent_cohort_count": 5400,
+        "cohort_success_count": 5400,
+        "cohort_slo_count": 5400,
+        "cohort_slo_rate": 18.0,
+        "cohort_slo_completed_in_window": 4951,
+        "transition_carry_in_slo_count": 199,
+        "cohort_carry_out_slo_count": 449,
+        "window_slo_completion_count": 5150,
+        "window_completion_goodput": 17.166666666666668
+      },
+      "post_window_settlement": {
+        "requests_ending_after_window": 449,
+        "success_after_window": 449,
+        "slo_after_window": 449,
+        "failed_after_window": {},
+        "seconds_until_all_sent_cohort_requests_resolved": 118.82234382629395,
+        "observed_server_draining_samples": 1,
+        "scope": "Post-window client cohort settlement includes success/failure. This is distinct from the later explicit server-draining phase, only observed at 1-second timeline resolution."
+      }
+    }
+  ],
+  "metric_definitions": {
+    "cohort_slo_rate": "Final SLO-good count in the sent cohort / 300s = actual arrival rate * SLO ratio; not a sustained completion throughput.",
+    "window_completion_goodput": "Legacy goodput: good completions observed during the 300s measurement window / 300s; includes transition carry-in, excludes cohort carry-out. Drain time is not in its denominator.",
+    "success_ratio_vs_slo_ratio": "Separate columns, both use sent cohort count as denominator. Equal for these five stages, not assumed equal in general.",
+    "settlement": "Post-window sent-cohort settlement time and outcomes are separate from throughput and from the later explicit server-draining phase."
+  },
+  "router_data": {
+    "source": "Saved telemetry.jsonl Router Prometheus metrics and /workers; official v0.1.15 source archive used to check counter semantics.",
+    "csv_rows": {
+      "router-analysis.csv": 15,
+      "router-metrics.csv": 102956,
+      "accounting-analysis.csv": 5,
+      "post-window-settlement.csv": 5
+    },
+    "18rps": {
+      "ascend": {
+        "samples": 60,
+        "registered_workers_gauge": {
+          "n": 60,
+          "mean": 16.0,
+          "min": 16.0,
+          "p50": 16.0,
+          "p95": 16.0,
+          "p99": 16.0,
+          "max": 16.0
+        },
+        "healthy_workers_from_workers_endpoint": {
+          "n": 60,
+          "mean": 13,
+          "min": 13,
+          "p50": 13.0,
+          "p95": 13.0,
+          "p99": 13.0,
+          "max": 13
+        },
+        "router_local_inflight": {
+          "n": 60,
+          "mean": 30.983333333333334,
+          "min": 19.0,
+          "p50": 32.0,
+          "p95": 37.05,
+          "p99": 40.0,
+          "max": 40.0
+        },
+        "router_running_requests_gauge": {
+          "n": 60,
+          "mean": 30.983333333333334,
+          "min": 19.0,
+          "p50": 32.0,
+          "p95": 37.05,
+          "p99": 40.0,
+          "max": 40.0
+        },
+        "worker_load_max_minus_min": {
+          "n": 60,
+          "mean": 1.4333333333333333,
+          "min": 1.0,
+          "p50": 1.0,
+          "p95": 2.0,
+          "p99": 3.0,
+          "max": 3.0
+        },
+        "worker_local_inflight": {
+          "http://192.168.162.23:18706": {
+            "n": 60,
+            "mean": 2.45,
+            "min": 1.0,
+            "p50": 2.0,
+            "p95": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          },
+          "http://192.168.162.24:18727": {
+            "n": 60,
+            "mean": 2.6333333333333333,
+            "min": 2.0,
+            "p50": 3.0,
+            "p95": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          },
+          "http://192.168.162.24:18724": {
+            "n": 60,
+            "mean": 2.7666666666666666,
+            "min": 2.0,
+            "p50": 3.0,
+            "p95": 3.0,
+            "p99": 4.0,
+            "max": 4.0
+          },
+          "http://192.168.162.23:18700": {
+            "n": 60,
+            "mean": 2.6,
+            "min": 1.0,
+            "p50": 3.0,
+            "p95": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          },
+          "http://192.168.162.24:18726": {
+            "n": 60,
+            "mean": 2.8333333333333335,
+            "min": 1.0,
+            "p50": 3.0,
+            "p95": 3.0,
+            "p99": 4.0,
+            "max": 4.0
+          },
+          "http://192.168.162.24:18424": {
+            "n": 60,
+            "mean": 1.9666666666666666,
+            "min": 1.0,
+            "p50": 2.0,
+            "p95": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          },
+          "http://192.168.162.23:18707": {
+            "n": 60,
+            "mean": 2.35,
+            "min": 1.0,
+            "p50": 2.0,
+            "p95": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          },
+          "http://192.168.162.23:18701": {
+            "n": 60,
+            "mean": 2.4166666666666665,
+            "min": 0.0,
+            "p50": 3.0,
+            "p95": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          },
+          "http://192.168.162.23:18705": {
+            "n": 60,
+            "mean": 2.5833333333333335,
+            "min": 1.0,
+            "p50": 3.0,
+            "p95": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          },
+          "http://192.168.162.24:18725": {
+            "n": 60,
+            "mean": 2.0166666666666666,
+            "min": 1.0,
+            "p50": 2.0,
+            "p95": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          },
+          "http://192.168.162.24:18721": {
+            "n": 60,
+            "mean": 1.85,
+            "min": 1.0,
+            "p50": 2.0,
+            "p95": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          },
+          "http://192.168.162.24:18722": {
+            "n": 60,
+            "mean": 2.35,
+            "min": 0.0,
+            "p50": 2.0,
+            "p95": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          },
+          "http://192.168.162.24:18723": {
+            "n": 60,
+            "mean": 2.1666666666666665,
+            "min": 1.0,
+            "p50": 2.0,
+            "p95": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          }
+        },
+        "healthy_worker_circuit_states_observed": [
+          0.0
+        ],
+        "interpolated_counter_deltas": {
+          "requests": 1838.8483785104345,
+          "processed_selections": 1838.8483785104345,
+          "cache_aware_decisions": 1838.8483785104345,
+          "cb_http_success": 1838.8483785104345,
+          "cb_http_failure": 0.0
+        },
+        "interpolated_counter_rates": {
+          "requests": 6.129494595034782,
+          "processed_selections": 6.129494595034782,
+          "cache_aware_decisions": 6.129494595034782,
+          "cb_http_success": 6.129494595034782,
+          "cb_http_failure": 0.0
+        }
+      },
+      "musa": {
+        "samples": 60,
+        "registered_workers_gauge": {
+          "n": 60,
+          "mean": 8.0,
+          "min": 8.0,
+          "p50": 8.0,
+          "p95": 8.0,
+          "p99": 8.0,
+          "max": 8.0
+        },
+        "healthy_workers_from_workers_endpoint": {
+          "n": 60,
+          "mean": 7,
+          "min": 7,
+          "p50": 7.0,
+          "p95": 7.0,
+          "p99": 7.0,
+          "max": 7
+        },
+        "router_local_inflight": {
+          "n": 60,
+          "mean": 236.7,
+          "min": 116.0,
+          "p50": 217.5,
+          "p95": 344.65,
+          "p99": 362.0,
+          "max": 362.0
+        },
+        "router_running_requests_gauge": {
+          "n": 60,
+          "mean": 236.7,
+          "min": 116.0,
+          "p50": 217.5,
+          "p95": 344.65,
+          "p99": 362.0,
+          "max": 362.0
+        },
+        "worker_load_max_minus_min": {
+          "n": 60,
+          "mean": 1.3833333333333333,
+          "min": 0.0,
+          "p50": 1.0,
+          "p95": 2.049999999999997,
+          "p99": 3.0,
+          "max": 3.0
+        },
+        "worker_local_inflight": {
+          "http://192.168.162.97:18742": {
+            "n": 60,
+            "mean": 33.983333333333334,
+            "min": 17.0,
+            "p50": 31.5,
+            "p95": 49.099999999999994,
+            "p99": 51.41,
+            "max": 52.0
+          },
+          "http://192.168.162.96:18762": {
+            "n": 60,
+            "mean": 33.516666666666666,
+            "min": 16.0,
+            "p50": 31.0,
+            "p95": 49.14999999999999,
+            "p99": 52.0,
+            "max": 52.0
+          },
+          "http://192.168.162.96:18761": {
+            "n": 60,
+            "mean": 33.7,
+            "min": 17.0,
+            "p50": 31.0,
+            "p95": 49.05,
+            "p99": 52.0,
+            "max": 52.0
+          },
+          "http://192.168.162.97:18497": {
+            "n": 60,
+            "mean": 33.766666666666666,
+            "min": 17.0,
+            "p50": 31.0,
+            "p95": 50.0,
+            "p99": 51.41,
+            "max": 52.0
+          },
+          "http://192.168.162.97:18740": {
+            "n": 60,
+            "mean": 34.18333333333333,
+            "min": 16.0,
+            "p50": 32.0,
+            "p95": 50.05,
+            "p99": 51.81999999999999,
+            "max": 53.0
+          },
+          "http://192.168.162.96:18760": {
+            "n": 60,
+            "mean": 33.45,
+            "min": 16.0,
+            "p50": 31.0,
+            "p95": 49.05,
+            "p99": 51.41,
+            "max": 52.0
+          },
+          "http://192.168.162.96:18763": {
+            "n": 60,
+            "mean": 34.1,
+            "min": 17.0,
+            "p50": 31.0,
+            "p95": 49.14999999999999,
+            "p99": 52.0,
+            "max": 52.0
+          }
+        },
+        "healthy_worker_circuit_states_observed": [
+          0.0
+        ],
+        "interpolated_counter_deltas": {
+          "requests": 1794.3074941962186,
+          "processed_selections": 1793.565585673623,
+          "cache_aware_decisions": 1793.565585673623,
+          "cb_http_success": 1794.3074941962186
+        },
+        "interpolated_counter_rates": {
+          "requests": 5.981024980654062,
+          "processed_selections": 5.97855195224541,
+          "cache_aware_decisions": 5.97855195224541,
+          "cb_http_success": 5.981024980654062
+        }
+      },
+      "iluvatar": {
+        "samples": 60,
+        "registered_workers_gauge": {
+          "n": 60,
+          "mean": 8.0,
+          "min": 8.0,
+          "p50": 8.0,
+          "p95": 8.0,
+          "p99": 8.0,
+          "max": 8.0
+        },
+        "healthy_workers_from_workers_endpoint": {
+          "n": 60,
+          "mean": 8,
+          "min": 8,
+          "p50": 8.0,
+          "p95": 8.0,
+          "p99": 8.0,
+          "max": 8
+        },
+        "router_local_inflight": {
+          "n": 60,
+          "mean": 53.13333333333333,
+          "min": 34.0,
+          "p50": 53.5,
+          "p95": 64.14999999999999,
+          "p99": 71.63999999999999,
+          "max": 74.0
+        },
+        "router_running_requests_gauge": {
+          "n": 60,
+          "mean": 53.13333333333333,
+          "min": 34.0,
+          "p50": 53.5,
+          "p95": 64.14999999999999,
+          "p99": 71.63999999999999,
+          "max": 74.0
+        },
+        "worker_load_max_minus_min": {
+          "n": 60,
+          "mean": 1.65,
+          "min": 0.0,
+          "p50": 2.0,
+          "p95": 3.0,
+          "p99": 4.0,
+          "max": 4.0
+        },
+        "worker_local_inflight": {
+          "http://192.168.162.60:18782": {
+            "n": 60,
+            "mean": 6.983333333333333,
+            "min": 4.0,
+            "p50": 7.0,
+            "p95": 9.0,
+            "p99": 9.409999999999997,
+            "max": 10.0
+          },
+          "http://192.168.162.58:18803": {
+            "n": 60,
+            "mean": 6.266666666666667,
+            "min": 3.0,
+            "p50": 6.0,
+            "p95": 8.0,
+            "p99": 9.0,
+            "max": 9.0
+          },
+          "http://192.168.162.58:18802": {
+            "n": 60,
+            "mean": 6.65,
+            "min": 4.0,
+            "p50": 7.0,
+            "p95": 8.049999999999997,
+            "p99": 9.0,
+            "max": 9.0
+          },
+          "http://192.168.162.60:18460": {
+            "n": 60,
+            "mean": 6.416666666666667,
+            "min": 3.0,
+            "p50": 6.0,
+            "p95": 8.0,
+            "p99": 9.0,
+            "max": 9.0
+          },
+          "http://192.168.162.60:18780": {
+            "n": 60,
+            "mean": 6.133333333333334,
+            "min": 3.0,
+            "p50": 6.0,
+            "p95": 8.0,
+            "p99": 8.409999999999997,
+            "max": 9.0
+          },
+          "http://192.168.162.58:18800": {
+            "n": 60,
+            "mean": 6.983333333333333,
+            "min": 4.0,
+            "p50": 7.0,
+            "p95": 9.0,
+            "p99": 9.409999999999997,
+            "max": 10.0
+          },
+          "http://192.168.162.60:18783": {
+            "n": 60,
+            "mean": 6.85,
+            "min": 4.0,
+            "p50": 7.0,
+            "p95": 8.049999999999997,
+            "p99": 9.0,
+            "max": 9.0
+          },
+          "http://192.168.162.58:18801": {
+            "n": 60,
+            "mean": 6.85,
+            "min": 4.0,
+            "p50": 7.0,
+            "p95": 9.0,
+            "p99": 9.409999999999997,
+            "max": 10.0
+          }
+        },
+        "healthy_worker_circuit_states_observed": [
+          0.0
+        ],
+        "interpolated_counter_deltas": {
+          "requests": 1751.8691079474102,
+          "processed_selections": 1752.656447266394,
+          "cache_aware_decisions": 1752.656447266394,
+          "cb_http_success": 1751.8691079474102
+        },
+        "interpolated_counter_rates": {
+          "requests": 5.839563693158034,
+          "processed_selections": 5.842188157554647,
+          "cache_aware_decisions": 5.842188157554647,
+          "cb_http_success": 5.839563693158034
+        }
+      }
+    },
+    "pitfalls": [
+      "active_workers is registered count16/8/8, actual healthy count13/7/8 comes from /workers.",
+      "processed_requests_total is incremented on worker selection, not final client completion.",
+      "worker_load/running_requests include forwarded requests still queued/generating, not only GPU-running.",
+      "Router latency histogram, cache-hit ratio and internal queue length were not retained."
+    ]
+  },
+  "frozen_gateway_configuration": {
+    "admission": {
+      "binary": "/workspace/artifacts/runtime/haproxy/usr/sbin/haproxy",
+      "library_path": "/workspace/artifacts/runtime/haproxy/usr/lib/x86_64-linux-gnu",
+      "version": "2.8.30-0ubuntu0.24.04.1",
+      "metrics_port": 18612,
+      "max_inflight": 512,
+      "max_queue": 128,
+      "queue_timeout_seconds": 10,
+      "idle_timeout_seconds": 180,
+      "keepalive_timeout_seconds": 75,
+      "drain_seconds": 190
+    },
+    "gateway": {
+      "host": "0.0.0.0",
+      "port": 18600,
+      "internal_port": 18610,
+      "address": "192.168.162.60",
+      "max_inflight": 640,
+      "max_upstream_connections": 672,
+      "min_open_files": 65536,
+      "upstream_keepalive_seconds": 2,
+      "keep_alive_seconds": 90,
+      "timeout_seconds": 180,
+      "random_route_health_seconds": 5,
+      "route_embeddings": {
+        "awq": "embedding"
+      }
+    },
+    "effective_application": {
+      "host": "127.0.0.1",
+      "port": 18610,
+      "max_inflight": 640,
+      "max_upstream_connections": 672,
+      "min_open_files": 65536,
+      "timeout_seconds": 180
+    },
+    "client_total_timeout_seconds": 150,
+    "generated_haproxy_config": "# Native HAProxy 2.8 HTTP admission, generated by serving.py.\nglobal\n    nbthread 1\n    log stdout format raw local0\n    maxconn 4096\n    hard-stop-after 190s\n\ndefaults\n    mode http\n    log global\n    option httplog\n    option abortonclose\n    timeout connect 3s\n    timeout client 180s\n    timeout server 180s\n    timeout http-request 5s\n    timeout http-keep-alive 75s\n    timeout queue 10s\n    retries 0\n\nfrontend ingress\n    bind 0.0.0.0:18600\n    acl inference path -i /v1/chat/completions /v1/embeddings\n    acl control path -i /live /ready /metrics /v1/models\n    http-request deny deny_status 403 if !inference !control\n    http-request return status 429 content-type application/json string '{\"detail\":\"gateway queue full\"}' hdr Retry-After 1 if inference { queue(gateway) ge 128 }\n    use_backend gateway if inference\n    default_backend control\n\nbackend gateway\n    http-response set-header x-heteroserve-queue-ms %Tw\n    server app 127.0.0.1:18610 maxconn 512 maxqueue 128\n\nbackend control\n    server app 127.0.0.1:18610\n\nfrontend admission_metrics\n    bind 127.0.0.1:18612\n    http-request use-service prometheus-exporter if { path /metrics }\n    http-request return status 404\n"
+  },
+  "memory_observations": {
+    "run_id": "20261027T113010Z",
+    "scope": "Healthy AWQ devices only, 18 req/s formal measurement; SMI device-used memory, not model-weight-only or tensor allocation breakdown.",
+    "pools": {
+      "ascend": {
+        "expected_devices": 26,
+        "observed_devices": 16,
+        "total_gib_values": [
+          64.0
+        ],
+        "used_gib_mean": 40.40225064552436,
+        "used_gib_min": 40.271484375,
+        "used_gib_max": 40.5400390625,
+        "used_fraction_mean": 0.6312851663363181,
+        "first_sample_used_gib_mean": 40.40216064453125
+      },
+      "musa": {
+        "expected_devices": 14,
+        "observed_devices": 14,
+        "total_gib_values": [
+          80.0
+        ],
+        "used_gib_mean": 53.203683035714285,
+        "used_gib_min": 53.0556640625,
+        "used_gib_max": 53.390625,
+        "used_fraction_mean": 0.6650460379464286,
+        "first_sample_used_gib_mean": 53.203683035714285
+      },
+      "iluvatar": {
+        "expected_devices": 16,
+        "observed_devices": 16,
+        "total_gib_values": [
+          32.0
+        ],
+        "used_gib_mean": 19.98779296875,
+        "used_gib_min": 19.978515625,
+        "used_gib_max": 20.115234375,
+        "used_fraction_mean": 0.6246185302734375,
+        "first_sample_used_gib_mean": 19.98779296875
+      }
+    }
   }
 }

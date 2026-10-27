@@ -13,8 +13,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from heterogeneous_compute.serving import generation_workers
-from heterogeneous_compute.system_benchmark import percentile, summarize
+from heterogeneous_compute.serving import admission_config, gateway_config, generation_workers
+from heterogeneous_compute.system_benchmark import meets_slo, percentile, summarize
 from heterogeneous_compute.benchmark_telemetry import metric_sum
 
 
@@ -81,6 +81,59 @@ def historical_16_results(base):
     return result
 
 
+def analyze_router(frames, frozen, start, end):
+    """Router counters are selections/HTTP outcomes, not client completion counts."""
+    result={}
+    for pool,urls in frozen['router_pools'].items():
+        per_sample=[];counter_points=defaultdict(list);per_worker=defaultdict(list)
+        for frame in frames:
+            metrics=[m for m in frame['metrics'] if m['labels'].get('router_pool')==pool]
+            at=frame['sample_time']
+            selectors={
+                'requests':('vllm_router_requests_total',{'route':'/v1/chat/completions'}),
+                'processed_selections':('vllm_router_processed_requests_total',{}),
+                'cache_aware_decisions':('vllm_router_policy_decisions_total',{'policy':'cache_aware'}),
+                'cb_http_success':('vllm_router_cb_outcomes_total',{'outcome':'success'}),
+                'cb_http_failure':('vllm_router_cb_outcomes_total',{'outcome':'failure'})}
+            for label,(name,filters) in selectors.items():
+                values=[m['value'] for m in metrics if m['name']==name
+                        and all(m['labels'].get(k)==v for k,v in filters.items())]
+                if values:counter_points[label].append((at,sum(values)))
+            if not start<=frame['time']<end:
+                continue
+            loads={m['labels']['worker']:m['value'] for m in metrics
+                   if m['name']=='vllm_router_worker_load' and m['labels'].get('worker') in urls}
+            running={m['labels']['worker']:m['value'] for m in metrics
+                     if m['name']=='vllm_router_running_requests' and m['labels'].get('worker') in urls}
+            registered=[m['value'] for m in metrics if m['name']=='vllm_router_active_workers']
+            healthy=[w for w in frame['workers'] if w.get('router_pool')==pool and w.get('is_healthy')]
+            cb=[m['value'] for m in metrics if m['name']=='vllm_router_cb_state' and m['labels'].get('worker') in urls]
+            complete=len(loads)==len(urls)
+            per_sample.append({'time':frame['time'],'registered':sum(registered) if registered else None,
+                'healthy':len(healthy),'load_sum':sum(loads.values()) if complete else None,
+                'load_spread':max(loads.values())-min(loads.values()) if complete else None,
+                'running_sum':sum(running.values()) if len(running)==len(urls) else None,
+                'cb_states':cb})
+            for worker,load in loads.items():per_worker[worker].append(load)
+        deltas={}
+        for label,points in counter_points.items():
+            points.sort()
+            reset=any(b[1]<a[1] for a,b in zip(points,points[1:]) if a[0]<=end and b[0]>=start)
+            a,b=[interpolate(points,t) for t in [start,end]]
+            deltas[label]=None if reset or a is None or b is None else b-a
+        result[pool]={'samples':len(per_sample),
+            'registered_workers_gauge':stats([s['registered'] for s in per_sample]),
+            'healthy_workers_from_workers_endpoint':stats([s['healthy'] for s in per_sample]),
+            'router_local_inflight':stats([s['load_sum'] for s in per_sample]),
+            'router_running_requests_gauge':stats([s['running_sum'] for s in per_sample]),
+            'worker_load_max_minus_min':stats([s['load_spread'] for s in per_sample]),
+            'worker_local_inflight':{w:stats(v) for w,v in per_worker.items()},
+            'healthy_worker_circuit_states_observed':sorted({v for s in per_sample for v in s['cb_states']}),
+            'interpolated_counter_deltas':deltas,
+            'interpolated_counter_rates':{k:v/(end-start) if v is not None else None for k,v in deltas.items()}}
+    return result
+
+
 def analyze(directory):
     config, serving, frozen = [read(directory/n) for n in
                               ['config.json', 'serving-snapshot.json', 'preflight.json']]
@@ -116,7 +169,12 @@ def analyze(directory):
             device_nodes[workers[name]['node']].add(device)
     clocks = []
     gateway_processes = []
+    router_frames=[]
     for sample in lines(directory/'telemetry.jsonl'):
+        if sample['node']==serving['services']['gateway']['node']:
+            router_frames.append({'time':sample['received_at'],'sample_time':sample['time'],
+                'metrics':sample.get('router_metrics',[]),
+                'workers':sample.get('router_workers',{}).get('workers',[])})
         compact = {'time': sample['received_at'], 'workers': {}}
         for name, worker in sample.get('workers', {}).items():
             if name not in pool_by_name:
@@ -170,6 +228,30 @@ def analyze(directory):
             http_statuses=dict(Counter(str(x.get('http_status')) for x in cohort)),
             unknown_worker_requests=sum(x['_worker'] is None for x in cohort),
             error_attribution={}, pools={})
+        good_cohort=[x for x in cohort if meets_slo(x,config['slo'])]
+        carry_in=[x for x in case_rows if x['sent_at']<start and start<=x['completed_at']<end and meets_slo(x,config['slo'])]
+        carry_out=[x for x in good_cohort if x['completed_at']>=end]
+        own_window=[x for x in good_cohort if start<=x['completed_at']<end]
+        after_window=[x for x in cohort if x['completed_at']>=end]
+        drain_points=[x for x in timeline if x['case']==stage['case'] and x['phase']=='draining' and x['time']>=end]
+        r['accounting']={'measurement_seconds':duration,'sent_cohort_count':len(cohort),
+            'cohort_success_count':r['cohort_success'],'cohort_slo_count':len(good_cohort),
+            'cohort_slo_rate':len(good_cohort)/duration,
+            'cohort_slo_completed_in_window':len(own_window),
+            'transition_carry_in_slo_count':len(carry_in),
+            'cohort_carry_out_slo_count':len(carry_out),
+            'window_slo_completion_count':len(own_window)+len(carry_in),
+            'window_completion_goodput':(len(own_window)+len(carry_in))/duration}
+        r['post_window_settlement']={'requests_ending_after_window':len(after_window),
+            'success_after_window':sum(x['success'] for x in after_window),
+            'slo_after_window':len(carry_out),
+            'failed_after_window':dict(Counter(x.get('error','unknown') for x in after_window if not x['success'])),
+            'seconds_until_all_sent_cohort_requests_resolved':max(0,max(x['completed_at'] for x in cohort)-end),
+            'observed_server_draining_samples':len(drain_points),
+            'scope':'Post-window client cohort settlement includes success/failure. This is distinct from the later explicit server-draining phase, only observed at 1-second timeline resolution.'}
+        assert abs(r['accounting']['cohort_slo_rate']-r['actual_rate']*r['slo_ratio'])<1e-9
+        assert abs(r['accounting']['window_completion_goodput']-r['goodput'])<1e-9
+        assert len(own_window)+len(carry_out)==r['cohort_good']
         for error in sorted(stage['errors']):
             failed = [x for x in cohort if not x['success'] and x.get('error') == error]
             r['error_attribution'][error] = {
@@ -255,6 +337,7 @@ def analyze(directory):
         r['musa_clocks'] = {node:{key:stats([x[key] for x in clocks if x['node']==node and start<=x['time']<end])
                                  for key in ['graphics_mhz','memory_mhz']}
                             for node in ['s5000-01','s5000-02']}
+        r['routers']=analyze_router(router_frames,frozen,start,end)
         r['routed_arrival_rps_total'] = sum(x['arrival_rps'] for x in r['pools'].values())
         r['successful_completion_rps_pool_sum'] = sum(x['successful_completion_rps'] for x in r['pools'].values())
         assert abs(r['successful_completion_rps_pool_sum']-stage['completed_rate']) < 1e-9
@@ -262,6 +345,11 @@ def analyze(directory):
         assert sum(len(x['queue_time_series']) for x in r['pools'].values()) > 0
         results.append(r)
     return {'run_id':directory.name,'route_observer_packet_drops':drops,
+            'gateway_configuration':{'admission':serving['admission'],'gateway':serving['gateway'],
+                'effective_application':{k:v for k,v in gateway_config(serving).items() if k in
+                    ['host','port','max_inflight','max_upstream_connections','min_open_files','timeout_seconds']},
+                'client_total_timeout_seconds':config['timeout_seconds'],
+                'generated_haproxy_config':admission_config(serving)},
             'route_observer_errors':observer_errors,'multi_worker_route_conflicts':different_worker_routes,
             'request_rows':len(requests),'stages':results}
 
@@ -280,11 +368,11 @@ def render_report(result, output):
     single=next(s for s in stages if s['rate']==18)
     def table(headers,rows):
         return '<table><thead><tr>'+''.join('<th>'+html.escape(str(h))+'</th>' for h in headers)+'</tr></thead><tbody>'+''.join('<tr>'+''.join('<td>'+html.escape(str(v))+'</td>' for v in row)+'</tr>' for row in rows)+'</tbody></table>'
-    overall=table(['请求/秒','请求数','完整批次成功率','SLO达标率','窗口Goodput','429','5xx','超时','短测判定'],[
-        [s['rate'],s['sent'],f"{s['success_ratio']:.2%}",f"{s['slo_ratio']:.2%}",f"{s['goodput']:.2f}",
+    overall=table(['请求/秒','请求数','完整批次成功率','SLO达标率','同批次达标请求率','窗口完成Goodput','429','5xx','超时','短测判定'],[
+        [s['rate'],s['sent'],f"{s['success_ratio']:.2%}",f"{s['slo_ratio']:.2%}",f"{s['accounting']['cohort_slo_rate']:.2f}",f"{s['goodput']:.2f}",
          s['errors'].get('429',0),s['errors'].get('5xx',0),s['errors'].get('timeout',0),'通过' if s['passed'] else '未通过'] for s in stages])
     history=result.get('historical_16_results',[])
-    historical_table=table(['历史实验','实例／策略','请求数','成功率','SLO达标率','Goodput','队列稳定','原判定'],[
+    historical_table=table(['历史实验','实例／策略','请求数','成功率','SLO达标率','窗口完成Goodput','队列稳定','原判定'],[
         [h['run_id'],str(h['healthy_workers'])+' / '+h['policy'],h['sent'],f"{h['success_ratio']:.2%}",
          f"{h['slo_ratio']:.4%}",f"{h['goodput']:.2f}",'是' if h['queue_stable'] else '否',
          '通过' if h['passed'] else '未通过（队列门槛）'] for h in history])
@@ -297,6 +385,30 @@ def render_report(result, output):
     history_growth=table(['历史16档','摩尔.96平均队列变化','摩尔.97平均队列变化','入口平均队列变化'],[
         [h['run_id'],f"{h['queue_changes']['s5000-02']:+.2f}",f"{h['queue_changes']['s5000-01']:+.2f}",
          f"{h['queue_changes']['gateway_queue']:+.2f}"] for h in history])
+    accounting_table=table(['请求/秒','本档最终达标数','窗口后才达标','过渡期带入达标','窗口完成达标数','同批次达标请求率','窗口完成Goodput'],[
+        [s['rate'],s['accounting']['cohort_slo_count'],s['accounting']['cohort_carry_out_slo_count'],
+         s['accounting']['transition_carry_in_slo_count'],s['accounting']['window_slo_completion_count'],
+         f"{s['accounting']['cohort_slo_rate']:.4f}",f"{s['goodput']:.4f}"] for s in stages])
+    settlement_table=table(['请求/秒','发压后收尾秒数','窗口后结束请求数','其中成功','其中SLO达标','其中失败'],[
+        [s['rate'],f"{s['post_window_settlement']['seconds_until_all_sent_cohort_requests_resolved']:.2f}",
+         s['post_window_settlement']['requests_ending_after_window'],s['post_window_settlement']['success_after_window'],
+         s['post_window_settlement']['slo_after_window'],json.dumps(s['post_window_settlement']['failed_after_window'])] for s in stages])
+    router_table=table(['18档Router','注册数指标','实际健康数','未结束请求均值/峰值','实例间load差均值/峰值','健康实例熔断状态'],[
+        [pool,f"{r['registered_workers_gauge']['mean']:.0f}",f"{r['healthy_workers_from_workers_endpoint']['mean']:.0f}",
+         f"{r['router_local_inflight']['mean']:.1f} / {r['router_local_inflight']['max']:.0f}",
+         f"{r['worker_load_max_minus_min']['mean']:.2f} / {r['worker_load_max_minus_min']['max']:.0f}",
+         str(r['healthy_worker_circuit_states_observed'])] for pool,r in single['routers'].items()])
+    gc=next(r for r in result['runs'] if any(s['rate']==18 for s in r['stages']))['gateway_configuration']
+    gateway_table=table(['层级','参数','冻结值'],[
+        ['HAProxy入口','已准入在途上限',gc['admission']['max_inflight']],
+        ['HAProxy入口','等待队列上限',gc['admission']['max_queue']],
+        ['HAProxy入口','最长排队秒数',gc['admission']['queue_timeout_seconds']],
+        ['HAProxy入口','连接空闲超时秒数',gc['admission']['idle_timeout_seconds']],
+        ['Gateway应用','内部在途预算',gc['gateway']['max_inflight']],
+        ['Gateway应用','上游连接池上限',gc['gateway']['max_upstream_connections']],
+        ['Gateway应用','上游HTTP超时参数（秒）',gc['gateway']['timeout_seconds']],
+        ['Gateway应用','文件描述符软上限',gc['gateway']['min_open_files']],
+        ['压测客户端','包含排队/Embedding/生成的总截止秒数',gc['client_total_timeout_seconds']]])
     for name,label in [('ascend','昇腾'),('musa','摩尔'),('iluvatar','天数')]:
         p=single['pools'][name]
         pool_rows.append([label,p['healthy_workers'],f"{p['arrival_rps']:.3f}",f"{p['successful_completion_rps']:.3f}",
@@ -321,9 +433,13 @@ def render_report(result, output):
 <style>body{{font-family:Segoe UI,Microsoft YaHei,sans-serif;max-width:1180px;margin:36px auto;padding:0 24px;color:#203047;line-height:1.65}}h1,h2{{line-height:1.3}}h2{{margin-top:32px}}table{{width:100%;border-collapse:collapse;font-size:14px;margin:16px 0}}td,th{{border:1px solid #d6dee8;padding:9px;text-align:left}}th{{background:#eef3f8}}img{{max-width:100%}}.lead{{padding:18px;background:#eaf3fa;border-left:5px solid #2468ad}}.caution{{padding:15px;background:#fff4db}}code{{background:#eef1f4;padding:2px 5px}}a{{color:#2468ad}}</style>
 <h1>六节点 mixed 压测分析</h1><p>数据：20261027T105055Z（64→48→32→24）与 20261027T113010Z（18）。每档60秒过渡、300秒测量，完整排空。分析仅使用本机已校验原始数据，不恢复服务。</p>
 <div class="lead"><strong>核心结论：</strong>18 req/s通过本轮短测，24及以上未通过。当前主要约束集中在摩尔池：其到达约6 req/s、测量窗口完成约5.17 req/s，等待持续增加。不能把18称为长期稳定容量，也不能把16～18的窗口Goodput称为硬件理论极限。</div>
+<h2>Gateway队列设置：本次实验冻结配置，服务已暂停</h2>{gateway_table}<p>公开入口192.168.162.60:18600，经HAProxy转到本机127.0.0.1:18610的Gateway应用；准入指标端口18612。队列已满时新推理请求返回429及Retry-After:1；排队超过10秒返回503。128限制的是入口等待，不限制vLLM模型内部waiting。512个已准入在途请求会持续占用入口额度直到流式响应结束；640是应用内部预算，不是入口放行512的替代值。</p><details><summary>展开实际生成的HAProxy配置</summary><pre>{html.escape(gc['generated_haproxy_config'])}</pre></details>
 <h2>1. 当前28实例的五个完整测量档位</h2>{overall}<p>所有档位均产生了目标请求速率，失败不是客户端没有发够请求。这两轮总计55,800个正式测量请求；预检及过渡另存原始日志。成功率和SLO达标率在这些档位相同，因为成功完成的请求平均TPOT均低于100ms；拒绝、超时、HTTP错误仍使整体SLO达标率下降。</p>
+<h2>统计口径核对：成功率、SLO与Goodput的分母</h2><p>正式发压窗口均为T=300秒。成功率=本档发送请求中最终成功数/N；SLO达标率=同一批请求中最终成功且TPOT达标数/N。两项比例等待所有请求完成/失败后计算，分母都是本档发送数N。<strong>同批次达标请求率=最终达标数/T=实际发压速率×SLO达标率</strong>，这是归属于发送窗口的请求率，不是长期每秒完成能力。</p><p><strong>原Goodput改用明确名称“窗口完成Goodput”：</strong>在这300秒内完成且达标的请求数/T；计入过渡期发出但此时才完成的请求，不计入本档发出但窗口结束后才完成的请求。分母不包含排空时间。恒等式为：窗口完成达标数=本档最终达标数−窗口后才达标数＋过渡期带入达标数。</p>{accounting_table}<p>18档：5,400个最终均达标，其中449个窗口后才完成，另有199个过渡期请求在窗口内完成，所以窗口完成Goodput=(5,400−449＋199)/300=17.1667；同批次达标请求率为18.00。24档：5,641个最终达标，其中636个窗口后完成，带入317个，所以(5,641−636＋317)/300=17.74；同批次达标请求率为5,641/300=18.8033。差额不是成功率与SLO不一致，也不是Goodput包含了排空秒数。</p>
+<h2>发压后收尾/排空：单独统计，不混入Goodput分母</h2>{settlement_table}<p>本表“收尾秒数”从正式窗口结束到该发送批次所有请求成功或失败，包含客户端等待在途请求结算。程序随后标记的显式服务端draining阶段另由1秒timeline记录；二者不能混称同一精确时长。本表没有把收尾秒数加入任何Goodput分母。</p>
 <h2>历史16请求/秒：已测，不能遗漏</h2>{historical_table}<p><strong>16档曾测过三次，均完成4,800个请求且成功率100%。</strong>cache_aware首次16档还通过了当时的队列稳定条件，SLO为99.9167%；另一次cache_aware 16档SLO为100%，但摩尔.96/.97平均队列变化分别+3.15/+3.85，按当时严格队列门槛未通过。按当前忽略队列增长的口径，其成功/SLO条件满足。轮询16档的摩尔队列也增长。</p><p>因此不能把16当成“没有测试过”，也不能把三次16档合并成一个稳定结论。历史16档有29个健康实例、摩尔8个；当前28实例、摩尔7个，且历史间路由与Gateway FD预算发生过变化。历史结果保留为证据，不能直接与当前18档构成相同配置的容量边界对照。这里依据本机已保存完整阶段摘要，未对未下载的历史逐请求日志重新核算；当前两轮55,800个请求则完成了原始日志重算。</p>
 <h2>队列数据总表</h2>{queue_table}<p>单位均为请求数，均值和峰值只取正式测量窗口。峰值是采样峰值：原始模型遥测约5秒，按1秒timeline对齐，并非逐请求事件精确最大值。running表示正在执行，waiting才是等待；Gateway inflight包含已进入入口、可能正在Embedding、路由、执行或模型排队的请求，不能与模型running/waiting直接相加。</p>
+<h2>vLLM Router数据</h2>{router_table}<p>策略为cache_aware。worker_load和running_requests跟踪Router持有的尚未结束请求，包含模型排队和流式输出，不能视为GPU正在执行数，也不能与后端running/waiting重复相加。active_workers的16/8/8是注册数，实际健康数从/workers计算为13/7/8；worker_health指标只出现故障实例的0值，不能因健康标签未出现就当不健康。</p><p>保存的9类指标：requests_total、processed_requests_total、policy_decisions_total、running_requests、worker_load、active_workers、worker_health、cb_state、cb_outcomes_total（均带vllm_router_前缀）。在本次固定版本中processed计数在策略选择worker时增加，不等于客户端最终成功数；熔断HTTP结果也不能替代完整SSE结束和模型内容检查。健康实例cb_state均观察到0（closed）；不将其解释为全请求成功。计数差分按窗口边界插值，原始样本另存CSV。</p><p>本轮未保存Router专用耗时直方图、缓存命中率、内部队列长度；cache_aware决策计数证明策略被调用，不能推出实际后端前缀缓存命中率。</p>
 <p>入口等待上限128只约束HAProxy入口队列；进入Gateway后，vLLM实例可以另外排队，所以摩尔waiting可以超过128。Router内部队列长度没有暴露，不把worker_load或模型running冒充独立Router排队。当前统一队列数据包含时间序列、均值、采样峰值、前后段均值及增长、实例running/waiting、入口inflight/waiting。</p>{history_growth}<p>历史16档增长值为最后100秒队列均值减最初100秒均值。首次cache_aware的本机摘要还保存：入口waiting均值/峰值0/0；摩尔.96均值0.133、采样峰值1，.97均值0.083、采样峰值2。两节点的峰值不能直接相加当作池峰值。后一次16档的均值/峰值未保存在本机摘要中，不猜测；其增长值保留如上。</p>
 {image}<h2>2. 18 req/s为什么成功，却不能称为队列稳定</h2>{pools}
 <p>全窗口观察到的AWQ到达率合计{single['routed_arrival_rps_total']:.3f} req/s，接近客户端18 req/s。按完整请求ID和观测时间去重；不是用完成响应数冒充到达率。摩尔到达与成功完成差约{musa['arrival_rps']-musa['successful_completion_rps']:.3f} req/s，其他两池基本平衡。</p>
@@ -340,7 +456,7 @@ def render_report(result, output):
 <ol><li>优先做池间容量分配对照：先测各池持续处理能力，再按能力分配入口流量；保留官方Router作池内选择。</li><li>在统一28实例配置下做低于18的较长验证，检查waiting斜率接近0，而不仅看最终成功率。</li><li>摩尔max_num_seqs调整应单独做受控对照，观察输出token/s、TPOT和队列；不要同时改路由、并发和执行模式。</li><li>将“短测成功/SLO”和“队列平稳”分别报告。若业务关心等待体验，另行定义排队/首token/总时延目标；当前实验没有恢复TTFT/E2E指标。</li></ol>
 <h2>7. 数据可信范围与复现</h2><p>两个实验的健康集合、容器/模型进程身份、精确workload与服务配置相同，实验配置只改变扫描速率；每档一次、固定seed。所有正式请求都已结束再统计，没有丢弃在途请求。路由观测丢包0，多worker关联冲突0。各池成功完成率相加与原始阶段完成率一致；各档成功数加错误数等于发送数。</p>
 <p>本实验使用重复的300个合成prompt，不能代表所有真实流量。Ascend为ACL图、Iluvatar为FULL decode图、MUSA为V0 eager；不构成同执行模式的厂商对比。.96还承担发压。正式负载强制固定输出长度，仅验收了协议、长度及完成状态；没有对每条完整生成内容做语义评分。没有用高利用率直接推导可扩展容量，也没有证明所有配置最优。</p>
-<p>原始数据目录保持完整，当前暂停状态不变。<a href="analysis.json">详细JSON</a> · <a href="stage-analysis.csv">各档CSV</a> · <a href="pool-analysis.csv">各池CSV</a> · <a href="queue-analysis.csv">各层队列CSV</a> · <a href="worker-analysis.csv">各实例CSV</a> · <a href="analysis-inputs.json">输入校验清单</a>。复现命令：<code>python heterogeneous_compute/analyze_benchmark.py --runs artifacts/serving/system-benchmark/20261027T105055Z artifacts/serving/system-benchmark/20261027T113010Z --output artifacts/serving/system-benchmark/analysis</code>。报告复用原实验已导出的Matplotlib队列图，无需额外安装绘图库。</p></html>'''
+<p>原始数据目录保持完整，当前暂停状态不变。<a href="analysis.json">详细JSON</a> · <a href="stage-analysis.csv">各档CSV</a> · <a href="accounting-analysis.csv">统计口径核对</a> · <a href="post-window-settlement.csv">收尾/排空统计</a> · <a href="router-analysis.csv">Router汇总</a> · <a href="router-metrics.csv">Router指标原始样本</a> · <a href="pool-analysis.csv">各池CSV</a> · <a href="queue-analysis.csv">各层队列CSV</a> · <a href="worker-analysis.csv">各实例CSV</a> · <a href="analysis-inputs.json">输入校验清单</a>。复现命令：<code>python heterogeneous_compute/analyze_benchmark.py --runs artifacts/serving/system-benchmark/20261027T105055Z artifacts/serving/system-benchmark/20261027T113010Z --output artifacts/serving/system-benchmark/analysis</code>。报告复用原实验已导出的Matplotlib队列图，无需额外安装绘图库。</p></html>'''
     (output/'report.html').write_text(document,encoding='utf-8')
 
 
@@ -354,6 +470,8 @@ def main():
         'completion_rps':'Successful completions during the same window, including transition carryover and excluding subsequent drain.',
         'backend_token_rps':'Interpolated generation_tokens_total differences; includes generated tokens of requests that may later fail. 25-second maximum sample interpolation gap.',
         'cohort':'All requests sent in the measurement window, including eventual drain/timeout outcomes.',
+        'cohort_slo_rate':'cohort_good/measurement_seconds = actual_rate*slo_ratio; this is attributed to the send cohort, not a steady completion throughput.',
+        'window_completion_goodput':'Legacy stage goodput: SLO completions within the fixed measurement window/measurement_seconds; includes transition carry-in, excludes post-window carry-out; denominator excludes drain.',
         'tpot':'Per-request mean interval (last content time - first content time)/(output_tokens-1); excludes waiting/prefill/first-token time, not a percentile of individual token gaps.',
         'queue':'1-second resampling of latest per-node healthy-worker telemetry no older than 25s. running and waiting are separate; no backend/server queue double counting.',
         'scope':'Same 28-worker deployment, short fixed mixed workload. Not theoretical hardware capacity, semantic quality evaluation, or long-term stable capacity.'},
@@ -407,13 +525,15 @@ def main():
                         running_sample_peak=p['running']['max'] if scope!='gateway' else None,
                         gateway_inflight_mean=p['gateway_inflight']['mean'] if scope=='gateway' else None,
                         gateway_inflight_sample_peak=p['gateway_inflight']['max'] if scope=='gateway' else None))
-    stage_fields=['run_id','rate','sent','actual_rate','success_ratio','slo_ratio','goodput','passed',
+    stage_fields=['run_id','rate','sent','actual_rate','success_ratio','slo_ratio','cohort_slo_rate_rps','window_completion_goodput_rps','passed',
                   'load_valid','queue_stable','429','5xx','timeout','tpot_p99_ms']
     with (args.output/'stage-analysis.csv').open('w',encoding='utf-8-sig',newline='') as stream:
         writer=csv.DictWriter(stream,fieldnames=stage_fields);writer.writeheader()
         for run in result['runs']:
             for s in run['stages']:
                 row={k:s.get(k) for k in stage_fields}
+                row['cohort_slo_rate_rps']=s['accounting']['cohort_slo_rate']
+                row['window_completion_goodput_rps']=s['accounting']['window_completion_goodput']
                 row.update({k:s['errors'].get(k,0) for k in ['429','5xx','timeout']})
                 row['tpot_p99_ms']=s['successful_tpot_ms']['p99'];writer.writerow(row)
     worker_fields=['run_id','rate','pool','worker','cohort_requests','long_output_requests','running_mean',
@@ -429,6 +549,41 @@ def main():
                             running_mean=w['running']['mean'],at_max_sequences_fraction=w['at_max_sequences_fraction'],
                             waiting_mean=w['waiting']['mean'],waiting_peak=w['waiting']['max'],
                             kv_usage_max_fraction=w['kv_usage_raw']['max'] if w['kv_usage_raw'] else None))
+    accounting_fields=['run_id','rate',*result['runs'][0]['stages'][0]['accounting']]
+    with (args.output/'accounting-analysis.csv').open('w',encoding='utf-8-sig',newline='') as stream:
+        writer=csv.DictWriter(stream,fieldnames=accounting_fields);writer.writeheader()
+        for run in result['runs']:
+            for s in run['stages']:writer.writerow(dict(run_id=run['run_id'],rate=s['rate'],**s['accounting']))
+    settlement_fields=['run_id','rate',*result['runs'][0]['stages'][0]['post_window_settlement']]
+    with (args.output/'post-window-settlement.csv').open('w',encoding='utf-8-sig',newline='') as stream:
+        writer=csv.DictWriter(stream,fieldnames=settlement_fields);writer.writeheader()
+        for run in result['runs']:
+            for s in run['stages']:writer.writerow(dict(run_id=run['run_id'],rate=s['rate'],**s['post_window_settlement']))
+    router_fields=['run_id','rate','pool','registered_gauge','healthy_workers','local_inflight_mean','local_inflight_peak',
+                   'worker_load_spread_mean','worker_load_spread_peak','cb_states','requests_counter_delta',
+                   'selection_counter_delta','cache_aware_decisions_counter_delta']
+    with (args.output/'router-analysis.csv').open('w',encoding='utf-8-sig',newline='') as stream:
+        writer=csv.DictWriter(stream,fieldnames=router_fields);writer.writeheader()
+        for run in result['runs']:
+            for s in run['stages']:
+                for pool,r in s['routers'].items():
+                    writer.writerow(dict(run_id=run['run_id'],rate=s['rate'],pool=pool,
+                        registered_gauge=r['registered_workers_gauge']['mean'],
+                        healthy_workers=r['healthy_workers_from_workers_endpoint']['mean'],
+                        local_inflight_mean=r['router_local_inflight']['mean'],local_inflight_peak=r['router_local_inflight']['max'],
+                        worker_load_spread_mean=r['worker_load_max_minus_min']['mean'],worker_load_spread_peak=r['worker_load_max_minus_min']['max'],
+                        cb_states=json.dumps(r['healthy_worker_circuit_states_observed']),
+                        requests_counter_delta=r['interpolated_counter_deltas'].get('requests'),
+                        selection_counter_delta=r['interpolated_counter_deltas'].get('processed_selections'),
+                        cache_aware_decisions_counter_delta=r['interpolated_counter_deltas'].get('cache_aware_decisions')))
+    raw_fields=['run_id','sample_time','received_at','metric','pool','worker','value','labels_json']
+    with (args.output/'router-metrics.csv').open('w',encoding='utf-8-sig',newline='') as stream:
+        writer=csv.DictWriter(stream,fieldnames=raw_fields);writer.writeheader()
+        for directory in args.runs:
+            for sample in lines(directory/'telemetry.jsonl'):
+                for metric in sample.get('router_metrics',[]):
+                    labels=metric['labels'];writer.writerow(dict(run_id=directory.name,sample_time=sample['time'],received_at=sample['received_at'],
+                        metric=metric['name'],pool=labels.get('router_pool'),worker=labels.get('worker'),value=metric['value'],labels_json=json.dumps(labels,sort_keys=True)))
     manifest={'analyzer_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'inputs':{str(p/n):hashlib.sha256((p/n).read_bytes()).hexdigest() for p in args.runs for n in
                         ['config.json','serving-snapshot.json','preflight.json','stages.json','requests.jsonl','timeline.jsonl','routes.jsonl','telemetry.jsonl','workload.json','pool-utilization-summary.json','local-sync-manifest.json','launch.json']}}
