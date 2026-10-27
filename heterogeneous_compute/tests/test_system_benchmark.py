@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 import csv
 import json
 import io
@@ -55,9 +56,10 @@ def test_reference_stage_is_reinterpreted_without_modifying_source_and_checks_id
         validated_search_reference({**c,'require_queue_stability':True},{},frozen,[])
 
 
-def test_sweep_records_overload_points_without_starting_long_stability(tmp_path):
+@pytest.mark.parametrize('scan_rates', [[24,32], [32,24]])
+def test_sweep_records_overload_points_without_starting_long_stability(tmp_path,scan_rates):
     e=Experiment.__new__(Experiment);e.directory=tmp_path;e.active=set();e.results=[]
-    e.config={'run_mode':'sweep','coarse_rates':[24,32],'coarse_seconds':300,'require_queue_stability':False}
+    e.config={'run_mode':'sweep','coarse_rates':scan_rates,'coarse_seconds':300,'require_queue_stability':False}
     e.search_reference_result={'rate':16};rates=[]
     async def noop(*args):pass
     async def timeline():
@@ -66,10 +68,11 @@ def test_sweep_records_overload_points_without_starting_long_stability(tmp_path)
         rates.append(rate);r={'rate':rate,'actual_rate':rate,'load_valid':True,'passed':False,
             'goodput':18 if rate==24 else 17,'success_ratio':.8,'slo_ratio':.7};e.results.append(r);return r
     e.preflight=noop;e.drain=noop;e.timeline=timeline;e.stage=stage
-    asyncio.run(e.execute());assert rates==[24,32]
+    asyncio.run(e.execute());assert rates==scan_rates
     report=json.loads((tmp_path/'sweep-summary.json').read_text())
     assert report['reference_rate']==16 and report['highest_requested_rate']==32
-    assert report['peak_goodput']['rate']==24 and report['first_failing_measured_rate']==24
+    assert report['peak_goodput']['rate']==24 and report['first_failing_measured_rate']==scan_rates[0]
+    assert report['lowest_failing_measured_rate']==24
     assert not report['long_stability_validated'] and not (tmp_path/'capacity.json').exists()
 
 

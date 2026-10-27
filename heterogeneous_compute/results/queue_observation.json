@@ -27,10 +27,10 @@
   "scan": {
     "run_mode": "sweep",
     "rates": [
-      24,
-      32,
+      64,
       48,
-      64
+      32,
+      24
     ],
     "transition_seconds": 60,
     "measurement_seconds_per_rate": 300,
@@ -53,6 +53,11 @@
       "iluvatar": 8,
       "quarantined_worker": "musa-97-1",
       "scope_changed": "Do not combine with previous 29-worker capacity data."
+    },
+    "scan_order": "Descending, as requested; complete drain between points. Highest configured point is 64 req/s, not an established absolute maximum.",
+    "superseded_run": {
+      "run_id": "20261027T103740Z",
+      "reason": "User changed scan order after preflight; STOP issued at initial 24 req/s stage. Any partial stage is excluded from the descending run."
     }
   },
   "validation": {
@@ -62,7 +67,11 @@
       "Reference stage is reinterpreted without changing source artifacts",
       "Reference workload/SLO or process-identity mismatch is rejected",
       "A scan retains failing overload points, continues to later rates, records peak Goodput and does not run long stability phases"
-    ]
+    ],
+    "descending_sweep_regression": {
+      "tests_passed": 32,
+      "scope": "system_benchmark suite; ascending and descending execution order, first failure in scan order, lowest failing rate and peak Goodput are distinct."
+    }
   },
   "reproduction": "Existing system_benchmark.json and benchmark.py --system-config entry; per-run source, workload, preflight and process snapshots preserve the exact decision policy and healthy worker set.",
   "maintenance": "Existing code, runtime, containers, services and metrics reused. No extra monitoring automation. Stabilized the real HAProxy burst test by reusing its thread-safe HTTPX client rather than repeatedly constructing clients inside the one-second queue deadline. Temporary test servers/processes are cleaned up by their fixtures.",

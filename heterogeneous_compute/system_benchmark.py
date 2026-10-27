@@ -662,7 +662,8 @@ class Experiment:
                         'require_queue_stability':self.config.get('require_queue_stability',True),
                         'reference_rate':reference['rate'] if reference else None,
                         'highest_passing_measured_rate':max(passed) if passed else None,
-                        'first_failing_measured_rate':min(failed) if failed else None,
+                        'first_failing_measured_rate':failed[0] if failed else None,
+                        'lowest_failing_measured_rate':min(failed) if failed else None,
                         'highest_requested_rate':max(s['rate'] for s in self.results),
                         'peak_goodput':{k:peak[k] for k in ['rate','actual_rate','goodput','success_ratio','slo_ratio','passed']},
                         'long_stability_validated':False,'stages':self.results}
