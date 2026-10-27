@@ -25,6 +25,21 @@ from .routing.runtime import RouterSettings
 log = logging.getLogger("heteroserve.gateway")
 
 
+def ensure_open_file_budget(config, resource_module=None):
+    """Reserve downstream + upstream sockets and control/keepalive headroom."""
+    if resource_module is None:
+        import resource as resource_module
+    budget=config.get('max_inflight',16)
+    required=budget+config.get('max_upstream_connections',budget+32)+256
+    target=config.get('min_open_files',max(4096,required))
+    soft,hard=resource_module.getrlimit(resource_module.RLIMIT_NOFILE)
+    if soft==resource_module.RLIM_INFINITY or soft>=target:return soft
+    if hard!=resource_module.RLIM_INFINITY and hard<target:
+        raise RuntimeError('Gateway hard open-file limit cannot cover the configured socket budget')
+    resource_module.setrlimit(resource_module.RLIMIT_NOFILE,(target,hard))
+    return target
+
+
 def validate(config):
     learned = config.get("learned_routing", {})
     if not isinstance(learned, dict) or type(learned.get("enabled", True)) is not bool:
@@ -71,6 +86,10 @@ def validate(config):
     if (type(config.get('max_upstream_connections',config.get('max_inflight',16)+32)) is not int
             or config.get('max_upstream_connections',config.get('max_inflight',16)+32)<config.get('max_inflight',16)):
         raise ValueError('Upstream connection pool must cover the request budget')
+    budget=config.get('max_inflight',16)
+    required_files=budget+config.get('max_upstream_connections',budget+32)+256
+    if 'min_open_files' in config and (type(config['min_open_files']) is not int or config['min_open_files']<required_files):
+        raise ValueError('min_open_files must cover the Gateway socket budget and control headroom')
     for key,default in [('upstream_keepalive_seconds',2),('keep_alive_seconds',5)]:
         value=config.get(key,default)
         if type(value) not in (int,float) or not math.isfinite(value) or value<=0:
@@ -429,6 +448,8 @@ def main():
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
+    validate(config)
+    ensure_open_file_budget(config)
     logging.basicConfig(level=logging.INFO)
     uvicorn.run(create_app(config), host=config.get("host", "0.0.0.0"), port=config.get("port", 8000), workers=1,
                 timeout_keep_alive=config.get('keep_alive_seconds',5),

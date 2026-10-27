@@ -1,0 +1,55 @@
+{
+  "failed_run": "20261027T084655Z",
+  "failure_time_local": "2026-10-27 16:58:19 Asia/Shanghai",
+  "direct_bug": "Gateway metrics fetch returned an HTTP502 error dictionary. metric_sum iterated its string keys as metric rows, raising TypeError: string indices must be integers.",
+  "fix": "Validate metric container, row schema and finite numeric values. Failed samples stay missing; the experiment reports an explicit telemetry failure instead of crashing or reporting zero load.",
+  "gateway_pressure": {
+    "observed_tcp_connections_at_failure": 1010,
+    "soft_open_files_before": 1024,
+    "soft_open_files_after": 65536,
+    "hard_open_files_unchanged": 524288,
+    "interpretation": "Descriptor pressure is a supported contributor to the control-path 502. No explicit EMFILE stack was retained, so it is not established as the sole possible cause."
+  },
+  "persistent_configuration": {
+    "min_open_files": 65536,
+    "minimum_budget": "max_inflight + max_upstream_connections + 256",
+    "startup": "Raise only the soft limit; reject an insufficient hard limit.",
+    "preflight": "Read the live Gateway open-file limit through existing process telemetry and require the configured minimum."
+  },
+  "validation": {
+    "tests_passed": 184,
+    "real_gateway_socket_test": {
+      "held_sse_requests": 512,
+      "actual_open_files_exceeded": 1024,
+      "successful_metrics_queries": 20,
+      "initial_child_soft_limit": 1024,
+      "effective_soft_limit": 65536,
+      "gpu_requests": 0
+    },
+    "captured_error_shape_replay_passed": true,
+    "live_gateway_pid_unchanged": 84602,
+    "healthy_workers": 29,
+    "service_restarts": 0,
+    "models_router_policy_slo_and_queue_rule_unchanged": true
+  },
+  "experiment_results": {
+    "historical_16_rps": "4800/4800 successful; 99.9167% TPOT attainment; queue stable. Retained as a valid historical short stage.",
+    "historical_24_rps": "Interrupted by telemetry failure, incomplete; not a verified failing upper bound.",
+    "next_run": "Independent directory, cache_aware, start at16 as authorized. Do not combine raw cohorts across the descriptor-budget change.",
+    "capacity_claim": "Not established by the socket test or historical short stage."
+  },
+  "reproduction": {
+    "config": "heterogeneous_compute/configs/serving.json",
+    "tests": [
+      "heterogeneous_compute/tests/test_system_benchmark.py::test_failed_gateway_metrics_stay_missing_and_stop_with_explicit_reason",
+      "homogeneous/tests/test_gateway.py::test_gateway_raises_only_soft_nofile_and_checks_hard_capacity",
+      "homogeneous/tests/test_gateway.py::test_real_gateway_keeps_metrics_responsive_above_1024_open_files"
+    ],
+    "environment": "Retained .60 container; HETEROSERVE_FD_INTEGRATION=1; existing pytest/aiohttp/HTTPX/Uvicorn.",
+    "evidence": [
+      "artifacts/optimization/gateway-telemetry/runtime-acceptance.json",
+      "artifacts/serving/system-benchmark/20261027T084655Z/telemetry-failure-diagnosis.json"
+    ]
+  },
+  "maintenance": "Existing modules, config and runtime reused. Test servers/processes cleaned up by tests. Useful evidence retained; no temporary containers, project copies or new environments."
+}

@@ -216,10 +216,12 @@ class Experiment:
         if time.time()>self.deadline:raise RuntimeError('Experiment lifetime exceeded')
         if self.abort:raise RuntimeError(self.abort)
         if not self.frozen:return
-        if getattr(self,'serving',{}).get('admission') and self.receiver.queue()['gateway_waiting'] is None:
-            raise RuntimeError('Admission queue telemetry is missing')
-        if getattr(self,'serving',{}).get('admission') and self.receiver.queue()['gateway_waiting']>self.serving['admission']['max_queue']:
-            raise RuntimeError('Admission queue exceeded its frozen capacity')
+        if getattr(self,'serving',{}).get('admission'):
+            queue=self.receiver.queue()
+            if queue['gateway_inflight'] is None:raise RuntimeError('Gateway inflight telemetry is unavailable; no valid capacity claim')
+            if queue['gateway_waiting'] is None:raise RuntimeError('Admission queue telemetry is missing')
+            if queue['gateway_waiting']>self.serving['admission']['max_queue']:
+                raise RuntimeError('Admission queue exceeded its frozen capacity')
         if self.receiver.network.get('error'):raise RuntimeError('Request route observer failed')
         if self.receiver.network.get('packet_drops_total',0):raise RuntimeError('Route observer dropped packets; stop before claiming per-worker attribution')
         if self.receiver.workers()!=self.expected:raise RuntimeError('Frozen healthy worker set changed; no data concatenation across configurations')
@@ -369,6 +371,12 @@ class Experiment:
             if not row['success']:raise RuntimeError('Direct generation failed: '+name+' '+str(row.get('error')))
         if vendors!={'ascend','musa','iluvatar'}:raise RuntimeError('All three vendors are required')
         if self.serving['gateway']['max_inflight']!=self.config['gateway_max_inflight']:raise RuntimeError('Gateway budget configuration mismatch')
+        minimum_files=self.serving['gateway'].get('min_open_files')
+        if minimum_files:
+            gateway_procs=[p for p in r.latest[r.gateway_node].get('process',{}).get('processes',[]) if p.get('role')=='gateway']
+            if not gateway_procs or any(p.get('open_files_limit',{}).get('soft')!='unlimited'
+                    and int(p.get('open_files_limit',{}).get('soft',0))<minimum_files for p in gateway_procs):
+                raise RuntimeError('Live Gateway open-file limit is below its frozen requirement')
         if self.serving.get('admission'):
             expected=self.config.get('gateway_admission',{})
             if not expected or any(self.serving['admission'].get(key)!=value for key,value in expected.items()):

@@ -5,7 +5,7 @@ import httpx
 from pathlib import Path
 from fastapi.testclient import TestClient
 
-from heteroserve.gateway import create_app, validate
+from heteroserve.gateway import create_app, validate, ensure_open_file_budget
 from heteroserve.routing.runtime import RoutingDecision, RouterSettings
 
 
@@ -22,6 +22,86 @@ def test_upstream_connection_pool_scales_with_the_pipeline_budget():
         assert app.state.upstream_limits.keepalive_expiry==2
     cfg['max_upstream_connections']=100
     with pytest.raises(ValueError,match='connection pool'):validate(cfg)
+
+
+def test_gateway_raises_only_soft_nofile_and_checks_hard_capacity():
+    from types import SimpleNamespace
+    changes=[];state=[1024,524288]
+    limits=SimpleNamespace(RLIMIT_NOFILE=7,RLIM_INFINITY=-1,getrlimit=lambda key:tuple(state),
+        setrlimit=lambda key,value:changes.append((key,value)))
+    cfg=config();cfg.update(max_inflight=640,max_upstream_connections=672,min_open_files=65536)
+    validate(cfg);assert ensure_open_file_budget(cfg,limits)==65536
+    assert changes==[(7,(65536,524288))]
+    state[:]=[65536,524288];changes.clear();assert ensure_open_file_budget(cfg,limits)==65536 and not changes
+    state[:]=[1024,1024]
+    with pytest.raises(RuntimeError,match='hard open-file limit'):ensure_open_file_budget(cfg,limits)
+    cfg['min_open_files']=1024
+    with pytest.raises(ValueError,match='socket budget'):validate(cfg)
+
+
+def test_real_gateway_keeps_metrics_responsive_above_1024_open_files(tmp_path):
+    """512 held SSE pairs cross the old FD ceiling without touching any GPU."""
+    import os,sys,asyncio,subprocess,socket
+    if os.environ.get('HETEROSERVE_FD_INTEGRATION')!='1':pytest.skip('Select Linux socket-budget integration')
+    import resource
+    original=resource.getrlimit(resource.RLIMIT_NOFILE)
+    if original[1]!=resource.RLIM_INFINITY and original[1]<65536:pytest.skip('Hard FD budget below deployment requirement')
+    resource.setrlimit(resource.RLIMIT_NOFILE,(max(original[0],8192),original[1]))
+    async def run():
+        import aiohttp
+        release=asyncio.Event();handlers=set()
+        async def backend(reader,writer):
+            task=asyncio.current_task();handlers.add(task)
+            try:
+                head=await reader.readuntil(b'\r\n\r\n');length=0
+                for line in head.split(b'\r\n'):
+                    if line.lower().startswith(b'content-length:'):length=int(line.split(b':',1)[1])
+                await reader.readexactly(length)
+                if head.startswith(b'POST'):
+                    writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {"choices":[{"delta":{"content":"x"}}]}\n\n')
+                    await writer.drain();await release.wait();writer.write(b'data: [DONE]\n\n');await writer.drain()
+                else:
+                    data=b'{"data":[{"id":"test"}]}';writer.write(b'HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: '+str(len(data)).encode()+b'\r\n\r\n'+data);await writer.drain()
+            except (asyncio.IncompleteReadError,ConnectionError):pass
+            finally:
+                writer.close();await writer.wait_closed();handlers.discard(task)
+        server=await asyncio.start_server(backend,'127.0.0.1',0);backend_port=server.sockets[0].getsockname()[1]
+        with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
+        cfg={'host':'127.0.0.1','port':port,'learned_routing':{'enabled':False},'max_inflight':640,
+            'max_upstream_connections':672,'min_open_files':65536,
+            'pools':{'test':{'model':'test','base_url':f'http://127.0.0.1:{backend_port}/v1','health_path':'/health'}}}
+        path=tmp_path/'gateway.json';path.write_text(json.dumps(cfg));source=str(Path(__file__).resolve().parents[1]/'src')
+        bootstrap=f"import resource,sys,runpy;soft,hard=resource.getrlimit(resource.RLIMIT_NOFILE);resource.setrlimit(resource.RLIMIT_NOFILE,(1024,hard));sys.path.insert(0,{source!r});sys.argv=['gateway','--config',{str(path)!r}];runpy.run_module('heteroserve.gateway',run_name='__main__')"
+        log=(tmp_path/'gateway.log').open('w');child=subprocess.Popen([sys.executable,'-c',bootstrap],stdout=log,stderr=log)
+        try:
+            timeout=aiohttp.ClientTimeout(total=30);connector=aiohttp.TCPConnector(limit=0)
+            async with aiohttp.ClientSession(connector=connector,timeout=timeout,trust_env=False) as session:
+                base=f'http://127.0.0.1:{port}'
+                for _ in range(100):
+                    try:
+                        async with session.get(base+'/live') as r:
+                            if r.status==200:break
+                    except aiohttp.ClientError:pass
+                    await asyncio.sleep(.05)
+                else:raise AssertionError((tmp_path/'gateway.log').read_text()[-2000:])
+                payload={'model':'test','messages':[{'role':'user','content':'held SSE'}],'stream':True,'max_tokens':64}
+                responses=await asyncio.gather(*(session.post(base+'/v1/chat/completions',json=payload) for _ in range(512)))
+                assert all(r.status==200 for r in responses)
+                assert len(list(Path(f'/proc/{child.pid}/fd').iterdir()))>1024
+                assert resource.prlimit(child.pid,resource.RLIMIT_NOFILE)[0]>=65536
+                for _ in range(20):
+                    async with session.get(base+'/metrics') as r:
+                        assert r.status==200 and 'heteroserve_gateway_inflight 512' in await r.text()
+                release.set();await asyncio.gather(*(r.read() for r in responses))
+        finally:
+            release.set();child.terminate()
+            try:await asyncio.to_thread(child.wait,5)
+            except subprocess.TimeoutExpired:child.kill();await asyncio.to_thread(child.wait,5)
+            server.close();await server.wait_closed()
+            if handlers:await asyncio.gather(*list(handlers),return_exceptions=True)
+            log.close()
+    try:asyncio.run(run())
+    finally:resource.setrlimit(resource.RLIMIT_NOFILE,original)
 
 
 class Runtime:

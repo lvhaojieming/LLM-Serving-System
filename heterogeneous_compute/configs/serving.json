@@ -10,6 +10,7 @@
     "address": "192.168.162.60",
     "max_inflight": 640,
     "max_upstream_connections": 672,
+    "min_open_files": 65536,
     "upstream_keepalive_seconds": 2,
     "keep_alive_seconds": 90,
     "timeout_seconds": 180,

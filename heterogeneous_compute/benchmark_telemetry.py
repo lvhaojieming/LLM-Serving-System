@@ -8,6 +8,7 @@ import argparse
 import concurrent.futures
 import ctypes
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -102,13 +103,17 @@ def parse_metrics(raw, names=None):
 
 
 def metric_sum(rows, name, exclude_reasons=()):
+    if not isinstance(rows,list) or any(not isinstance(r,dict) or not isinstance(r.get('labels'),dict)
+            or not isinstance(r.get('name'),str) or type(r.get('value')) not in (int,float)
+            or not math.isfinite(r['value']) for r in rows):
+        return None
     selected = [r["value"] for r in rows if r["name"] == name and r["labels"].get("finished_reason") not in exclude_reasons]
     return sum(selected) if selected else None
 
 
 def admission_waiting(snapshot):
     rows = snapshot.get('admission_metrics', [])
-    if not isinstance(rows, list):
+    if not isinstance(rows, list) or any(not isinstance(r,dict) or not isinstance(r.get('labels'),dict) for r in rows):
         return None
     # Backend qcur already includes its server queue; never add both gauges.
     return metric_sum([r for r in rows if r['labels'].get('proxy') == 'gateway'],
@@ -150,6 +155,10 @@ def process_sample():
                 parameters['--enforce-eager']='--enforce-eager' in argv
                 parameters['--disable-custom-all-reduce']='--disable-custom-all-reduce' in argv
                 procs[int(d.name)]['inference_parameters']=parameters
+            if role=='gateway':
+                limits=(d/'limits').read_text()
+                match=re.search(r'^Max open files\s+(\S+)\s+(\S+)',limits,re.M)
+                if match:procs[int(d.name)]['open_files_limit']={'soft':match[1],'hard':match[2]}
         except (OSError, ValueError, IndexError):
             continue
     for _ in range(8):

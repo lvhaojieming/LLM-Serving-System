@@ -243,6 +243,24 @@ vllm:request_success_total{finished_reason="abort"} 2
     assert metric_sum(metrics,'nonexistent') is None
 
 
+def test_failed_gateway_metrics_stay_missing_and_stop_with_explicit_reason(tmp_path):
+    failed={'error':"<HTTPError 502: 'Bad Gateway'>"}
+    assert metric_sum(failed,'heteroserve_gateway_inflight') is None
+    assert metric_sum([failed],'heteroserve_gateway_inflight') is None
+    assert metric_sum([{'name':'x','labels':{},'value':float('nan')}],'x') is None
+    assert metric_sum([{'name':'x','labels':{},'value':0}],'x')==0
+    receiver=Receiver.__new__(Receiver);receiver.gateway_node='gateway';receiver.admission_enabled=True
+    receiver.latest={'gateway':{'workers':{},'gateway_metrics':failed,'admission_metrics':[
+        {'name':'haproxy_backend_current_queue','labels':{'proxy':'gateway'},'value':0}]}}
+    assert receiver.queue()['gateway_inflight'] is None
+    assert receiver.queue()['gateway_waiting']==0
+    experiment=Experiment.__new__(Experiment);experiment.directory=tmp_path;experiment.deadline=float('inf')
+    experiment.abort=None;experiment.frozen=True;experiment.serving={'admission':{'max_queue':128}};experiment.receiver=receiver
+    try:experiment.check()
+    except RuntimeError as exc:assert 'Gateway inflight telemetry is unavailable' in str(exc)
+    else:raise AssertionError('A failed sample must not turn into zero load or a capacity claim')
+
+
 def test_collector_retains_required_metrics_without_backend_histogram_payload():
     raw='''vllm:num_requests_running{engine="0"} 2
 vllm:num_requests_waiting{engine="0"} 3
