@@ -1,0 +1,208 @@
+{
+  "source_runs": [
+    "20261027T105055Z",
+    "20261027T113010Z"
+  ],
+  "formal_measurement_requests": 55800,
+  "original_server_files_verified": 77,
+  "comparability": [
+    {
+      "run_id": "20261027T113010Z",
+      "same_configuration_except_rates": true,
+      "same_workload": true,
+      "same_serving_snapshot": true,
+      "same_frozen_deployment": {
+        "healthy_workers": true,
+        "router_pools": true,
+        "identities": true,
+        "service_processes": true
+      }
+    }
+  ],
+  "stage_results": [
+    {
+      "rate": 18,
+      "sent": 5400,
+      "actual_rate": 18.0,
+      "goodput": 17.166666666666668,
+      "success_ratio": 1.0,
+      "slo_ratio": 1.0,
+      "passed": true,
+      "errors": {}
+    },
+    {
+      "rate": 24,
+      "sent": 7200,
+      "actual_rate": 24.0,
+      "goodput": 17.74,
+      "success_ratio": 0.7834722222222222,
+      "slo_ratio": 0.7834722222222222,
+      "passed": false,
+      "errors": {
+        "429": 1545,
+        "5xx": 13,
+        "timeout": 1
+      }
+    },
+    {
+      "rate": 32,
+      "sent": 9600,
+      "actual_rate": 32.0,
+      "goodput": 17.426666666666666,
+      "success_ratio": 0.5428125,
+      "slo_ratio": 0.5428125,
+      "passed": false,
+      "errors": {
+        "429": 4349,
+        "5xx": 20,
+        "timeout": 20
+      }
+    },
+    {
+      "rate": 48,
+      "sent": 14400,
+      "actual_rate": 48.0,
+      "goodput": 16.596666666666668,
+      "success_ratio": 0.345625,
+      "slo_ratio": 0.345625,
+      "passed": false,
+      "errors": {
+        "429": 9362,
+        "5xx": 47,
+        "timeout": 14
+      }
+    },
+    {
+      "rate": 64,
+      "sent": 19200,
+      "actual_rate": 64.0,
+      "goodput": 16.433333333333334,
+      "success_ratio": 0.2568229166666667,
+      "slo_ratio": 0.2568229166666667,
+      "passed": false,
+      "errors": {
+        "429": 14133,
+        "5xx": 116,
+        "timeout": 20
+      }
+    }
+  ],
+  "18rps_pool_rates": {
+    "ascend": {
+      "healthy_workers": 13,
+      "arrival_rps": 6.153333333333333,
+      "successful_completion_rps": 6.1466666666666665,
+      "backend_output_tokens_per_second": 2138.0677339712247,
+      "running": {
+        "n": 300,
+        "mean": 30.743333333333332,
+        "min": 21.0,
+        "p50": 31.5,
+        "p95": 38.0,
+        "p99": 40.0,
+        "max": 40.0
+      },
+      "waiting": {
+        "n": 300,
+        "mean": 0.0,
+        "min": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max": 0.0
+      },
+      "waiting_first_third_mean": 0.0,
+      "waiting_last_third_mean": 0.0
+    },
+    "musa": {
+      "healthy_workers": 7,
+      "arrival_rps": 5.996666666666667,
+      "successful_completion_rps": 5.17,
+      "backend_output_tokens_per_second": 1828.6496257787446,
+      "running": {
+        "n": 300,
+        "mean": 111.70666666666666,
+        "min": 108.0,
+        "p50": 112.0,
+        "p95": 112.0,
+        "p99": 112.0,
+        "max": 112.0
+      },
+      "waiting": {
+        "n": 300,
+        "mean": 120.90666666666667,
+        "min": 0.0,
+        "p50": 106.5,
+        "p95": 232.10000000000002,
+        "p99": 248.0,
+        "max": 252.0
+      },
+      "waiting_first_third_mean": 44.28,
+      "waiting_last_third_mean": 202.63
+    },
+    "iluvatar": {
+      "healthy_workers": 8,
+      "arrival_rps": 5.846666666666667,
+      "successful_completion_rps": 5.85,
+      "backend_output_tokens_per_second": 2051.9067551491853,
+      "running": {
+        "n": 300,
+        "mean": 52.723333333333336,
+        "min": 37.0,
+        "p50": 52.5,
+        "p95": 65.0,
+        "p99": 68.03999999999996,
+        "max": 72.0
+      },
+      "waiting": {
+        "n": 300,
+        "mean": 0.0,
+        "min": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "max": 0.0
+      },
+      "waiting_first_third_mean": 0.0,
+      "waiting_last_third_mean": 0.0
+    }
+  },
+  "failure_findings": {
+    "429_without_gateway_request_id": 29389,
+    "http_503_without_gateway_request_id": 194,
+    "other_http_5xx": {
+      "500": 1,
+      "502": 1
+    },
+    "total_timeouts_all_associated_with_musa": 55
+  },
+  "conclusion": "18 req/s passed the short complete-cohort success/TPOT gates, but MUSA queues grew; long-term stable capacity was not validated. The 1/3 vendor-pool split feeds MUSA about 6 req/s while it completes about 5.17 req/s at a nearly full 7x16 running budget.",
+  "queue_mechanism": "At 18 req/s Gateway waiting was zero; MUSA model waiting mean 120.91 and peak 252, first-third mean 44.28 and last-third mean 202.63. Pool-local queues are balanced; inter-pool allocation and MUSA service capacity are the main factors to investigate.",
+  "limits": [
+    "TPOT is the per-request average after first content; it excludes queue/prefill/first-token delay.",
+    "MUSA eager versus Ascend/Iluvatar graphs; no same-mode hardware ranking.",
+    ".23 SMI missing: Ascend utilization has 16/26 device coverage.",
+    "Synthetic repeated workload, one run per point, no long-duration validation or semantic scoring.",
+    "No causal A/B run of pool weights or max_num_seqs was performed."
+  ],
+  "validation": {
+    "stage_counts_ratios_goodput_errors_recomputed_from_raw_requests": true,
+    "pool_completion_rates_reconcile_with_stage_completion_rates": true,
+    "observer_packet_drops_and_multi_worker_conflicts": 0,
+    "local_csv_rows": {
+      "stage-analysis.csv": 5,
+      "pool-analysis.csv": 15,
+      "worker-analysis.csv": 140
+    },
+    "offline_html_resources_verified": true
+  },
+  "reproduction": "python heterogeneous_compute/analyze_benchmark.py --runs artifacts/serving/system-benchmark/20261027T105055Z artifacts/serving/system-benchmark/20261027T113010Z --output artifacts/serving/system-benchmark/analysis",
+  "retained": [
+    "analyze_benchmark.py",
+    "analysis.json",
+    "report.html (embedded original Matplotlib queue plot)",
+    "stage/pool/worker-analysis.csv",
+    "analysis-inputs.json"
+  ],
+  "cleanup": "Removed the empty plot-transfer file and unused optional plotting implementation; reused the already validated local plot. No dependencies installed or environments rebuilt. No inference services started."
+}

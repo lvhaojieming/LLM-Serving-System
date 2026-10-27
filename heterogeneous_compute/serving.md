@@ -402,3 +402,13 @@ Future 等待预算同步覆盖该值。采集错误仍会停止实验，不填�
 当前按用户要求将配置 `coarse_rates` 改为 `[18]`，进行独立的 18 请求/秒短测。
 沿用六节点 28 实例、mixed 负载、SLO、准入与遥测配置，不拼接上一轮请求，
 不重新启动模型；单档通过也不等于完成长期容量验证。
+
+## 本机离线数据分析
+
+`analyze_benchmark.py` 复用阶段汇总、百分位与指标解析，从已同步的 JSONL 重新核算
+完整发送批次、完成时间窗、按请求 ID 去重的卡池到达率、后端 token 差分与队列。
+无需启动服务或安装新依赖；逐档校验成功数、错误数、Goodput及各池完成速率合计。
+本次五档结果和结论边界保存在 `results/benchmark_analysis.json`，原始数据、
+离线 HTML 报告与各档/卡池/实例 CSV 保留于 `artifacts/serving/system-benchmark/analysis/`。
+复现：`python heterogeneous_compute/analyze_benchmark.py --runs artifacts/serving/system-benchmark/20261027T105055Z artifacts/serving/system-benchmark/20261027T113010Z --output artifacts/serving/system-benchmark/analysis`。
+18档的完整请求成功/SLO通过，但摩尔队列仍增长，不能写为已验证的长期稳定容量。
