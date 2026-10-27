@@ -130,5 +130,92 @@
       "queue_stability_required": false
     },
     "automatically_advanced_to_rate": 48
+  },
+  "completed_sweep": {
+    "run_id": "20261027T105055Z",
+    "code_version": "0e90c00b5102349f1d112125ad50bc537144335f",
+    "status": "capacity_sweep_complete",
+    "healthy_workers": 28,
+    "measured_requests": 50400,
+    "all_offered_loads_valid": true,
+    "rates": [
+      {
+        "rate": 64,
+        "sent": 19200,
+        "success_ratio": 0.2568229166666667,
+        "slo_ratio": 0.2568229166666667,
+        "goodput": 16.433333333333334,
+        "errors": {
+          "429": 14133,
+          "5xx": 116,
+          "timeout": 20
+        },
+        "passed": false
+      },
+      {
+        "rate": 48,
+        "sent": 14400,
+        "success_ratio": 0.345625,
+        "slo_ratio": 0.345625,
+        "goodput": 16.596666666666668,
+        "errors": {
+          "429": 9362,
+          "5xx": 47,
+          "timeout": 14
+        },
+        "passed": false
+      },
+      {
+        "rate": 32,
+        "sent": 9600,
+        "success_ratio": 0.5428125,
+        "slo_ratio": 0.5428125,
+        "goodput": 17.426666666666666,
+        "errors": {
+          "429": 4349,
+          "5xx": 20,
+          "timeout": 20
+        },
+        "passed": false
+      },
+      {
+        "rate": 24,
+        "sent": 7200,
+        "success_ratio": 0.7834722222222222,
+        "slo_ratio": 0.7834722222222222,
+        "goodput": 17.74,
+        "errors": {
+          "429": 1545,
+          "5xx": 13,
+          "timeout": 1
+        },
+        "passed": false
+      }
+    ],
+    "peak_goodput": {
+      "rate": 24,
+      "actual_rate": 24.0,
+      "goodput": 17.74,
+      "success_ratio": 0.7834722222222222,
+      "slo_ratio": 0.7834722222222222,
+      "passed": false
+    },
+    "highest_passing_measured_rate": null,
+    "interpretation": "All four measured points failed the success/SLO gates even with average queue growth observation-only. Highest observed Goodput is not theoretical capacity. Need new lower-rate measurements under the same 28-worker deployment to locate a passing point.",
+    "drained_at_completion": true,
+    "long_stability_validated": false,
+    "offline_copy": {
+      "completed_at_utc": "2026-10-27T11:27:43.677227+00:00",
+      "server_files_sha256_verified": 39,
+      "bytes": 167248103,
+      "jsonl_validated_records": {
+        "requests.jsonl": 60564,
+        "timeline.jsonl": 2142,
+        "routes.jsonl": 1049,
+        "telemetry.jsonl": 2584
+      },
+      "path": "artifacts/serving/system-benchmark/20261027T105055Z",
+      "retained": "All final server artifacts, source.zip at the measured code version, local checksum manifest and offline analysis guide. Raw artifacts remain outside Git."
+    }
   }
 }
