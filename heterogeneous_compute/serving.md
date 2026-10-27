@@ -412,3 +412,6 @@ Future 等待预算同步覆盖该值。采集错误仍会停止实验，不填�
 离线 HTML 报告与各档/卡池/实例 CSV 保留于 `artifacts/serving/system-benchmark/analysis/`。
 复现：`python heterogeneous_compute/analyze_benchmark.py --runs artifacts/serving/system-benchmark/20261027T105055Z artifacts/serving/system-benchmark/20261027T113010Z --output artifacts/serving/system-benchmark/analysis`。
 18档的完整请求成功/SLO通过，但摩尔队列仍增长，不能写为已验证的长期稳定容量。
+
+离线报告同时列出三次历史16请求/秒阶段，导出 `historical-16-analysis.csv`；
+明确区分29实例的历史摘要与28实例的当前全量日志，不遗漏历史通过结果，也不混合容量结论。

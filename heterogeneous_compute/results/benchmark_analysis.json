@@ -202,7 +202,98 @@
     "analysis.json",
     "report.html (embedded original Matplotlib queue plot)",
     "stage/pool/worker-analysis.csv",
-    "analysis-inputs.json"
+    "analysis-inputs.json",
+    "historical-16-analysis.csv"
   ],
-  "cleanup": "Removed the empty plot-transfer file and unused optional plotting implementation; reused the already validated local plot. No dependencies installed or environments rebuilt. No inference services started."
+  "cleanup": "Removed the empty plot-transfer file and unused optional plotting implementation; reused the already validated local plot. No dependencies installed or environments rebuilt. No inference services started.",
+  "historical_16_results": [
+    {
+      "rate": 16,
+      "sent": 4800,
+      "actual_rate": 16.0,
+      "success_ratio": 1.0,
+      "slo_ratio": 1.0,
+      "goodput": 15.816666666666666,
+      "passed": false,
+      "queue_stable": false,
+      "queue_changes": {
+        "s5000-02": 6.6000000000000005,
+        "iluvatar150-01": 0.4,
+        "s5000-01": 0.6499999999999999,
+        "iluvatar150-02": 0.0,
+        "ascend910c-01": 0.0,
+        "ascend910c-02": 0.0,
+        "gateway_queue": 0.0
+      },
+      "start": 1793087520.926443,
+      "end": 1793087820.926443,
+      "run_id": "20261027T073431Z",
+      "policy": "round_robin",
+      "healthy_workers": 29,
+      "success_and_slo_gates_passed": true,
+      "source_path": "artifacts\\serving\\system-benchmark\\20261027T073431Z\\stages.json",
+      "source_sha256": "2fc4a502dde7a2389252191ec694e5b3c42d6995d1734f2720b9d4bf7416910c",
+      "evidence_scope": "Saved complete-stage summary; historical per-request logs were not downloaded into this offline package and are not recomputed here.",
+      "comparability": "29 healthy workers, including 8 MUSA; current 18/24/32/48/64 runs use 28 workers including 7 MUSA. Routing/FD budget also changed between historical runs. Do not pool the cohorts or infer a controlled routing A/B effect."
+    },
+    {
+      "rate": 16,
+      "sent": 4800,
+      "actual_rate": 16.0,
+      "success_ratio": 1.0,
+      "slo_ratio": 0.9991666666666666,
+      "goodput": 16.0,
+      "passed": true,
+      "queue_stable": true,
+      "queue_changes": {
+        "iluvatar150-01": 0.0,
+        "s5000-01": 0.0,
+        "ascend910c-02": 0.0,
+        "iluvatar150-02": 0.0,
+        "s5000-02": 0.0,
+        "ascend910c-01": 0.0,
+        "gateway_queue": 0.0
+      },
+      "start": 1793091004.480602,
+      "end": 1793091304.480602,
+      "run_id": "20261027T084655Z",
+      "policy": "cache_aware",
+      "healthy_workers": 29,
+      "success_and_slo_gates_passed": true,
+      "source_path": "artifacts\\serving\\system-benchmark\\20261027T084655Z\\16rps-comparison.json",
+      "source_sha256": "11df0b4d1c7c573b4896b16c112348ecf0579d603466e8c053f688ccca43e774",
+      "evidence_scope": "Saved complete-stage summary; historical per-request logs were not downloaded into this offline package and are not recomputed here.",
+      "comparability": "29 healthy workers, including 8 MUSA; current 18/24/32/48/64 runs use 28 workers including 7 MUSA. Routing/FD budget also changed between historical runs. Do not pool the cohorts or infer a controlled routing A/B effect."
+    },
+    {
+      "rate": 16,
+      "sent": 4800,
+      "actual_rate": 16.0,
+      "success_ratio": 1.0,
+      "slo_ratio": 1.0,
+      "goodput": 15.96,
+      "passed": false,
+      "queue_stable": false,
+      "queue_changes": {
+        "s5000-02": 3.15,
+        "iluvatar150-01": 0.0,
+        "ascend910c-02": 0.0,
+        "s5000-01": 3.85,
+        "ascend910c-01": 0.0,
+        "iluvatar150-02": 0.0,
+        "gateway_queue": 0.0
+      },
+      "start": 1793093373.0968094,
+      "end": 1793093673.0968094,
+      "run_id": "20261027T092553Z",
+      "policy": "cache_aware",
+      "healthy_workers": 29,
+      "success_and_slo_gates_passed": true,
+      "source_path": "artifacts\\serving\\system-benchmark\\20261027T092553Z\\current-status.json",
+      "source_sha256": "d02a8c395524d9c20d98d18756f3c51f48dd09eb5533d61a39ce503aca6d2172",
+      "evidence_scope": "Saved complete-stage summary; historical per-request logs were not downloaded into this offline package and are not recomputed here.",
+      "comparability": "29 healthy workers, including 8 MUSA; current 18/24/32/48/64 runs use 28 workers including 7 MUSA. Routing/FD budget also changed between historical runs. Do not pool the cohorts or infer a controlled routing A/B effect."
+    }
+  ],
+  "historical_16_interpretation": "16 req/s was tested three times with 29 workers. All 4800-request cohorts were 100% successful. One cache_aware stage also passed the original queue gate with 99.9167% SLO attainment; a later cache_aware stage had 100% SLO attainment but failed the original queue gate (.96 +3.15, .97 +3.85). These valid historical results must be reported, but are not an identical-configuration lower point for the current 28-worker experiment. Only their saved stage summaries are available locally; historical per-request logs were not recomputed."
 }

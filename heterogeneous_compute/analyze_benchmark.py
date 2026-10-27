@@ -48,6 +48,36 @@ def interpolate(points, at, max_gap=25):
     return a[1]+(b[1]-a[1])*(at-a[0])/(b[0]-a[0])
 
 
+def historical_16_results(base):
+    """Preserve saved historical summaries without inventing raw-log coverage."""
+    specs=[('20261027T073431Z','stages.json','round_robin'),
+           ('20261027T084655Z','16rps-comparison.json','cache_aware'),
+           ('20261027T092553Z','current-status.json','cache_aware')]
+    result=[]
+    for run_id,filename,policy in specs:
+        source=base/run_id/filename
+        if not source.exists():
+            continue
+        snapshot=read(source)
+        stages=snapshot if isinstance(snapshot,list) else snapshot['stages']
+        for stage in stages:
+            if stage['rate']!=16:
+                continue
+            row={k:stage.get(k) for k in ['rate','sent','actual_rate','success_ratio','slo_ratio',
+                 'goodput','passed','queue_stable','queue_changes','start','end']}
+            healthy=stage.get('healthy_workers')
+            if healthy is None and isinstance(snapshot,dict):
+                healthy=snapshot.get('latest_timeline',{}).get('healthy_workers')
+            assert healthy==29, 'Historical deployment size must be verified from the saved evidence'
+            row.update(run_id=run_id,policy=policy,healthy_workers=healthy,
+                success_and_slo_gates_passed=stage['success_ratio']>=.99 and stage['slo_ratio']>=.95,
+                source_path=str(source),source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                evidence_scope='Saved complete-stage summary; historical per-request logs were not downloaded into this offline package and are not recomputed here.',
+                comparability='29 healthy workers, including 8 MUSA; current 18/24/32/48/64 runs use 28 workers including 7 MUSA. Routing/FD budget also changed between historical runs. Do not pool the cohorts or infer a controlled routing A/B effect.')
+            result.append(row)
+    return result
+
+
 def analyze(directory):
     config, serving, frozen = [read(directory/n) for n in
                               ['config.json', 'serving-snapshot.json', 'preflight.json']]
@@ -246,6 +276,11 @@ def render_report(result, output):
     overall=table(['请求/秒','请求数','完整批次成功率','SLO达标率','窗口Goodput','429','5xx','超时','短测判定'],[
         [s['rate'],s['sent'],f"{s['success_ratio']:.2%}",f"{s['slo_ratio']:.2%}",f"{s['goodput']:.2f}",
          s['errors'].get('429',0),s['errors'].get('5xx',0),s['errors'].get('timeout',0),'通过' if s['passed'] else '未通过'] for s in stages])
+    history=result.get('historical_16_results',[])
+    historical_table=table(['历史实验','实例／策略','请求数','成功率','SLO达标率','Goodput','队列稳定','原判定'],[
+        [h['run_id'],str(h['healthy_workers'])+' / '+h['policy'],h['sent'],f"{h['success_ratio']:.2%}",
+         f"{h['slo_ratio']:.4%}",f"{h['goodput']:.2f}",'是' if h['queue_stable'] else '否',
+         '通过' if h['passed'] else '未通过（队列门槛）'] for h in history])
     pool_rows=[]
     for name,label in [('ascend','昇腾'),('musa','摩尔'),('iluvatar','天数')]:
         p=single['pools'][name]
@@ -271,7 +306,8 @@ def render_report(result, output):
 <style>body{{font-family:Segoe UI,Microsoft YaHei,sans-serif;max-width:1180px;margin:36px auto;padding:0 24px;color:#203047;line-height:1.65}}h1,h2{{line-height:1.3}}h2{{margin-top:32px}}table{{width:100%;border-collapse:collapse;font-size:14px;margin:16px 0}}td,th{{border:1px solid #d6dee8;padding:9px;text-align:left}}th{{background:#eef3f8}}img{{max-width:100%}}.lead{{padding:18px;background:#eaf3fa;border-left:5px solid #2468ad}}.caution{{padding:15px;background:#fff4db}}code{{background:#eef1f4;padding:2px 5px}}a{{color:#2468ad}}</style>
 <h1>六节点 mixed 压测分析</h1><p>数据：20261027T105055Z（64→48→32→24）与 20261027T113010Z（18）。每档60秒过渡、300秒测量，完整排空。分析仅使用本机已校验原始数据，不恢复服务。</p>
 <div class="lead"><strong>核心结论：</strong>18 req/s通过本轮短测，24及以上未通过。当前主要约束集中在摩尔池：其到达约6 req/s、测量窗口完成约5.17 req/s，等待持续增加。不能把18称为长期稳定容量，也不能把16～18的窗口Goodput称为硬件理论极限。</div>
-<h2>1. 五个完整测量档位</h2>{overall}<p>所有档位均产生了目标请求速率，失败不是客户端没有发够请求。总计55,800个正式测量请求；预检及过渡另存原始日志。成功率和SLO达标率在这些档位相同，因为成功完成的请求平均TPOT均低于100ms；拒绝、超时、HTTP错误仍使整体SLO达标率下降。</p>
+<h2>1. 当前28实例的五个完整测量档位</h2>{overall}<p>所有档位均产生了目标请求速率，失败不是客户端没有发够请求。这两轮总计55,800个正式测量请求；预检及过渡另存原始日志。成功率和SLO达标率在这些档位相同，因为成功完成的请求平均TPOT均低于100ms；拒绝、超时、HTTP错误仍使整体SLO达标率下降。</p>
+<h2>历史16请求/秒：已测，不能遗漏</h2>{historical_table}<p><strong>16档曾测过三次，均完成4,800个请求且成功率100%。</strong>cache_aware首次16档还通过了当时的队列稳定条件，SLO为99.9167%；另一次cache_aware 16档SLO为100%，但摩尔.96/.97平均队列变化分别+3.15/+3.85，按当时严格队列门槛未通过。按当前忽略队列增长的口径，其成功/SLO条件满足。轮询16档的摩尔队列也增长。</p><p>因此不能把16当成“没有测试过”，也不能把三次16档合并成一个稳定结论。历史16档有29个健康实例、摩尔8个；当前28实例、摩尔7个，且历史间路由与Gateway FD预算发生过变化。历史结果保留为证据，不能直接与当前18档构成相同配置的容量边界对照。这里依据本机已保存完整阶段摘要，未对未下载的历史逐请求日志重新核算；当前两轮55,800个请求则完成了原始日志重算。</p>
 {image}<h2>2. 18 req/s为什么成功，却不能称为队列稳定</h2>{pools}
 <p>全窗口观察到的AWQ到达率合计{single['routed_arrival_rps_total']:.3f} req/s，接近客户端18 req/s。按完整请求ID和观测时间去重；不是用完成响应数冒充到达率。摩尔到达与成功完成差约{musa['arrival_rps']-musa['successful_completion_rps']:.3f} req/s，其他两池基本平衡。</p>
 <p>摩尔池模型waiting的均值约{musa['waiting']['mean']:.1f}、峰值{musa['waiting']['max']:.0f}；前100秒均值{queue_start:.2f}，后100秒均值{queue_end:.2f}。入口Gateway等待始终为0，但在途均值{single['gateway']['gateway_inflight']['mean']:.1f}、峰值{single['gateway']['gateway_inflight']['max']:.0f}。这说明请求已经通过入口，随后积压在模型侧。</p>
@@ -304,7 +340,8 @@ def main():
         'tpot':'Per-request mean interval (last content time - first content time)/(output_tokens-1); excludes waiting/prefill/first-token time, not a percentile of individual token gaps.',
         'queue':'1-second resampling of latest per-node healthy-worker telemetry no older than 25s. running and waiting are separate; no backend/server queue double counting.',
         'scope':'Same 28-worker deployment, short fixed mixed workload. Not theoretical hardware capacity, semantic quality evaluation, or long-term stable capacity.'},
-        'runs':[analyze(p) for p in args.runs]}
+        'runs':[analyze(p) for p in args.runs],
+        'historical_16_results':historical_16_results(args.runs[0].parent)}
     baseline_config=read(args.runs[0]/'config.json');baseline_config.pop('coarse_rates')
     baseline_frozen=read(args.runs[0]/'preflight.json')
     comparisons=[]
@@ -359,6 +396,12 @@ def main():
     manifest={'analyzer_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               'inputs':{str(p/n):hashlib.sha256((p/n).read_bytes()).hexdigest() for p in args.runs for n in
                         ['config.json','serving-snapshot.json','preflight.json','stages.json','requests.jsonl','timeline.jsonl','routes.jsonl','telemetry.jsonl','workload.json','pool-utilization-summary.json','local-sync-manifest.json','launch.json']}}
+    manifest['historical_summary_inputs']={h['source_path']:h['source_sha256'] for h in result['historical_16_results']}
+    historical_fields=['run_id','healthy_workers','policy','rate','sent','actual_rate','success_ratio','slo_ratio','goodput','passed','queue_stable','success_and_slo_gates_passed','evidence_scope']
+    with (args.output/'historical-16-analysis.csv').open('w',encoding='utf-8-sig',newline='') as stream:
+        writer=csv.DictWriter(stream,fieldnames=historical_fields);writer.writeheader()
+        for row in result['historical_16_results']:
+            writer.writerow({k:row[k] for k in historical_fields})
     (args.output/'analysis-inputs.json').write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8')
     print(json.dumps({'output':str(args.output),'runs':len(result['runs']),'stages':sum(len(r['stages']) for r in result['runs'])}))
 
