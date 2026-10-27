@@ -37,7 +37,7 @@
   "transition_seconds": 60,
   "coarse_seconds": 300,
   "minimum_search_rate": 16,
-  "coarse_rates": [64, 48, 32, 24],
+  "coarse_rates": [18],
   "fine_seconds": 900,
   "fine_repeats": 3,
   "fine_resolution": 0.25,
