@@ -20,7 +20,6 @@
   "run_mode": "sweep",
   "require_queue_stability": false,
   "capacity_definition": "SLO-constrained validated rate; average queue growth is observed but is not a pass gate. This is not a claim of stationary queues.",
-  "search_reference": {"result_dir": "artifacts/serving/system-benchmark/20261027T092553Z", "case": 1},
   "minimum_success_ratio": 0.99,
   "minimum_slo_ratio": 0.95,
   "minimum_send_ratio": 0.99,

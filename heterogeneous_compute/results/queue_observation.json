@@ -21,16 +21,28 @@
     "original_passed": false,
     "reinterpreted_passed": true,
     "original_failure": "Average worker waiting growth exceeded the experimental threshold; all other stage gates passed.",
-    "scope": "Initial search bracket only. Original data are unchanged and are not merged into new measured cohorts. Fresh preflight must verify identical service configuration, workload/SLO, healthy pool sets, container and service-process identities."
+    "scope": "Historical reinterpretation only. The scan does not import this lower bracket after musa-97-1 recovery changed its PID. Original data remain unchanged; a configured search_reference in future runs still requires exact comparability.",
+    "used_to_seed_current_scan": false
   },
   "scan": {
     "run_mode": "sweep",
-    "rates": [24, 32, 48, 64],
+    "rates": [
+      24,
+      32,
+      48,
+      64
+    ],
     "transition_seconds": 60,
     "measurement_seconds_per_rate": 300,
     "continue_after_slo_failure": true,
     "health_protections_remain_active": true,
-    "outputs": ["pressure.csv", "workload-pressure.csv", "sweep-summary.json", "pool-utilization.csv", "pool-utilization-summary.json"],
+    "outputs": [
+      "pressure.csv",
+      "workload-pressure.csv",
+      "sweep-summary.json",
+      "pool-utilization.csv",
+      "pool-utilization-summary.json"
+    ],
     "interpretation": "Highest passing measured point and peak measured Goodput are short-duration observations, not validated long-term system capacity or an absolute hardware maximum.",
     "long_stability_validated": false
   },
@@ -44,5 +56,13 @@
     ]
   },
   "reproduction": "Existing system_benchmark.json and benchmark.py --system-config entry; run snapshots and search-reference.json preserve both decision policies and reference provenance.",
-  "maintenance": "Existing code, runtime, containers, services and metrics reused. No extra monitoring automation. Stabilized the real HAProxy burst test by reusing its thread-safe HTTPX client rather than repeatedly constructing clients inside the one-second queue deadline. Temporary test servers/processes are cleaned up by their fixtures."
+  "maintenance": "Existing code, runtime, containers, services and metrics reused. No extra monitoring automation. Stabilized the real HAProxy burst test by reusing its thread-safe HTTPX client rather than repeatedly constructing clients inside the one-second queue deadline. Temporary test servers/processes are cleaned up by their fixtures.",
+  "preflight_incident": {
+    "run_id": "20261027T102326Z",
+    "worker": "musa-97-1",
+    "endpoint": "192.168.162.97:18741",
+    "answer": "5!!!!!!!!!!!!!!!",
+    "action": "Restart the single owned worker in its original container, with identical model/device/runtime settings; require fresh acceptance and freeze the new identity.",
+    "root_cause": "Undetermined recurrence; restart is recovery, not a permanent fix."
+  }
 }
