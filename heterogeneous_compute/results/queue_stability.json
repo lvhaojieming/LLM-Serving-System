@@ -1,0 +1,72 @@
+{
+  "validated_at": "2026-10-27T08:12:41.402385+00:00",
+  "run_id": "20261027T073431Z",
+  "original_experiment_revision": "ad0c1eb91d1a1cdae2ce94dbc99fd9589ecd30ea",
+  "seed": 20261022,
+  "stage": {
+    "case": 3,
+    "rate_rps": 16,
+    "measurement_seconds": 300,
+    "requests": 4800,
+    "success_ratio": 1,
+    "tpot_slo_ratio": 1,
+    "gateway_waiting_mean": 0,
+    "gateway_waiting_peak": 0
+  },
+  "decision_rule": {
+    "scope": "Experimental heuristic, not a vendor standard or proof of unbounded queue growth",
+    "comparison": "Per-node mean model waiting in final 100 seconds minus first 100 seconds; any increase above 2 fails this 300-second stage",
+    "s5000_02_first_mean": 4.2,
+    "s5000_02_last_mean": 10.8,
+    "increase": 6.6
+  },
+  "direct_evidence": {
+    "musa_per_worker_max_num_seqs": 16,
+    "musa_worker_configuration_verified_from_proc": true,
+    "each_musa_worker_request_count": 201,
+    "s5000_02_long_output_count": 252,
+    "s5000_01_long_output_count": 232,
+    "heaviest_worker": {
+      "name": "musa-96-3",
+      "long_output_count": 70,
+      "output_token_demand_per_second": 266.88,
+      "fraction_samples_at_16_running": 0.8,
+      "waiting_mean": 4.6,
+      "waiting_peak": 11
+    },
+    "lighter_worker": {
+      "name": "musa-97-1",
+      "long_output_count": 52,
+      "output_token_demand_per_second": 209.28,
+      "fraction_samples_at_16_running": 0.06666666666666667,
+      "waiting_mean": 0
+    },
+    "s5000_02_total_running_max": 64,
+    "s5000_02_kv_cache_fraction_max": 0.031989688305601116,
+    "all_musa_preemption_counter_deltas": 0,
+    "runtime": "All MUSA workers V0 eager; standard MCCL with shared memory enabled, custom all-reduce disabled."
+  },
+  "interpretation": "Request-count round_robin equalizes counts but not the work of mixed lengths. Long output holds a running slot about one minute. Heavier worker(s) reach the configured 16-sequence cap while other replicas have spare sequence slots; waiting grows on .96. This demonstrates a queue boundary of the current configuration and allocation, not a whole-system hardware maximum.",
+  "secondary_observation": {
+    "s5000_02_graphics_clock_mean_mhz": 1778.4979166666667,
+    "s5000_01_graphics_clock_mean_mhz": 1931.2291666666667,
+    "thermal_slowdown_stats": "All recorded MUSA Thermal Slowdown Stats Count values were 0; both nodes reported P0.",
+    "limitation": "Clock difference is observed; its cause and causal contribution to queue growth are not established. The load generator shares .96; recorded benchmark CPU use was about 0.264 cores, insufficient evidence by itself for a CPU bottleneck."
+  },
+  "reproduction": {
+    "config": "heterogeneous_compute/configs/system_benchmark.json and serving-snapshot.json in the run directory",
+    "raw_files": [
+      "requests.jsonl",
+      "routes.jsonl",
+      "telemetry.jsonl",
+      "stages.json"
+    ],
+    "recipe": "Select case 3 sent_at in [stage.start,stage.end). Join requests.request_id to routes.request_id and worker URL to frozen workers. Count mixed profiles by worker. Restrict telemetry received_at to the same stage; compute running-cap incidence, waiting, KV, preemption deltas and raw MUSA clocks/thermal counters.",
+    "evidence": [
+      "queue-stability-diagnosis.json",
+      "musa-runtime-parameters.json",
+      "musa-thermal-evidence.json"
+    ]
+  },
+  "maintenance": "Retained useful diagnostic evidence and this summary. No experiment configuration, live services, limits or routing policy changed; no new model or SMI probes."
+}
