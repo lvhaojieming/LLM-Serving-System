@@ -44,7 +44,16 @@
       "pool-utilization-summary.json"
     ],
     "interpretation": "Highest passing measured point and peak measured Goodput are short-duration observations, not validated long-term system capacity or an absolute hardware maximum.",
-    "long_stability_validated": false
+    "long_stability_validated": false,
+    "healthy_scope": {
+      "nodes": 6,
+      "workers": 28,
+      "ascend": 13,
+      "musa": 7,
+      "iluvatar": 8,
+      "quarantined_worker": "musa-97-1",
+      "scope_changed": "Do not combine with previous 29-worker capacity data."
+    }
   },
   "validation": {
     "regression_tests_passed": 187,
@@ -55,14 +64,25 @@
       "A scan retains failing overload points, continues to later rates, records peak Goodput and does not run long stability phases"
     ]
   },
-  "reproduction": "Existing system_benchmark.json and benchmark.py --system-config entry; run snapshots and search-reference.json preserve both decision policies and reference provenance.",
+  "reproduction": "Existing system_benchmark.json and benchmark.py --system-config entry; per-run source, workload, preflight and process snapshots preserve the exact decision policy and healthy worker set.",
   "maintenance": "Existing code, runtime, containers, services and metrics reused. No extra monitoring automation. Stabilized the real HAProxy burst test by reusing its thread-safe HTTPX client rather than repeatedly constructing clients inside the one-second queue deadline. Temporary test servers/processes are cleaned up by their fixtures.",
   "preflight_incident": {
     "run_id": "20261027T102326Z",
     "worker": "musa-97-1",
     "endpoint": "192.168.162.97:18741",
     "answer": "5!!!!!!!!!!!!!!!",
-    "action": "Restart the single owned worker in its original container, with identical model/device/runtime settings; require fresh acceptance and freeze the new identity.",
-    "root_cause": "Undetermined recurrence; restart is recovery, not a permanent fix."
+    "action": "Restart briefly restored correct answers, but a single 256/1024 long-output request reproduced corruption. Stopped and quarantined only musa-97-1 in its original container; did not modify other model settings.",
+    "root_cause": "Undetermined. Reproduction establishes recurrence after long output on this worker; it does not establish a hardware fault.",
+    "recovery_probe": {
+      "post_restart_exact_answers_passed": 6,
+      "post_long_output_answers": [
+        "5!!!!!!!!!!!!!!!",
+        "5!!!!!!!!!!!!!!!",
+        "5!!!!!!!!!!!!!!!"
+      ],
+      "other_musa_workers_checked": 7,
+      "other_musa_workers_passed": 7,
+      "other_workers_check": "Each worker produced 1024 output tokens and answered 2+3 correctly before and after."
+    }
   }
 }
