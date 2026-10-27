@@ -627,6 +627,105 @@ class Experiment:
                     await asyncio.gather(*list(self.active),return_exceptions=True)
 
 
+def pool_device_inventory(serving,healthy_workers):
+    """Only devices of the frozen, healthy AWQ workers belong to a test pool."""
+    healthy=set(healthy_workers);inventory={};matched=set()
+    for name,router in router_configs(serving).items():
+        pool=router.get('pool',name);devices=set()
+        for worker in router_workers(serving,name).values():
+            if worker['base_url'].removesuffix('/v1') not in healthy:continue
+            if not worker.get('devices'):raise ValueError('Frozen worker has no device inventory')
+            matched.add(worker['base_url'].removesuffix('/v1'))
+            devices.update((worker['node'],int(device)) for device in worker['devices'])
+        if devices:inventory[pool]=devices
+    if not healthy or matched!=healthy:raise ValueError('Frozen healthy worker device coverage is incomplete')
+    return inventory
+
+
+def pool_utilization(inventory,samples,at,max_age=25):
+    """Device mean within a pool; incomplete coverage never implies idle cards."""
+    rows=[]
+    for pool,expected in inventory.items():
+        values=[];missing=[]
+        for node,device in sorted(expected):
+            sample=samples.get(node,{})
+            age=at-sample.get('received_at',-float('inf'))
+            devices={d['device']:d for d in sample.get('device',{}).get('values',[])}
+            value=devices.get(device,{}).get('utilization_percent')
+            if (0<=age<=max_age and type(value) in (int,float)
+                    and math.isfinite(value) and 0<=value<=100):values.append(value)
+            else:missing.append(f'{node}:{device}')
+        observed=sum(values)/len(values) if values else None
+        rows.append({'time':at,'pool':pool,'expected_devices':len(expected),'sampled_devices':len(values),
+            'coverage_ratio':len(values)/len(expected),'complete':not missing,
+            'utilization_mean_percent':observed if not missing else None,
+            'observed_utilization_mean_percent':observed,
+            'observed_device_min_percent':min(values) if values else None,
+            'observed_device_max_percent':max(values) if values else None,'missing_devices':missing})
+    return rows
+
+
+def export_pool_utilization(directory):
+    """Derive experiment results from retained telemetry, without new SMI calls."""
+    directory=Path(directory)
+    serving=json.loads((directory/'serving-snapshot.json').read_text())
+    frozen=json.loads((directory/'preflight.json').read_text())
+    config=json.loads((directory/'config.json').read_text())
+    inventory=pool_device_inventory(serving,frozen['healthy_workers'])
+    stages=json.loads((directory/'stages.json').read_text()) if (directory/'stages.json').exists() else []
+    status=json.loads((directory/'status.json').read_text())
+    gateway_node=serving['services']['gateway']['node'];samples={};latest=[];aggregates={}
+    source=directory/'telemetry.jsonl';remaining=source.stat().st_size;source_bytes=remaining
+    target=directory/'pool-utilization.csv';temporary=target.with_suffix('.csv.tmp');points=0
+    fields=['time','case','phase','rate','pool','expected_devices','sampled_devices','coverage_ratio','complete',
+        'utilization_mean_percent','observed_utilization_mean_percent','observed_device_min_percent',
+        'observed_device_max_percent','missing_devices']
+    with source.open('rb') as stream,temporary.open('w',newline='',encoding='utf-8') as out:
+        writer=csv.DictWriter(out,fieldnames=fields);writer.writeheader()
+        while remaining:
+            line=stream.readline(remaining);remaining-=len(line)
+            if not line or not line.endswith(b'\n'):break  # live receiver may be writing its last record
+            sample=json.loads(line);samples[sample['node']]=sample
+            if sample['node']!=gateway_node:continue
+            at=sample['received_at'];latest=pool_utilization(inventory,samples,at,config.get('telemetry_max_age_seconds',25))
+            stage=next((s for s in stages if s['start']<=at<s['end']),None)
+            for row in latest:
+                tagged={**row,'case':stage['case'] if stage else None,
+                    'phase':stage['label'] if stage else 'outside-completed-measurement',
+                    'rate':stage['rate'] if stage else None}
+                writer.writerow({**tagged,'missing_devices':';'.join(row['missing_devices'])});points+=1
+                if not stage:continue
+                key=(stage['case'],row['pool'])
+                agg=aggregates.setdefault(key,{'case':stage['case'],'phase':stage['label'],'rate':stage['rate'],
+                    'pool':row['pool'],'expected_devices':row['expected_devices'],'samples':0,
+                    'complete_samples':0,'coverage_sum':0,'coverage_min':1,'observed_sum':0,
+                    'observed_samples':0,'observed_pool_mean_peak_percent':None,'observed_device_peak_percent':None})
+                agg['samples']+=1;agg['complete_samples']+=row['complete'];agg['coverage_sum']+=row['coverage_ratio']
+                agg['coverage_min']=min(agg['coverage_min'],row['coverage_ratio'])
+                observed=row['observed_utilization_mean_percent']
+                if observed is not None:
+                    agg['observed_sum']+=observed;agg['observed_samples']+=1
+                    agg['observed_pool_mean_peak_percent']=max(agg['observed_pool_mean_peak_percent'] or 0,observed)
+                    agg['observed_device_peak_percent']=max(agg['observed_device_peak_percent'] or 0,row['observed_device_max_percent'])
+    temporary.replace(target);summaries=[]
+    for agg in aggregates.values():
+        n=agg['samples'];observed_n=agg.pop('observed_samples');total=agg.pop('observed_sum')
+        agg['coverage_mean']=agg.pop('coverage_sum')/n
+        agg['observed_utilization_mean_percent']=total/observed_n if observed_n else None
+        complete=agg['complete_samples']==n
+        agg['utilization_mean_percent']=agg['observed_utilization_mean_percent'] if complete else None
+        agg['pool_mean_peak_percent']=agg['observed_pool_mean_peak_percent'] if complete else None
+        summaries.append(agg)
+    report={'analysis':'Derived from existing experiment telemetry; load and collection unchanged.',
+        'processor_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'generated_at':time.time(),
+        'experiment_finished_at_export':status.get('finished',False),'telemetry_bytes_read':source_bytes,'rows':points,
+        'scope':'Healthy AWQ logical devices only; excludes failed workers, Embedding and reserved/other-service devices.',
+        'semantics':'Arithmetic device mean within each vendor pool, sampled at Gateway telemetry times (about 5s), using latest node samples no older than the frozen telemetry age. Stage means/peaks use completed measurement windows only. Missing/stale/invalid values are not zero. Partial-coverage observed values cannot establish whole-pool utilization. Vendor SMI utilization definitions may differ.',
+        'latest':latest,'stages':summaries}
+    save(directory/'pool-utilization-summary.json',report)
+    return report
+
+
 def export_results(directory,config,stages,routes,plots=True):
     """Standalone CSV and scientific PNG/PDF figures; no latency main plots."""
     fields=['label','case','repeat','rate','actual_rate','goodput','completed_rate','slo_ratio','success_ratio','sent','planned','send_lag_p99','queue_stable','load_valid','passed','start','end']
@@ -638,6 +737,8 @@ def export_results(directory,config,stages,routes,plots=True):
             for name,metrics in stage.get('by_workload',{}).items():
                 writer.writerow({**stage,**metrics,'workload_name':name})
     if not plots:return
+    if all((directory/name).exists() for name in ['preflight.json','serving-snapshot.json','config.json','status.json','telemetry.jsonl']):
+        export_pool_utilization(directory)
     bins={};requests=0;associated=0
     snapshot=directory/'serving-snapshot.json'
     serving=json.loads(snapshot.read_text()) if snapshot.exists() else None
@@ -765,5 +866,20 @@ def main(config_path,directory):
 
 if __name__=='__main__':
     import argparse
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--config',required=True);parser.add_argument('--result-dir',required=True)
-    args=parser.parse_args();raise SystemExit(main(args.config,args.result_dir))
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--config');parser.add_argument('--result-dir',required=True)
+    parser.add_argument('--export-pool-utilization',action='store_true',help='Only derive pool utilization artifacts from retained experiment telemetry')
+    parser.add_argument('--follow',action='store_true',help='Export now, then refresh once after this experiment and its collectors finish')
+    args=parser.parse_args()
+    if args.follow and not args.export_pool_utilization:parser.error('--follow requires --export-pool-utilization')
+    if args.export_pool_utilization:
+        report=export_pool_utilization(args.result_dir)
+        print(json.dumps({k:report[k] for k in ['rows','experiment_finished_at_export','latest','stages']}),flush=True)
+        if args.follow and not report['experiment_finished_at_export']:
+            while not json.loads((Path(args.result_dir)/'status.json').read_text()).get('finished'):
+                time.sleep(15)
+            time.sleep(15)  # allow the retained collectors' final samples to arrive
+            report=export_pool_utilization(args.result_dir)
+            print(json.dumps({k:report[k] for k in ['rows','experiment_finished_at_export','latest','stages']}),flush=True)
+    else:
+        if not args.config:parser.error('--config is required when starting an experiment')
+        raise SystemExit(main(args.config,args.result_dir))

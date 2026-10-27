@@ -283,6 +283,28 @@ python3 /workspace/heterogeneous_compute/benchmark_telemetry.py \
 目标压力或抓包丢失会中止该实验，不能拼接部署前后的数据。SMI 超时后不反复调用，
 缺失设备指标如实保留为空；`.23` 的设备指标覆盖仍有此限制。
 
+各厂商卡池利用率是实验结果的一部分。复用已有约 5 秒一条的芯片遥测，按
+`preflight.json` 冻结的健康 AWQ 实例设备汇总；排除故障实例、Embedding、预留设备和
+其他服务。按逻辑芯片等权计算池均值，在入口节点采样时刻对齐各节点最近的有效采样，
+过期上限复用实验的 25 秒。输出 `pool-utilization.csv` 时间序列及
+`pool-utilization-summary.json`，包含每池设备数、有效采样覆盖率、已完成测量阶段的
+利用率均值、池均值峰值和单设备峰值。跨厂商 SMI 的利用率定义可能不同。
+缺失、过期或非法数据不记为 0；覆盖不完整时整池均值和峰值留空，仅报告观测部分的值。
+当前昇腾健康 AWQ 使用 26 个芯片，`.23` 的 10 个芯片利用率缺失时，仅覆盖 `.24` 的
+16/26；摩尔与天数各池各统计 16 个 AWQ 芯片，天数 Embedding 的两个芯片单独排除。
+`system_benchmark.py` 的最终导出自动生成该结果；对于已在运行、尚未加载新增导出代码的
+本轮实验，在现有容器执行同一模块的仅导出入口，先补齐已采集数据，结束后自动刷新一次：
+
+```bash
+python3 heterogeneous_compute/system_benchmark.py \
+ --export-pool-utilization --follow \
+ --result-dir artifacts/serving/system-benchmark/20261027T073431Z
+```
+
+这个处理进程只读取冻结快照、原始遥测和阶段结果并写派生产物，不发模型请求、不新增 SMI
+查询、不改变压测配置或服务进程。处理器版本以结果内 SHA-256 与进程启动记录单独保留，
+原始压测的源码版本仍以其启动时的 `sources.json` 和 `launch.json` 为准。
+
 固定长度实验 `20261027T054003Z` 已因用户切换 mixed 负载而停止，保留为历史数据，
 不与 mixed 容量结果拼接。新混合负载最长需要 2112 上下文；昇腾两个 replica group
 通过 `max_model_len=4096` 覆盖旧的 2048 上限，包含原地复用的 `ascend-awq` 服务。

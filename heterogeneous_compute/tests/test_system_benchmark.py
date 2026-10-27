@@ -11,7 +11,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from heterogeneous_compute.system_benchmark import Experiment, Receiver, build_workload, export_results, meets_slo, resolved_cohort_window, summarize, workload_profiles
+from heterogeneous_compute.system_benchmark import Experiment, Receiver, build_workload, export_results, export_pool_utilization, meets_slo, pool_device_inventory, pool_utilization, resolved_cohort_window, summarize, workload_profiles
 from heterogeneous_compute.benchmark_telemetry import (
     METRIC_NAMES, PacketObserver, admission_waiting, device_values, ipv4_tcp, metric_sum, packet_filter, parse_metrics,
     router_worker_snapshot,
@@ -19,6 +19,71 @@ from heterogeneous_compute.benchmark_telemetry import (
 
 
 SLO={'ttft_seconds':2,'tpot_seconds':.1,'e2e_seconds':20}
+
+
+def utilization_fixture():
+    workers={name:{'base_url':f'http://{name}/v1','node':node,'devices':devices} for name,node,devices in
+        [('a1','a',[0,1]),('a2','b',[0]),('stopped','a',[2,3]),('m1','m',[0,1]),('i1','i',[0,1])]}
+    serving={'workers':workers,'services':{'gateway':{'node':'a'}},'router':{'pools':{
+        'ascend':{'nodes':['a','b']},'musa':{'nodes':['m']},'iluvatar':{'nodes':['i']}}}}
+    healthy=[w['base_url'].removesuffix('/v1') for n,w in workers.items() if n!='stopped']
+    def sample(node,values,at=100):
+        return {'node':node,'received_at':at,'device':{'values':[
+            {'device':device,'utilization_percent':value} for device,value in values]}}
+    samples={'a':sample('a',[(0,10),(1,30),(2,100),(3,100),(12,100)]),
+        'b':sample('b',[(0,80)]),'m':sample('m',[(0,0),(1,100)]),'i':sample('i',[(0,0),(1,0)])}
+    return serving,healthy,samples,sample
+
+
+def test_pool_utilization_uses_frozen_awq_devices_and_device_weighted_mean():
+    serving,healthy,samples,_=utilization_fixture();inventory=pool_device_inventory(serving,healthy)
+    rows={r['pool']:r for r in pool_utilization(inventory,samples,100)}
+    assert inventory['ascend']=={('a',0),('a',1),('b',0)}
+    assert rows['ascend']['utilization_mean_percent']==40  # not node-average 50
+    assert rows['ascend']['sampled_devices']==3 and rows['ascend']['coverage_ratio']==1
+    assert rows['musa']['utilization_mean_percent']==50
+    assert rows['iluvatar']['utilization_mean_percent']==0  # genuinely sampled idle devices
+    try:pool_device_inventory(serving,healthy+['http://unknown'])
+    except ValueError as exc:assert 'coverage is incomplete' in str(exc)
+    else:raise AssertionError('Unknown frozen devices must not silently reduce the denominator')
+
+
+def test_pool_utilization_preserves_partial_stale_and_invalid_coverage():
+    serving,healthy,samples,_=utilization_fixture();inventory=pool_device_inventory(serving,healthy)
+    samples.pop('b');rows={r['pool']:r for r in pool_utilization(inventory,samples,100)}
+    partial=rows['ascend'];assert partial['utilization_mean_percent'] is None
+    assert partial['observed_utilization_mean_percent']==20 and partial['coverage_ratio']==2/3
+    assert partial['missing_devices']==['b:0']
+    samples['a']['device']['values'][0]['utilization_percent']=float('nan')
+    partial={r['pool']:r for r in pool_utilization(inventory,samples,100)}['ascend']
+    assert partial['sampled_devices']==1 and partial['observed_utilization_mean_percent']==30
+    assert all(r['sampled_devices']==0 and r['observed_utilization_mean_percent'] is None
+               for r in pool_utilization(inventory,samples,126))
+
+
+def test_pool_utilization_export_backfills_stage_results_without_changing_experiment(tmp_path):
+    serving,healthy,samples,sample=utilization_fixture()
+    sources={'serving-snapshot.json':serving,'preflight.json':{'healthy_workers':healthy},
+        'config.json':{'telemetry_max_age_seconds':25},'status.json':{'phase':'coarse','finished':False},
+        'stages.json':[{'case':1,'label':'coarse','rate':8,'start':100,'end':110}]}
+    for name,value in sources.items():(tmp_path/name).write_text(json.dumps(value))
+    events=[samples[n] for n in ['b','m','i','a']]+[sample('b',[(0,20)],105),sample('a',[(0,10),(1,30)],105)]
+    (tmp_path/'telemetry.jsonl').write_text(''.join(json.dumps(v)+'\n' for v in events)+'{"node":')
+    before={n:(tmp_path/n).read_bytes() for n in [*sources,'telemetry.jsonl']}
+    report=export_pool_utilization(tmp_path)
+    assert report['rows']==6 and not report['experiment_finished_at_export']
+    stage=next(s for s in report['stages'] if s['pool']=='ascend')
+    assert stage['utilization_mean_percent']==30 and stage['pool_mean_peak_percent']==40
+    assert stage['observed_device_peak_percent']==80 and stage['complete_samples']==2
+    with (tmp_path/'pool-utilization.csv').open() as f:rows=list(csv.DictReader(f))
+    assert len(rows)==6 and all(r['case']=='1' for r in rows)
+    assert all((tmp_path/n).read_bytes()==value for n,value in before.items())
+    # One missing snapshot cannot be silently dropped from the stage mean.
+    events[0]['received_at']=1
+    (tmp_path/'telemetry.jsonl').write_text(''.join(json.dumps(v)+'\n' for v in events))
+    stage=next(s for s in export_pool_utilization(tmp_path)['stages'] if s['pool']=='ascend')
+    assert stage['utilization_mean_percent'] is None and stage['complete_samples']==1
+    assert stage['observed_utilization_mean_percent']==20 and stage['coverage_min']==2/3
 
 
 def test_recovery_does_not_omit_pending_requests_with_long_total_deadline():

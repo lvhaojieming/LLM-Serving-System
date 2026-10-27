@@ -1,0 +1,64 @@
+{
+  "validated_at": "2026-10-27T08:01:25.087756+00:00",
+  "run_id": "20261027T073431Z",
+  "change": "Include vendor-pool utilization in experiment outputs using already retained per-device telemetry. No change to workload, service processes, configuration or SMI sampling.",
+  "inventory": {
+    "ascend_healthy_awq_devices": 26,
+    "musa_healthy_awq_devices": 16,
+    "iluvatar_healthy_awq_devices": 16,
+    "exclusions": [
+      "Unhealthy AWQ workers",
+      "Embedding devices",
+      "Reserved and other-service devices"
+    ]
+  },
+  "metrics": [
+    "Time series of device-weighted mean utilization per pool",
+    "Measurement-stage sample mean and peak of pool mean",
+    "Peak single-device utilization per stage",
+    "Sampled/expected device count and coverage",
+    "Explicit observed-only means for partial coverage"
+  ],
+  "missing_semantics": "Missing, stale and invalid samples are excluded and counted as uncovered. Whole-pool statistics are null when coverage is incomplete, never zero-filled.",
+  "validation": {
+    "regression_tests_passed": 178,
+    "real_run_rows_backfilled": 897,
+    "completed_measurement_rates_backfilled": [
+      8,
+      12,
+      16
+    ],
+    "input_artifacts_modified": false,
+    "new_model_or_smi_requests": false,
+    "restarts": false,
+    "capacity_claim": "None; this is metric-output acceptance, not completion of the running capacity/stability experiment."
+  },
+  "sample_stage_8rps": [
+    {
+      "pool": "ascend",
+      "mean_utilization_percent": null,
+      "observed_mean_percent": 68.59533898305085,
+      "coverage": 0.6153846153846156
+    },
+    {
+      "pool": "musa",
+      "mean_utilization_percent": 94.46504237288136,
+      "observed_mean_percent": 94.46504237288136,
+      "coverage": 1.0
+    },
+    {
+      "pool": "iluvatar",
+      "mean_utilization_percent": 73.41207627118644,
+      "observed_mean_percent": 73.41207627118644,
+      "coverage": 1.0
+    }
+  ],
+  "limitation": "Ascend .23 SMI timed out under the original frozen policy. Ascend covers only .24 devices 16/26 (61.54%); the observed mean is not the whole-pool utilization. Vendor SMI definitions may differ.",
+  "outputs": [
+    "pool-utilization.csv",
+    "pool-utilization-summary.json"
+  ],
+  "reproduction": "python3 heterogeneous_compute/system_benchmark.py --export-pool-utilization --follow --result-dir artifacts/serving/system-benchmark/20261027T073431Z",
+  "completion": "For the already running original controller, a derived-result process exports now and refreshes once after the experiment and collectors finish. Future runs use the integrated final exporter. Processor identity is recorded separately from the original run revision.",
+  "maintenance": "Extended the existing system_benchmark module and tests; no separate experiment implementation, environments or containers. Retained useful derived results and necessary evidence; no temporary code created."
+}
