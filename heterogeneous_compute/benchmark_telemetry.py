@@ -144,7 +144,7 @@ def process_sample():
                 rss_bytes=int(stat[21])*os.sysconf('SC_PAGE_SIZE'), state=stat[0])
             if role=='model':
                 argv=shlex.split(cmd);parameters={}
-                for flag in ['--tensor-parallel-size','--pipeline-parallel-size','--port','--max-model-len']:
+                for flag in ['--tensor-parallel-size','--pipeline-parallel-size','--port','--max-model-len','--served-model-name','--runner']:
                     if flag in argv and argv.index(flag)+1<len(argv):parameters[flag]=argv[argv.index(flag)+1]
                 parameters['--enforce-eager']='--enforce-eager' in argv
                 parameters['--disable-custom-all-reduce']='--disable-custom-all-reduce' in argv

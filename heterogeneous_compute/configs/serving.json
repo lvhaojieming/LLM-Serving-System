@@ -168,6 +168,7 @@
   "replica_groups": [
     {
       "name": "ascend-23",
+      "max_model_len": 4096,
       "node": "ascend910c-01",
       "container": "heteroserve-ascend",
       "template": "ascend-awq",
@@ -215,6 +216,7 @@
     },
     {
       "name": "ascend-24",
+      "max_model_len": 4096,
       "node": "ascend910c-02",
       "container": "heteroserve-ascend-w4",
       "template": "ascend-awq",

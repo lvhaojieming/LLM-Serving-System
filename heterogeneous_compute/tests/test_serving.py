@@ -283,6 +283,22 @@ def test_expansion_respects_six_node_awq_budgets_and_embedding_reservations():
     assert len(gateway_config(cfg)['worker_registry']['expected_urls']) == 32
 
 
+def test_ascend_start_reuses_a_port_after_an_owned_connection_closes(tmp_path, monkeypatch):
+    import socket
+    from types import SimpleNamespace
+    from heterogeneous_compute.quantization import deploy
+    listener=socket.socket();listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+    listener.bind(('127.0.0.1',0));listener.listen();port=listener.getsockname()[1]
+    client=socket.create_connection(('127.0.0.1',port));accepted,_=listener.accept()
+    accepted.shutdown(socket.SHUT_WR);accepted.close();client.recv(1);client.close();listener.close()
+    cfg=json.loads((Path(__file__).resolve().parents[1]/'quantization/deployment.json').read_text())
+    cfg.update(host='127.0.0.1',result_dir=str(tmp_path))
+    cfg['profiles']['awq']['port']=port
+    monkeypatch.setattr(deploy.subprocess,'Popen',lambda *args,**kwargs:SimpleNamespace(pid=123456))
+    deploy.start_server(cfg,'awq')
+    assert json.loads((tmp_path/'awq/server.json').read_text())['pid']==123456
+
+
 def test_expansion_rejects_overlapping_and_missing_device_partitions():
     cfg = config()
     cfg['replica_groups'][0]['device_sets'][1] = [1,2]
@@ -302,6 +318,9 @@ def test_replica_overrides_keep_vendor_runtime_and_select_new_node_devices():
     assert target['env']['GLOO_SOCKET_IFNAME'] == 'ens21f0'
     assert cfg['services']['ascend-24-1']['overrides']['tp'] == 2
     assert cfg['services']['ascend-24-1']['overrides']['devices'] == [2,3]
+    assert cfg['services']['ascend-24-1']['overrides']['max_model_len'] == 4096
+    assert cfg['services']['ascend-awq']['overrides']['max_model_len'] == 4096
+    assert cfg['services']['ascend-23-0']['overrides']['max_model_len'] == 4096
 
 
 def test_worker_acceptance_retains_failures_and_tests_reachable_workers(monkeypatch):

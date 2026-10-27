@@ -162,6 +162,8 @@ def expand_config(config):
                         service["overrides"][option] = copy.deepcopy(group[option])
                 result["services"][name] = service
                 endpoint = f"http://{group['host']}:{port}/v1"
+            if 'max_model_len' in group:
+                service.setdefault('overrides', {})['max_model_len'] = group['max_model_len']
             workers[name] = dict(base_url=endpoint, model="Qwen3-14B-AWQ", node=group["node"], devices=devices)
         if sorted(used) != list(range(group["device_count"])):
             raise ValueError("Device coverage is incomplete: " + group["name"])

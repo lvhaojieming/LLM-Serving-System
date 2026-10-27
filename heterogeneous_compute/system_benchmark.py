@@ -7,6 +7,7 @@ Run through benchmark.py --system-config; use the existing container's aiohttp.
 import asyncio
 from collections import Counter
 import csv
+from functools import reduce
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -46,7 +47,48 @@ def meets_slo(row,slo):
         for key,limit in slo.items()))
 
 
-def summarize(rows,start,end,slo):
+def workload_profiles(config):
+    profiles=config.get('workload',{}).get('profiles')
+    if profiles is None:
+        return [{'name':'fixed','input_tokens':config['input_tokens'],'output_tokens':config['output_tokens'],'weight':100}]
+    if not isinstance(profiles,list) or not profiles or any(not isinstance(p,dict) for p in profiles):
+        raise ValueError('Workload profiles must be a nonempty list')
+    names=[p.get('name') for p in profiles]
+    if any(not isinstance(n,str) or not n for n in names) or len(set(names))!=len(names):
+        raise ValueError('Workload profile names must be distinct')
+    if any(type(p.get(k)) is not int or p[k]<minimum for p in profiles
+           for k,minimum in [('input_tokens',1),('output_tokens',2),('weight',1)]):
+        raise ValueError('Workload lengths and percentage weights must be positive integers')
+    if sum(p['weight'] for p in profiles)!=100:raise ValueError('Workload weights must sum to 100')
+    return profiles
+
+
+def build_workload(config,tokenizer):
+    """Reuse canonical synthetic chat padding for each configured length class."""
+    profiles=workload_profiles(config);rng=random.Random(config['seed'])
+    divisor=reduce(math.gcd,(p['weight'] for p in profiles))
+    block=[p for p in profiles for _ in range(p['weight']//divisor)]
+    if config['prompt_count']%len(block):raise ValueError('prompt_count must preserve exact workload proportions')
+    prefixes=['quiet garden','mountain village','coastal forest','winter sunrise','ancient library','flowing river','distant island','summer orchard']
+    workload=[]
+    for start in range(0,config['prompt_count'],len(block)):
+        order=list(block);rng.shuffle(order)
+        for profile in order:
+            index=len(workload)
+            content=f"Benchmark request {index:08d}. Please write a detailed description of a {rng.choice(prefixes)}. "
+            base_length=len(tokenizer.apply_chat_template([{'role':'user','content':content}],tokenize=True,return_dict=False,add_generation_prompt=True,enable_thinking=False))
+            padding=max(0,profile['input_tokens']-base_length);prompt=None
+            for n in [padding,*range(max(0,padding-4),padding+5)]:
+                messages=[{'role':'user','content':content+' garden'*n}]
+                ids=tokenizer.apply_chat_template(messages,tokenize=True,return_dict=False,add_generation_prompt=True,enable_thinking=False)
+                if len(ids)==profile['input_tokens']:prompt=messages;break
+            if prompt is None:raise RuntimeError('Cannot construct exact input length for '+profile['name'])
+            workload.append({'messages':prompt,'workload_name':profile['name'],
+                'input_tokens':profile['input_tokens'],'output_tokens':profile['output_tokens']})
+    return workload
+
+
+def summarize(rows,start,end,slo,by_workload=True):
     """Completion-time goodput and sent-cohort ratios deliberately differ."""
     duration=end-start
     sent=[r for r in rows if start<=r['sent_at']<end]
@@ -54,7 +96,7 @@ def summarize(rows,start,end,slo):
     good=[r for r in completed if meets_slo(r,slo)]
     successful=[r for r in sent if r['success']]
     cohort_good=[r for r in sent if meets_slo(r,slo)]
-    return dict(duration_seconds=duration,sent=len(sent),actual_rate=len(sent)/duration,
+    result=dict(duration_seconds=duration,sent=len(sent),actual_rate=len(sent)/duration,
         completed_in_window=len(completed),completed_rate=len(completed)/duration,
         goodput=len(good)/duration,good_completed_in_window=len(good),
         success_ratio=len(successful)/len(sent) if sent else 0,
@@ -65,6 +107,10 @@ def summarize(rows,start,end,slo):
         send_lag_p99=percentile([r['send_lag'] for r in sent],.99),
         output_tokens=dict(Counter(str(r.get('output_tokens')) for r in successful)),
         input_tokens=dict(Counter(str(r.get('input_tokens')) for r in successful)))
+    if by_workload:
+        names=sorted({r.get('workload_name','fixed') for r in rows})
+        result['by_workload']={name:summarize([r for r in rows if r.get('workload_name','fixed')==name],start,end,slo,False) for name in names}
+    return result
 
 
 class Receiver:
@@ -199,10 +245,16 @@ class Experiment:
 
     async def one(self,session,prompt,index,scheduled,phase,endpoint=None,model=None,expected_text=None,output_tokens=None):
         import aiohttp
-        c=self.config;output_tokens=output_tokens or c['output_tokens']
+        c=self.config
+        profile=prompt if isinstance(prompt,dict) else {}
+        input_tokens=profile.get('input_tokens',c.get('input_tokens'))
+        output_tokens=output_tokens if output_tokens is not None else profile.get('output_tokens',c.get('output_tokens'))
+        if isinstance(prompt,dict):prompt=profile['messages']
         sent=time.time();row={'index':index,'case':self.case,'phase':phase,'scheduled_at':scheduled,'sent_at':sent,
             'send_lag':max(0,sent-scheduled),'success':False,'request_id':None,'vendor':None,'worker':None,'selected_pool':None,'embedding_ms':None,
-            'tpot':None,'input_tokens':None,'output_tokens':None,'gateway_queue_ms':None}
+            'tpot':None,'input_tokens':None,'output_tokens':None,'gateway_queue_ms':None,
+            'workload_name':profile.get('workload_name','fixed'),
+            'requested_input_tokens':input_tokens,'requested_output_tokens':output_tokens}
         if 'ttft_seconds' in c['slo']:row['ttft']=None
         if 'e2e_seconds' in c['slo']:row['e2e']=None
         body={'model':model or c['model'],'messages':prompt,'temperature':0,'max_tokens':output_tokens,
@@ -252,7 +304,7 @@ class Experiment:
                         if not done or not finish or not content:row['error']='abnormal_truncation'
                         elif expected_text is not None and text.strip()!=expected_text:row['error']='smoke_answer'
                         elif usage is None:row['error']='missing_usage'
-                        elif expected_text is None and (row['input_tokens']!=c['input_tokens'] or row['output_tokens']!=output_tokens):row['error']='length_mismatch'
+                        elif expected_text is None and (row['input_tokens']!=input_tokens or row['output_tokens']!=output_tokens or finish!='length'):row['error']='length_mismatch'
                         elif finish in {'abort','error'}:row['error']='backend_abort'
                         elif endpoint is None and getattr(self,'embedding_required',False) and row['embedding_ms'] is None:
                             row['error']='missing_embedding_measurement' if embedding_header is None else 'invalid_embedding_measurement'
@@ -315,35 +367,22 @@ class Experiment:
             if not expected or any(self.serving['admission'].get(key)!=value for key,value in expected.items()):
                 raise RuntimeError('Admission configuration is not frozen consistently')
             if r.queue()['gateway_waiting'] is None:raise RuntimeError('Admission queue telemetry is missing')
+        required_context=max(p['input_tokens']+p['output_tokens'] for p in workload_profiles(self.config))
         for node,snapshot in r.latest.items():
             for proc in snapshot.get('process',{}).get('processes',[]):
                 parameters=proc.get('inference_parameters')
                 if not parameters:continue
+                if parameters.get('--runner')=='pooling':continue
                 if int(parameters.get('--tensor-parallel-size',1))!=self.config['required_tp'] or int(parameters.get('--pipeline-parallel-size',1))!=self.config['required_pp']:
                     raise RuntimeError('Running AWQ process does not use uniform TP2/PP1: '+node)
+                if int(parameters.get('--max-model-len',0))<required_context:
+                    raise RuntimeError('Running AWQ context is too short for frozen workload: '+node)
                 if node.startswith('s5000') and not parameters.get('--disable-custom-all-reduce'):
                     raise RuntimeError('MUSA process is not using the required standard MCCL path')
-        r.phase('building_fixed_token_workload')
+        r.phase('building_workload',workload=self.config.get('workload',{'name':'fixed'}))
         from transformers import AutoTokenizer
         self.tokenizer=AutoTokenizer.from_pretrained(self.config['tokenizer'],local_files_only=True)
-        rng=random.Random(self.config['seed'])
-        prefixes=['quiet garden','mountain village','coastal forest','winter sunrise','ancient library','flowing river','distant island','summer orchard']
-        workload=[]
-        for i in range(self.config['prompt_count']):
-            # The identifier and topic vary before padding. Count with the actual
-            # Qwen chat template, including disabled thinking and generation tag.
-            content=f"Benchmark request {i:08d}. Please write a detailed description of a {rng.choice(prefixes)}. "
-            prompt=None
-            initial=[{'role':'user','content':content}]
-            base_length=len(self.tokenizer.apply_chat_template(initial,tokenize=True,add_generation_prompt=True,enable_thinking=False))
-            padding=max(0,self.config['input_tokens']-base_length)
-            candidates=[padding,*range(max(0,padding-4),padding+5)]
-            for n in candidates:
-                m=[{'role':'user','content':content+' garden'*n}]
-                ids=self.tokenizer.apply_chat_template(m,tokenize=True,add_generation_prompt=True,enable_thinking=False)
-                if len(ids)==self.config['input_tokens']:prompt=m;break
-            if prompt is None:raise RuntimeError('Cannot construct exact input length')
-            workload.append(prompt)
+        workload=build_workload(self.config,self.tokenizer)
         self.prompts=workload;save(self.directory/'workload.json',workload)
         semaphore=asyncio.Semaphore(4)
         async def pooled_check(i):
@@ -360,7 +399,7 @@ class Experiment:
             batch=await asyncio.gather(*(pooled_check(i) for i in range(offset,offset+count)))
             pooled.extend(batch)
             if not all(row['success'] for row in batch):
-                raise RuntimeError('Unified fixed-length streaming check failed: '+str(Counter(row.get('error') for row in batch if not row['success'])))
+                raise RuntimeError('Unified workload streaming check failed: '+str(Counter(row.get('error') for row in batch if not row['success'])))
             await asyncio.sleep(5)
             for row in batch:
                 worker=r.routes.get(row['request_id'],{}).get('worker')
@@ -378,6 +417,8 @@ class Experiment:
             'router_pools':{name:sorted(workers) for name,workers in self.router_identities.items()},
             'routing':{'random_routes':routing.get('random_routes',{}),'routers':routers},
             'admission':self.serving.get('admission'),
+            'workload':{'profiles':workload_profiles(self.config),'counts':dict(Counter(p['workload_name'] for p in workload)),
+                'maximum_required_context':required_context,'prompt_count':len(workload)},
             'pipeline':{'route_embeddings':routing.get('route_embeddings',{}),
                 'embedding_timing':'x-heteroserve-embedding-ms, finite nonnegative milliseconds',
                 'recorded_slo_metrics':[SLO_FIELDS[key] for key in self.config['slo']],
@@ -397,6 +438,8 @@ class Experiment:
     async def send_window(self,session,rate,seconds,phase,offset=0):
         """No concurrency semaphore: local saturation invalidates the stage."""
         start_mono=time.monotonic();wall=time.time();n=math.ceil(seconds*rate)
+        profiles=workload_profiles(self.config) if 'workload' in self.config else None
+        block=100//reduce(math.gcd,(p['weight'] for p in profiles)) if profiles else 1
         for i in range(n):
             scheduled=wall+i/rate
             if i/rate>=seconds:break
@@ -404,7 +447,9 @@ class Experiment:
             await asyncio.sleep(max(0,start_mono+i/rate-time.monotonic()))
             self.check()
             if len(self.active)>=self.config['max_client_tasks']:raise RuntimeError('Load generator task limit reached; not a server capacity result')
-            prompt=self.prompts[(i+offset)%len(self.prompts)]
+            # Keep complete mixture blocks aligned in every stage. A partial
+            # final block has integer counts; report the actual sent mixture.
+            prompt=self.prompts[(i+offset//block*block)%len(self.prompts)]
             task=asyncio.create_task(self.one(session,prompt,i+offset,scheduled,phase))
             self.active.add(task);task.add_done_callback(self.active.discard)
         await self.wait(max(0,start_mono+seconds-time.monotonic()))
@@ -559,6 +604,7 @@ class Experiment:
                 if lower<=0:raise RuntimeError('No candidate passed repeated/long stability verification')
                 save(self.directory/'capacity.json',{'max_stable_rate':lower,'first_failing_or_unverified_upper':upper,
                     'slo':self.config['slo'],'validated_seconds':self.config['steady_seconds'],'healthy_workers':len(self.expected),
+                    'workload':self.config.get('workload',{'name':'fixed'}),
                     'deployment_scope':self.config['scope'],'execution_mode':self.config['execution_mode']})
                 for multiplier in self.config['overload_multipliers']:await self.recovery(session,lower,multiplier)
                 if self.config.get('extended_steady_seconds'):
@@ -578,6 +624,11 @@ def export_results(directory,config,stages,routes,plots=True):
     fields=['label','case','repeat','rate','actual_rate','goodput','completed_rate','slo_ratio','success_ratio','sent','planned','send_lag_p99','queue_stable','load_valid','passed','start','end']
     with (directory/'pressure.csv').open('w',newline='',encoding='utf-8') as out:
         writer=csv.DictWriter(out,fieldnames=fields,extrasaction='ignore');writer.writeheader();writer.writerows(stages)
+    with (directory/'workload-pressure.csv').open('w',newline='',encoding='utf-8') as out:
+        writer=csv.DictWriter(out,fieldnames=['workload_name',*fields],extrasaction='ignore');writer.writeheader()
+        for stage in stages:
+            for name,metrics in stage.get('by_workload',{}).items():
+                writer.writerow({**stage,**metrics,'workload_name':name})
     if not plots:return
     bins={};requests=0;associated=0
     snapshot=directory/'serving-snapshot.json'
@@ -593,7 +644,7 @@ def export_results(directory,config,stages,routes,plots=True):
             node=w.get('node','')
             vendor='ascend' if node.startswith('ascend') else 'musa' if node.startswith('s5000') else 'iluvatar' if node.startswith('iluvatar') else None
             if vendor:vendors_by_worker.setdefault(w['base_url'].removesuffix('/v1'),vendor)
-    request_fields=['index','case','phase','request_id','selected_pool','worker','vendor','embedding_ms','gateway_queue_ms','scheduled_at','sent_at','send_lag','completed_at','input_tokens','output_tokens','http_status','error','success','slo_pass',
+    request_fields=['index','case','phase','workload_name','requested_input_tokens','requested_output_tokens','request_id','selected_pool','worker','vendor','embedding_ms','gateway_queue_ms','scheduled_at','sent_at','send_lag','completed_at','input_tokens','output_tokens','http_status','error','success','slo_pass',
                     *[field for key,field in SLO_FIELDS.items() if key in config['slo']]]
     with (directory/'requests.csv').open('w',newline='',encoding='utf-8') as out:
         writer=csv.DictWriter(out,fieldnames=request_fields,extrasaction='ignore');writer.writeheader()

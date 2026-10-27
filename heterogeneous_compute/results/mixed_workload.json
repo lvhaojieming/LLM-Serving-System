@@ -1,0 +1,97 @@
+{
+  "validated_at": "2026-10-27T06:01:08.621110+00:00",
+  "workload": {
+    "name": "mixed",
+    "profiles": [
+      {
+        "name": "short",
+        "input_tokens": 256,
+        "output_tokens": 64,
+        "weight": 40
+      },
+      {
+        "name": "long-input",
+        "input_tokens": 2048,
+        "output_tokens": 64,
+        "weight": 30
+      },
+      {
+        "name": "long-output",
+        "input_tokens": 256,
+        "output_tokens": 1024,
+        "weight": 30
+      }
+    ]
+  },
+  "frozen_prompt_count": 300,
+  "exact_prompt_counts": {
+    "short": 120,
+    "long-input": 90,
+    "long-output": 90
+  },
+  "ordering": "Seeded shuffled blocks of 10 containing 4/3/3 requests; stage tails record actual integer proportions.",
+  "seed": 20261022,
+  "length_semantics": "Input token budget includes canonical Qwen chat template and disabled thinking; actual usage must match input/output budget and complete SSE.",
+  "slo": {
+    "tpot_seconds": 0.1,
+    "minimum_success_ratio": 0.99,
+    "minimum_slo_ratio": 0.95,
+    "total_request_timeout_seconds": 60
+  },
+  "queue_unchanged": {
+    "max_inflight": 32,
+    "max_queue": 32,
+    "queue_timeout_seconds": 2
+  },
+  "context_rollout": {
+    "max_model_len": 4096,
+    "minimum_required_context": 2112,
+    "healthy_ascend_instances_restarted": 13,
+    "accepted_instances": [
+      "ascend-23-0",
+      "ascend-23-1",
+      "ascend-23-5",
+      "ascend-23-6",
+      "ascend-23-7",
+      "ascend-awq",
+      "ascend-24-1",
+      "ascend-24-2",
+      "ascend-24-3",
+      "ascend-24-4",
+      "ascend-24-5",
+      "ascend-24-6",
+      "ascend-24-7"
+    ],
+    "api_max_model_len_verified": true,
+    "new_graph_capture_evidence_retained": true,
+    "remaining_three_ascend_instances": "Kept stopped; no retry on known failed device partitions.",
+    "containers_reused": true,
+    "other_vendor_models_restarted": false
+  },
+  "validation": {
+    "regression_tests_passed": 172,
+    "native_musa_iluvatar_cases": 6,
+    "ascend_and_full_pipeline_cases": 9,
+    "all_streams_complete_exact_tokens": true,
+    "full_pipeline_embedding_cases": 3,
+    "capacity_and_two_hour_stability": "Pending new independent mixed run; no capacity conclusion from bounded acceptance."
+  },
+  "reporting": [
+    "Overall and per-workload success ratio, SLO attainment, Goodput",
+    "Requested and actual lengths on every request",
+    "workload-pressure.csv for per-class stage results",
+    "Gateway and worker queue histories and sample statistics"
+  ],
+  "previous_run": {
+    "run_id": "20261027T054003Z",
+    "state": "stopped by STOP file at user request",
+    "retention": "Retained as fixed-length historical data; never concatenate with mixed results."
+  },
+  "reproduction": {
+    "config": "heterogeneous_compute/configs/system_benchmark.json",
+    "entry": "python3 heterogeneous_compute/benchmark.py --system-config heterogeneous_compute/configs/system_benchmark.json --result-dir artifacts/serving/system-benchmark/<UNIQUE_RUN_ID>",
+    "raw_acceptance": "artifacts/optimization/mixed-workload",
+    "workload_sha256": "28d978bfa9d89a85753af5881d7935cde9746f7504ad70728b4c831f93cc4a5b"
+  },
+  "maintenance": "Reused existing synthetic-padding generator, official tokenizer, existing stream validator and load scheduler; no new runtime or containers. Fixed Ascend pre-bind socket reuse for safe port reuse after an owned stop."
+}

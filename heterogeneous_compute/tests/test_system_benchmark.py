@@ -11,7 +11,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from heterogeneous_compute.system_benchmark import Experiment, Receiver, export_results, meets_slo, summarize
+from heterogeneous_compute.system_benchmark import Experiment, Receiver, build_workload, export_results, meets_slo, summarize, workload_profiles
 from heterogeneous_compute.benchmark_telemetry import (
     METRIC_NAMES, PacketObserver, admission_waiting, device_values, ipv4_tcp, metric_sum, packet_filter, parse_metrics,
     router_worker_snapshot,
@@ -19,6 +19,30 @@ from heterogeneous_compute.benchmark_telemetry import (
 
 
 SLO={'ttft_seconds':2,'tpot_seconds':.1,'e2e_seconds':20}
+
+
+def test_mixed_workload_is_reproducible_exact_per_block_and_validates_proportions():
+    from collections import Counter
+    import pytest
+    config=json.loads((Path(__file__).resolve().parents[1]/'configs/system_benchmark.json').read_text())
+    class Tokenizer:
+        def apply_chat_template(self,messages,**kwargs):
+            return list(range(40+messages[0]['content'].count(' garden')))
+    workload=build_workload(config,Tokenizer())
+    assert build_workload(config,Tokenizer())==workload
+    assert Counter(p['workload_name'] for p in workload)=={'short':120,'long-input':90,'long-output':90}
+    for start in range(0,len(workload),10):
+        assert Counter(p['workload_name'] for p in workload[start:start+10])=={'short':4,'long-input':3,'long-output':3}
+    assert {(p['input_tokens'],p['output_tokens']) for p in workload}=={(256,64),(2048,64),(256,1024)}
+    assert max(p['input_tokens']+p['output_tokens'] for p in workload)==2112
+    bad={**config,'workload':{'profiles':[{'name':'bad','input_tokens':256,'output_tokens':64,'weight':99}]}}
+    with pytest.raises(ValueError,match='sum to 100'):workload_profiles(bad)
+    with pytest.raises(ValueError,match='exact workload proportions'):build_workload({**config,'prompt_count':256},Tokenizer())
+    short=row(0,1,workload_name='short');long=row(0,2,False,workload_name='long-output',error='timeout')
+    result=summarize([short,long],0,3,SLO)
+    assert result['by_workload']['long-output']['success_ratio']==0
+    assert result['by_workload']['short']['success_ratio']==1
+    assert result['success_ratio']==.5
 
 
 def test_admission_samples_do_not_double_count_server_queue_or_hide_missing_metrics():
@@ -350,7 +374,7 @@ def test_stream_parser_counts_429_truncation_errors_and_total_deadline():
     from aiohttp import web
     async def run():
         async def handler(request):
-            mode=(await request.json())['model']
+            body=await request.json();mode=body['model']
             if mode=='429':return web.Response(status=429)
             if mode=='slow':
                 await asyncio.sleep(.08)
@@ -358,7 +382,9 @@ def test_stream_parser_counts_429_truncation_errors_and_total_deadline():
             payload='data: '+json.dumps({'choices':[{'delta':{'role':'assistant','content':''},'finish_reason':None}]})+'\n\n'
             if mode=='stream-error':payload+='data: '+json.dumps({'error':{'message':'engine failed'}})+'\n\n'
             else:payload+='data: '+json.dumps({'choices':[{'delta':{'content':'hello'},'finish_reason':'length'}]})+'\n\n'
-            payload+='data: '+json.dumps({'choices':[],'usage':{'prompt_tokens':256,'completion_tokens':128}})+'\n\n'
+            input_length=2048 if body['messages'][0]['content']=='long-input' else 256
+            output_length=body['max_tokens'] if mode!='wrong-budget' else 64
+            payload+='data: '+json.dumps({'choices':[],'usage':{'prompt_tokens':input_length,'completion_tokens':output_length}})+'\n\n'
             if mode!='truncated':payload+='data: [DONE]\n\n'
             headers={'x-moqe-expert':'musa-awq','x-request-id':'req-1','x-heteroserve-embedding-ms':'nan' if mode=='bad-embedding' else '1.25'}
             if mode=='missing-embedding':headers.pop('x-heteroserve-embedding-ms')
@@ -382,5 +408,13 @@ def test_stream_parser_counts_429_truncation_errors_and_total_deadline():
                 assert 'ttft' not in sample and 'e2e' not in sample
                 persisted=json.loads(experiment.rows_file.getvalue().splitlines()[-1])
                 assert 'ttft' not in persisted and 'e2e' not in persisted
+                experiment.config.pop('input_tokens');experiment.config.pop('output_tokens')
+                for name,input_length,output_length in [('short',256,64),('long-input',2048,64),('long-output',256,1024)]:
+                    prompt={'messages':[{'role':'user','content':name}],'workload_name':name,'input_tokens':input_length,'output_tokens':output_length}
+                    sample=await experiment.one(session,prompt,0,time.time(),'mixed',model='normal')
+                    assert sample['success'] and sample['workload_name']==name
+                    assert sample['input_tokens']==input_length and sample['requested_output_tokens']==output_length
+                bad=await experiment.one(session,prompt,0,time.time(),'mixed',model='wrong-budget')
+                assert not bad['success'] and bad['error']=='length_mismatch'
         finally:await runner.cleanup()
     asyncio.run(run())

@@ -132,6 +132,7 @@ def start_server(config, algorithm):
             print(json.dumps(dict(pid=previous['pid'],algorithm=algorithm,reused=True)),flush=True)
             return
     with socket.socket() as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((config['host'],spec['port']))
     with (directory/'server.log').open('a') as sink:
         sink.write(json.dumps(dict(event='w4a16_serve_begin',algorithm=algorithm,argv=argv))+'\n')
