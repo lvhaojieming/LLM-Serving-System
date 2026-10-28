@@ -17,6 +17,42 @@ from heterogeneous_compute.manage import processes
 from heterogeneous_compute.benchmark import summarize
 
 class PipelineExecutionTests(unittest.TestCase):
+    def test_chat_stream_preserves_tokens_usage_and_completion(self):
+        import asyncio
+        from heterogeneous_compute.pipeline_execution import completion_events
+        future = concurrent.futures.Future()
+        future.token_events = queue.Queue()
+        future.token_events.put(dict(index=0, text='5', finish_reason='length'))
+        future.token_events.put(None)
+        future.set_result(dict(generated_token_ids=[20, 21]))
+        lifecycle = dict(completed=0)
+        async def consume():
+            return [event async for event in completion_events(future, dict(id='one'), 7,
+                    lifecycle, chat=True, include_usage=True)]
+        events = asyncio.run(consume())
+        first = json.loads(events[0].removeprefix('data: '))
+        usage = json.loads(events[1].removeprefix('data: '))
+        self.assertEqual(first['object'], 'chat.completion.chunk')
+        self.assertEqual(first['choices'][0]['delta']['content'], '5')
+        self.assertEqual(usage['usage'], dict(prompt_tokens=7, completion_tokens=2, total_tokens=9))
+        self.assertEqual(events[-1], 'data: [DONE]\n\n')
+        self.assertEqual(lifecycle['completed'], 1)
+
+    def test_disconnected_chat_stream_cancels_executor_request(self):
+        import asyncio
+        from heterogeneous_compute.pipeline_execution import completion_events
+        future = concurrent.futures.Future()
+        future.token_events = queue.Queue()
+        future.token_events.put(dict(index=0, text='5', finish_reason=None))
+        lifecycle = dict(completed=0)
+        async def disconnect():
+            stream = completion_events(future, dict(id='one'), 7, lifecycle, chat=True)
+            await anext(stream)
+            await stream.aclose()
+        asyncio.run(disconnect())
+        self.assertTrue(future.cancelled())
+        self.assertEqual(lifecycle['completed'], 0)
+
     def test_cross_vendor_replicas_do_not_share_devices_or_ports(self):
         from pathlib import Path
         from heterogeneous_compute.manage import resolve_instance

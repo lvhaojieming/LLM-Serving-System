@@ -1,0 +1,102 @@
+{
+  "serving_config": "heterogeneous_compute/configs/cross_vendor_serving.json",
+  "endpoint": "http://192.168.162.60:18600",
+  "model": "heterogeneous",
+  "tokenizer": "/models/Qwen3-14B",
+  "seed": 20261022,
+  "workload": {
+    "name": "mixed",
+    "profiles": [
+      {
+        "name": "short",
+        "input_tokens": 256,
+        "output_tokens": 64,
+        "weight": 40
+      },
+      {
+        "name": "long-input",
+        "input_tokens": 2048,
+        "output_tokens": 64,
+        "weight": 30
+      },
+      {
+        "name": "long-output",
+        "input_tokens": 256,
+        "output_tokens": 1024,
+        "weight": 30
+      }
+    ]
+  },
+  "prompt_count": 300,
+  "slo": {
+    "tpot_seconds": 0.1
+  },
+  "timeout_seconds": 150,
+  "client_keepalive_seconds": 15,
+  "timeout_policy": "Total 150 seconds includes Gateway admission and generation; no Embedding. TPOT SLO remains 100ms.",
+  "run_mode": "sweep",
+  "require_queue_stability": false,
+  "capacity_definition": "SLO-constrained validated rate; average queue growth is observed but is not a pass gate. This is not a claim of stationary queues.",
+  "minimum_success_ratio": 0.99,
+  "minimum_slo_ratio": 0.95,
+  "minimum_send_ratio": 0.99,
+  "max_send_lag_seconds": 0.1,
+  "max_client_tasks": 2048,
+  "gateway_max_inflight": 640,
+  "gateway_admission": {
+    "version": "2.8.30-0ubuntu0.24.04.1",
+    "max_inflight": 512,
+    "max_queue": 128,
+    "queue_timeout_seconds": 10,
+    "idle_timeout_seconds": 180,
+    "keepalive_timeout_seconds": 75,
+    "drain_seconds": 190
+  },
+  "required_tp": 2,
+  "required_pp": 2,
+  "required_router": {
+    "policy": "cache_aware",
+    "cache_threshold": 1.0,
+    "balance_abs_threshold": 0,
+    "balance_rel_threshold": 1.0,
+    "library_sha256": "30644ad292b43f77f893fc6773ce606ae7a9bdbf43d21615d1c8d52d67db257a"
+  },
+  "sample_seconds": 5,
+  "telemetry_url": "http://192.168.162.96:18890",
+  "telemetry_max_age_seconds": 25,
+  "transition_seconds": 60,
+  "coarse_seconds": 300,
+  "minimum_search_rate": 18,
+  "coarse_rates": [
+    18,
+    24,
+    32,
+    48,
+    64
+  ],
+  "fine_seconds": 900,
+  "fine_repeats": 3,
+  "fine_resolution": 0.25,
+  "fine_max_steps": 5,
+  "steady_seconds": 7200,
+  "overload_multipliers": [
+    1.2,
+    1.5,
+    2
+  ],
+  "overload_baseline_seconds": 300,
+  "overload_seconds": 300,
+  "recovery_max_seconds": 900,
+  "recovery_hold_seconds": 300,
+  "extended_steady_seconds": 0,
+  "supplementary_workloads": [],
+  "supplementary_policy": "This run uses only the three frozen mixed workload classes. Any further workload requires a separate configuration and run.",
+  "stop_policy": "Stop benchmark load on frozen worker/container/process identity change, stale telemetry, OOM, client saturation, stop file, or unexpired residual requests. Never restart model services.",
+  "execution_mode": "Qwen3-14B BF16, cross-vendor TP2/PP2, 12 replicas/48 chips; MLP/local-TP graph replay; attention/KV/PP outside graph capture.",
+  "scope": "HAProxy -> Gateway uniform random cross-vendor pair pool -> official cache_aware Router -> retained project executor with vendor local TP and operators; no Embedding.",
+  "load_generator": {
+    "node": "s5000-02",
+    "container": "heteroserve-musa-pp",
+    "shares_compute_node": true
+  }
+}

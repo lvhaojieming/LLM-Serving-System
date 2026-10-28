@@ -7,6 +7,7 @@ socket endpoints, never prompt/response bodies; it does not alter forwarding.
 import argparse
 import concurrent.futures
 import ctypes
+import hashlib
 import json
 import math
 import os
@@ -145,10 +146,25 @@ def process_sample():
             role = ('admission' if cmd.split(' ',1)[0].endswith('/haproxy') else
                     'gateway' if 'heteroserve.gateway' in cmd else 'router' if ('vllm_router.launch_router' in cmd or cmd.strip() == 'vllm::router') else
                     'benchmark' if ('benchmark.py' in cmd or 'benchmark_telemetry.py' in cmd) else
-                    'model' if ('serve ' in cmd or cmd.startswith(('ray::RayWorkerWrapper','ray::RayWorkerProc'))) else None)
+                    'model' if ('serve ' in cmd or 'pipeline_execution.py' in cmd
+                                or cmd.startswith(('ray::RayWorkerWrapper','ray::RayWorkerProc'))) else None)
             procs[int(d.name)] = dict(pid=int(d.name), ppid=int(stat[1]), role=role,
                 start_ticks=int(stat[19]), cpu_seconds=(int(stat[11])+int(stat[12]))/os.sysconf('SC_CLK_TCK'),
                 rss_bytes=int(stat[21])*os.sysconf('SC_PAGE_SIZE'), state=stat[0])
+            argv=(d/'cmdline').read_bytes().decode(errors='replace').split('\0')
+            if any(arg.endswith('/pipeline_execution.py') for arg in argv) and '--config' in argv:
+                path=Path(argv[argv.index('--config')+1]);cfg=json.loads(path.read_text())
+                stage=int(argv[argv.index('--stage')+1]);lane=int(argv[argv.index('--lane')+1])
+                execution=cfg['execution']
+                procs[int(d.name)]['executor']={'kind':'cross-vendor','stage':stage,'lane':lane,
+                    'physical_device':cfg['stages'][stage]['devices'][lane],
+                    'execution_mode':execution.get('execution_mode','eager'),
+                    'config_sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+                procs[int(d.name)]['inference_parameters']={
+                    '--tensor-parallel-size':str(cfg['tp']),'--pipeline-parallel-size':str(cfg['pp']),
+                    '--port':str(execution['api_port']),'--max-model-len':str(execution['max_model_len']),
+                    '--served-model-name':'Qwen3-14B','--tp-communicator':execution.get('tp_communicator','torch'),
+                    '--enforce-eager':execution.get('execution_mode','eager')=='eager'}
             if role=='model' and 'serve ' in cmd:
                 argv=shlex.split(cmd);parameters={}
                 for flag in ['--tensor-parallel-size','--pipeline-parallel-size','--port','--max-model-len','--served-model-name','--runner']:

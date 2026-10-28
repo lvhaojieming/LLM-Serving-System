@@ -1,0 +1,549 @@
+{
+  "resource_limits_enabled": false,
+  "legacy_baselines_enabled": true,
+  "result_dir": "artifacts/baselines/cross-vendor-cluster/frontend",
+  "telemetry": {
+    "gateway_metrics_timeout_seconds": 10,
+    "skip_device_nodes": [
+      "ascend910c-01"
+    ]
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18600,
+    "internal_port": 18610,
+    "address": "192.168.162.60",
+    "max_inflight": 640,
+    "max_upstream_connections": 672,
+    "min_open_files": 65536,
+    "upstream_keepalive_seconds": 2,
+    "keep_alive_seconds": 90,
+    "timeout_seconds": 180,
+    "random_route_health_seconds": 5,
+    "route_embeddings": {}
+  },
+  "admission": {
+    "binary": "/workspace/artifacts/runtime/haproxy/usr/sbin/haproxy",
+    "library_path": "/workspace/artifacts/runtime/haproxy/usr/lib/x86_64-linux-gnu",
+    "version": "2.8.30-0ubuntu0.24.04.1",
+    "metrics_port": 18612,
+    "max_inflight": 512,
+    "max_queue": 128,
+    "queue_timeout_seconds": 10,
+    "idle_timeout_seconds": 180,
+    "keepalive_timeout_seconds": 75,
+    "drain_seconds": 190
+  },
+  "router": {
+    "host": "127.0.0.1",
+    "port": 18601,
+    "policy": "cache_aware",
+    "runtime": "/workspace/artifacts/runtime/vllm-router",
+    "version": "0.1.15",
+    "cache_threshold": 1.0,
+    "balance_abs_threshold": 0,
+    "balance_rel_threshold": 1.0,
+    "library_sha256": "30644ad292b43f77f893fc6773ce606ae7a9bdbf43d21615d1c8d52d67db257a",
+    "load_accounting_manifest": "/workspace/artifacts/runtime/vllm-router/load-accounting.json",
+    "pools": {
+      "ascend-musa": {
+        "port": 18601,
+        "metrics_port": 18602,
+        "backend": "ascend-musa",
+        "nodes": [
+          "ascend910c-01"
+        ]
+      },
+      "musa-iluvatar": {
+        "port": 18603,
+        "metrics_port": 18604,
+        "backend": "musa-iluvatar",
+        "nodes": [
+          "s5000-02"
+        ]
+      },
+      "ascend-iluvatar": {
+        "port": 18605,
+        "metrics_port": 18606,
+        "backend": "ascend-iluvatar",
+        "nodes": [
+          "ascend910c-02"
+        ]
+      }
+    }
+  },
+  "backends": {
+    "ascend-musa": {
+      "model": "Qwen3-14B",
+      "base_url": "http://192.168.162.23:18230/v1",
+      "health_path": "/health",
+      "verify_model_identity": true
+    },
+    "musa-iluvatar": {
+      "model": "Qwen3-14B",
+      "base_url": "http://192.168.162.96:18297/v1",
+      "health_path": "/health",
+      "verify_model_identity": true
+    },
+    "ascend-iluvatar": {
+      "model": "Qwen3-14B",
+      "base_url": "http://192.168.162.24:18240/v1",
+      "health_path": "/health",
+      "verify_model_identity": true
+    }
+  },
+  "services": {
+    "ascend-stage0": {
+      "node": "ascend910c-01",
+      "container": "heteroserve-ascend-w4",
+      "driver": "external",
+      "description": "Existing cross-vendor PP rank; managed by heterogeneous_compute/manage.py"
+    },
+    "ascend-stage1": {
+      "node": "ascend910c-02",
+      "container": "heteroserve-ascend-w4",
+      "driver": "external",
+      "description": "Existing cross-vendor PP rank; managed by heterogeneous_compute/manage.py"
+    },
+    "musa-stage0": {
+      "node": "s5000-01",
+      "container": "heteroserve-musa",
+      "driver": "external",
+      "description": "Existing cross-vendor PP rank; managed by heterogeneous_compute/manage.py"
+    },
+    "musa-stage1": {
+      "node": "s5000-02",
+      "container": "heteroserve-musa-pp",
+      "driver": "external",
+      "description": "Existing cross-vendor PP rank; managed by heterogeneous_compute/manage.py"
+    },
+    "iluvatar-stage0": {
+      "node": "iluvatar150-01",
+      "container": "heteroserve-iluvatar",
+      "driver": "external",
+      "description": "Existing cross-vendor PP rank; managed by heterogeneous_compute/manage.py"
+    },
+    "iluvatar-stage1": {
+      "node": "iluvatar150-02",
+      "container": "heteroserve-iluvatar-pp",
+      "driver": "external",
+      "description": "Existing cross-vendor PP rank; managed by heterogeneous_compute/manage.py"
+    },
+    "router-ascend-musa": {
+      "node": "iluvatar150-02",
+      "container": "heteroserve-iluvatar-pp",
+      "driver": "router",
+      "router_pool": "ascend-musa"
+    },
+    "router-musa-iluvatar": {
+      "node": "iluvatar150-02",
+      "container": "heteroserve-iluvatar-pp",
+      "driver": "router",
+      "router_pool": "musa-iluvatar"
+    },
+    "router-ascend-iluvatar": {
+      "node": "iluvatar150-02",
+      "container": "heteroserve-iluvatar-pp",
+      "driver": "router",
+      "router_pool": "ascend-iluvatar"
+    },
+    "gateway": {
+      "node": "iluvatar150-02",
+      "container": "heteroserve-iluvatar-pp",
+      "driver": "gateway"
+    },
+    "admission": {
+      "node": "iluvatar150-02",
+      "container": "heteroserve-iluvatar-pp",
+      "driver": "haproxy"
+    }
+  },
+  "routing_alias": "heterogeneous",
+  "workers": {
+    "ascend-musa-pp-01": {
+      "base_url": "http://192.168.162.23:18230/v1",
+      "model": "Qwen3-14B",
+      "node": "ascend910c-01",
+      "devices": [
+        0,
+        1
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/ascend_musa.json",
+      "instance": null,
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "ascend910c-01",
+          "devices": [
+            0,
+            1
+          ]
+        },
+        {
+          "node": "s5000-01",
+          "devices": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    "ascend-musa-pp-02": {
+      "base_url": "http://192.168.162.23:18231/v1",
+      "model": "Qwen3-14B",
+      "node": "ascend910c-01",
+      "devices": [
+        2,
+        3
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/ascend_musa.json",
+      "instance": "pp-02",
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "ascend910c-01",
+          "devices": [
+            2,
+            3
+          ]
+        },
+        {
+          "node": "s5000-01",
+          "devices": [
+            2,
+            3
+          ]
+        }
+      ]
+    },
+    "ascend-musa-pp-03": {
+      "base_url": "http://192.168.162.23:18232/v1",
+      "model": "Qwen3-14B",
+      "node": "ascend910c-01",
+      "devices": [
+        10,
+        11
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/ascend_musa.json",
+      "instance": "pp-03",
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "ascend910c-01",
+          "devices": [
+            10,
+            11
+          ]
+        },
+        {
+          "node": "s5000-01",
+          "devices": [
+            4,
+            5
+          ]
+        }
+      ]
+    },
+    "ascend-musa-pp-04": {
+      "base_url": "http://192.168.162.23:18233/v1",
+      "model": "Qwen3-14B",
+      "node": "ascend910c-01",
+      "devices": [
+        12,
+        13
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/ascend_musa.json",
+      "instance": "pp-04",
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "ascend910c-01",
+          "devices": [
+            12,
+            13
+          ]
+        },
+        {
+          "node": "s5000-01",
+          "devices": [
+            6,
+            7
+          ]
+        }
+      ]
+    },
+    "musa-iluvatar-pp-01": {
+      "base_url": "http://192.168.162.96:18297/v1",
+      "model": "Qwen3-14B",
+      "node": "s5000-02",
+      "devices": [
+        0,
+        1
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/musa_iluvatar_flagcx.json",
+      "instance": null,
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "s5000-02",
+          "devices": [
+            0,
+            1
+          ]
+        },
+        {
+          "node": "iluvatar150-02",
+          "devices": [
+            0,
+            1
+          ]
+        }
+      ]
+    },
+    "musa-iluvatar-pp-02": {
+      "base_url": "http://192.168.162.96:18298/v1",
+      "model": "Qwen3-14B",
+      "node": "s5000-02",
+      "devices": [
+        2,
+        3
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/musa_iluvatar_flagcx.json",
+      "instance": "pp-02",
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "s5000-02",
+          "devices": [
+            2,
+            3
+          ]
+        },
+        {
+          "node": "iluvatar150-02",
+          "devices": [
+            8,
+            9
+          ]
+        }
+      ]
+    },
+    "musa-iluvatar-pp-03": {
+      "base_url": "http://192.168.162.96:18299/v1",
+      "model": "Qwen3-14B",
+      "node": "s5000-02",
+      "devices": [
+        4,
+        5
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/musa_iluvatar_flagcx.json",
+      "instance": "pp-03",
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "s5000-02",
+          "devices": [
+            4,
+            5
+          ]
+        },
+        {
+          "node": "iluvatar150-02",
+          "devices": [
+            4,
+            5
+          ]
+        }
+      ]
+    },
+    "musa-iluvatar-pp-04": {
+      "base_url": "http://192.168.162.96:18300/v1",
+      "model": "Qwen3-14B",
+      "node": "s5000-02",
+      "devices": [
+        6,
+        7
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/musa_iluvatar_flagcx.json",
+      "instance": "pp-04",
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "s5000-02",
+          "devices": [
+            6,
+            7
+          ]
+        },
+        {
+          "node": "iluvatar150-02",
+          "devices": [
+            6,
+            7
+          ]
+        }
+      ]
+    },
+    "ascend-iluvatar-pp-01": {
+      "base_url": "http://192.168.162.24:18240/v1",
+      "model": "Qwen3-14B",
+      "node": "ascend910c-02",
+      "devices": [
+        0,
+        1
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/ascend_iluvatar.json",
+      "instance": null,
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "ascend910c-02",
+          "devices": [
+            0,
+            1
+          ]
+        },
+        {
+          "node": "iluvatar150-01",
+          "devices": [
+            8,
+            9
+          ]
+        }
+      ]
+    },
+    "ascend-iluvatar-pp-02": {
+      "base_url": "http://192.168.162.24:18241/v1",
+      "model": "Qwen3-14B",
+      "node": "ascend910c-02",
+      "devices": [
+        2,
+        3
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/ascend_iluvatar.json",
+      "instance": "pp-02",
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "ascend910c-02",
+          "devices": [
+            2,
+            3
+          ]
+        },
+        {
+          "node": "iluvatar150-01",
+          "devices": [
+            6,
+            7
+          ]
+        }
+      ]
+    },
+    "ascend-iluvatar-pp-03": {
+      "base_url": "http://192.168.162.24:18242/v1",
+      "model": "Qwen3-14B",
+      "node": "ascend910c-02",
+      "devices": [
+        4,
+        5
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/ascend_iluvatar.json",
+      "instance": "pp-03",
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "ascend910c-02",
+          "devices": [
+            4,
+            5
+          ]
+        },
+        {
+          "node": "iluvatar150-01",
+          "devices": [
+            10,
+            11
+          ]
+        }
+      ]
+    },
+    "ascend-iluvatar-pp-04": {
+      "base_url": "http://192.168.162.24:18243/v1",
+      "model": "Qwen3-14B",
+      "node": "ascend910c-02",
+      "devices": [
+        6,
+        7
+      ],
+      "executor": "cross-vendor",
+      "profile": "heterogeneous_compute/configs/ascend_iluvatar.json",
+      "instance": "pp-04",
+      "dtype": "bfloat16",
+      "tp": 2,
+      "pp": 2,
+      "execution_mode": "piecewise_mlp_graph",
+      "placements": [
+        {
+          "node": "ascend910c-02",
+          "devices": [
+            6,
+            7
+          ]
+        },
+        {
+          "node": "iluvatar150-01",
+          "devices": [
+            12,
+            13
+          ]
+        }
+      ]
+    }
+  },
+  "scope": "HAProxy admission -> Gateway uniform random cross-vendor pool -> official cache_aware vLLM Router -> project TP2/PP2 executor using vendor operators; no Embedding"
+}

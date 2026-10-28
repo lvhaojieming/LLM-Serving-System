@@ -1,5 +1,46 @@
 # 异构原生 AWQ 接入
 
+## 当前跨厂商 TP2/PP2 整系统入口
+
+当前六节点部署使用 `configs/cross_vendor_serving.json`，入口为
+`http://192.168.162.60:18600/v1/chat/completions`，统一模型别名
+`heterogeneous`。三个池别名分别为 `ascend-musa`、`musa-iluvatar`、
+`ascend-iluvatar`，每池四个跨厂商 TP2/PP2 实例，共12实例、48芯片。
+后端为 Qwen3-14B BF16；跨厂商调度与通信使用项目适配，本地 TP、模型与
+attention 算子使用厂商实现，图捕获范围为 MLP 和本地 TP。
+
+请求链路为 HAProxy 官方有界队列 → Gateway 等概率随机选组合池 →
+该池官方 vLLM Router `cache_aware` → 跨厂商实例，不执行 Embedding。
+沿用512入口在途、128等待、10秒排队上限；Gateway内部预算640、连接池672。
+容器 CPU、内存、PID 限制保持关闭。
+
+```powershell
+python heterogeneous_compute/serving.py sync --ssh-config "$env:USERPROFILE/.ssh/config" --config heterogeneous_compute/configs/cross_vendor_serving.json --only router gateway admission
+python heterogeneous_compute/serving.py start --ssh-config "$env:USERPROFILE/.ssh/config" --config heterogeneous_compute/configs/cross_vendor_serving.json --only router gateway admission
+python heterogeneous_compute/serving.py verify --ssh-config "$env:USERPROFILE/.ssh/config" --config heterogeneous_compute/configs/cross_vendor_serving.json
+```
+
+模型生命周期继续由 `heterogeneous_compute/manage.py` 管理，Serving 中的
+`external` 服务只登记节点和容器。接入层启停不启动或停止这些模型。
+入口验收覆盖普通 Chat、流式 Chat、并发分发、12实例直接生成及最终注册集合。
+官方 Router 补入的空 stop、false logprobs 和可选 null 字段按默认语义处理；
+实际请求非 greedy、logprobs 或自定义 stop 仍拒绝。
+
+后端复用同一 token 队列提供 Completions 和 Chat SSE，包含结束标志、可选
+usage 以及客户端断开后的取消。`/metrics` 兼容既有采集器的
+`vllm:num_requests_running`、`vllm:num_requests_waiting`、
+`vllm:request_success_total`、prompt/generation token计数。running表示已接纳的
+活动请求，waiting表示模型准入队列；不能将running当作等待数。
+
+正式 mixed 扫档配置为 `configs/cross_vendor_system_benchmark.json`，保留
+18/24/32/48/64 req/s、150秒请求总超时和100ms TPOT门槛。运行方式仍为现有
+`benchmark.py --system-config ... --result-dir ...`，配套复用六节点采集器和
+`.60` 请求观察器。只验收部署时，将运行配置的 `run_mode` 设为 `preflight`：
+完成全部48 rank/芯片映射、入口 mixed 流、三池覆盖、采集时效和排空检查后退出，
+不会产生容量结论。控制身份、配置、命令和结果保留在服务端。
+
+下面的 AWQ 配置与测试记录保留为此前实验说明。
+
 `serving.py` 复用三个厂商的独立原生 AWQ 实例、现有 Gateway 和官方
 `vllm-router==0.1.15`。配置集中在 `configs/serving.json`，不创建 K8s 集群或容器。
 当前 `awq` 完整路径为：HAProxy 官方有界排队 → 实际 Embedding → 一级等概率随机选厂商池 →

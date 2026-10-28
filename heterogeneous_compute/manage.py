@@ -104,6 +104,20 @@ def processes(ssh_config, spec, remote_config=CONFIG):
     return rows
 
 
+def signal_process(ssh_config, spec, row, signal_name):
+    """An exiting rank may disappear between inspection and signalling."""
+    program = "import os,signal\nfrom pathlib import Path\npid="+repr(row['pid'])+"\nexpected="+repr(row['argv'])+"\n"+'''
+try:
+    actual=Path('/proc',str(pid),'cmdline').read_bytes().decode().split(chr(0))
+    if actual and actual[-1]=='':actual.pop()
+    if actual==expected:os.kill(pid,getattr(signal,SIGNAL_NAME))
+except (FileNotFoundError,ProcessLookupError):
+    pass
+'''.replace('SIGNAL_NAME',repr(signal_name))
+    remote(ssh_config, spec['ssh_alias'], shlex.join([
+        'docker','exec',spec['container'],'python3','-c',program]))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=['start', 'status', 'stop', 'snapshot', 'probe', 'stop-probe', 'abort', 'benchmark'])
@@ -153,13 +167,11 @@ def main():
         # making progress. Select only this config's exact Python processes.
         for spec, rows in zip(config['stages'], states):
             for row in rows:
-                remote(args.ssh_config, spec['ssh_alias'], shlex.join([
-                    'docker', 'exec', spec['container'], 'kill', '-TERM', str(row['pid'])]))
+                signal_process(args.ssh_config, spec, row, 'SIGTERM')
         time.sleep(1)
         for spec in config['stages']:
             for row in processes(args.ssh_config, spec, remote_config):
-                remote(args.ssh_config, spec['ssh_alias'], shlex.join([
-                    'docker', 'exec', spec['container'], 'kill', '-KILL', str(row['pid'])]))
+                signal_process(args.ssh_config, spec, row, 'SIGKILL')
         print('Only the selected configuration processes were stopped; containers retained.')
     elif args.action == 'stop-probe':
         for spec, rows in zip(config['stages'], states):
@@ -180,6 +192,31 @@ def main():
     else:
         if any(states):
             raise SystemExit('Pipeline processes already exist; reuse or drain them before starting.')
+        if args.action == 'start':
+            for stage, spec in enumerate(config['stages']):
+                ports = [config['execution']['tp_port']]
+                if stage == 0:
+                    ports += [config['execution']['pp_port'] + lane for lane in range(config['tp'])]
+                    if config['execution'].get('mode') == 'http':
+                        ports.append(config['execution']['api_port'])
+                program = "import socket,time\nports="+repr(ports)+"\nhost="+repr(spec['host'])+"\n"+'''
+deadline=time.monotonic()+30
+while True:
+    sockets=[]
+    try:
+        for port in ports:
+            sock=socket.socket();sockets.append(sock)
+            sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+            sock.bind((host,port))
+        break
+    except OSError:
+        if time.monotonic()>=deadline:raise
+        time.sleep(.5)
+    finally:
+        for sock in sockets:sock.close()
+'''
+                remote(args.ssh_config, spec['ssh_alias'], shlex.join([
+                    'docker', 'exec', spec['container'], 'python3', '-c', program]))
         if args.action == 'start' and config['execution'].get('transport') == 'flagcx':
             expected = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
             for stage, spec in enumerate(config['stages']):

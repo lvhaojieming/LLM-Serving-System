@@ -35,6 +35,30 @@ def save(path,value):
     temporary.replace(path)
 
 
+def validate_cross_vendor_ranks(serving,snapshots):
+    """Match configured placements to real executor rank processes, not vLLM CLI defaults."""
+    expected=set()
+    for worker in generation_workers(serving).values():
+        if worker.get('executor')!='cross-vendor':continue
+        port=urlsplit(worker['base_url']).port
+        for stage,placement in enumerate(worker['placements']):
+            for lane,device in enumerate(placement['devices']):
+                expected.add((placement['node'],port,stage,lane,device))
+    if not expected:return
+    observed=[]
+    for node,snapshot in snapshots.items():
+        for proc in snapshot.get('process',{}).get('processes',[]):
+            executor=proc.get('executor',{})
+            if executor.get('kind')!='cross-vendor':continue
+            params=proc.get('inference_parameters',{})
+            observed.append((node,int(params.get('--port',0)),executor['stage'],
+                             executor['lane'],executor['physical_device']))
+            if params.get('--tp-communicator')!='vllm':
+                raise RuntimeError('Cross-vendor executor is not using the configured official local TP')
+    if len(observed)!=len(set(observed)) or set(observed)!=expected:
+        raise RuntimeError('Cross-vendor rank/device placement differs from the configured deployment')
+
+
 def percentile(values,q):
     if not values:return None
     values=sorted(values);x=(len(values)-1)*q;i=int(x);j=min(i+1,len(values)-1)
@@ -395,6 +419,7 @@ class Experiment:
             if any(any(router.get(key)!=value for key,value in expected_router.items()) for router in routers.values()):
                 raise RuntimeError('L2 Router policy/parameters differ from the frozen experiment configuration')
         vendors=set();direct=[]
+        validate_cross_vendor_ranks(self.serving,r.latest)
         self.identities={};self.process_identities={}
         for node in r.nodes:
             snapshot=r.latest[node];c=snapshot['container'];self.identities[node]=(c['id'],c['restart_count'],c['started_at'])
@@ -405,7 +430,9 @@ class Experiment:
             url=w['base_url'].removesuffix('/v1')
             if url not in self.expected:continue
             vendor='ascend' if w['node'].startswith('ascend') else 'musa' if w['node'].startswith('s5000') else 'iluvatar'
-            vendors.add(vendor)
+            placements=w.get('placements',[{'node':w['node']}])
+            vendors.update('ascend' if p['node'].startswith('ascend') else 'musa'
+                           if p['node'].startswith('s5000') else 'iluvatar' for p in placements)
             row=await self.one(session,[{'role':'user','content':'What is 2+3? Reply with only the digit.'}],-1,time.time(),'direct-smoke',url,w['model'],'5',16)
             row['worker']=url;row['vendor']=vendor;direct.append(row)
             if not row['success']:raise RuntimeError('Direct generation failed: '+name+' '+str(row.get('error')))
@@ -432,7 +459,8 @@ class Experiment:
                     raise RuntimeError('Running model process does not use the configured TP/PP: '+node)
                 if int(parameters.get('--max-model-len',0))<required_context:
                     raise RuntimeError('Running model context is too short for frozen workload: '+node)
-                if node.startswith('s5000') and not parameters.get('--disable-custom-all-reduce'):
+                if (node.startswith('s5000') and proc.get('executor',{}).get('kind')!='cross-vendor'
+                        and not parameters.get('--disable-custom-all-reduce')):
                     raise RuntimeError('MUSA process is not using the required standard MCCL path')
         r.phase('building_workload',workload=self.config.get('workload',{'name':'fixed'}))
         from transformers import AutoTokenizer
@@ -645,6 +673,11 @@ class Experiment:
             timeline=asyncio.create_task(self.timeline())
             try:
                 await self.preflight(session);await self.drain()
+                if self.config.get('run_mode')=='preflight':
+                    save(self.directory/'summary.json',{'status':'preflight_complete',
+                         'healthy_workers':len(self.expected),'all_devices_accepted':self.frozen['all_devices_accepted'],
+                         'scope':'Deployment, live rank identity, mixed workload, monitoring and drain checks only; no capacity claim'})
+                    return
                 reference=getattr(self,'search_reference_result',None)
                 lower=reference['rate'] if reference else 0;upper=None
                 sweep=self.config.get('run_mode','full')=='sweep'

@@ -574,8 +574,44 @@ def admission_metrics(lifecycle, queued):
         elif isinstance(value, dict):
             values.update({f'{key}_{name}': number for name, number in value.items()
                            if isinstance(number, (int, float))})
-    return ''.join(f'heteroserve_pp_{key} {int(value) if isinstance(value, bool) else value}\n'
+    text = ''.join(f'heteroserve_pp_{key} {int(value) if isinstance(value, bool) else value}\n'
                    for key, value in values.items())
+    # Existing collectors consume these gauges/counters for every backend.
+    aliases = {'num_requests_running': 'active_requests',
+               'request_success_total': 'completed',
+               'generation_tokens_total': 'generated_tokens',
+               'prompt_tokens_total': 'prompt_tokens_total'}
+    text += f'vllm:num_requests_waiting {queued}\n'
+    text += ''.join(f'vllm:{name} {lifecycle[key]}\n' for name, key in aliases.items()
+                    if key in lifecycle)
+    return text
+
+
+async def completion_events(future, item, prompt_tokens, lifecycle, chat=False, include_usage=False):
+    """Expose the same executor token queue through either OpenAI SSE shape."""
+    import asyncio
+    identity = ('chatcmpl-' if chat else 'cmpl-') + item['id']
+    kind = 'chat.completion.chunk' if chat else 'text_completion'
+    try:
+        while True:
+            event = await asyncio.to_thread(future.token_events.get)
+            if event is None:
+                break
+            choice = (dict(index=event['index'], delta=dict(content=event['text']),
+                           finish_reason=event.get('finish_reason')) if chat else event)
+            yield 'data: '+json.dumps(dict(id=identity, object=kind, created=int(time.time()),
+                model='Qwen3-14B', choices=[choice]), ensure_ascii=False)+'\n\n'
+        result = await asyncio.wrap_future(future)
+        lifecycle['completed'] += 1
+        if include_usage:
+            generated = len(result['generated_token_ids'])
+            yield 'data: '+json.dumps(dict(id=identity, object=kind, created=int(time.time()),
+                model='Qwen3-14B', choices=[], usage=dict(prompt_tokens=prompt_tokens,
+                    completion_tokens=generated, total_tokens=prompt_tokens+generated)))+'\n\n'
+        yield 'data: [DONE]\n\n'
+    finally:
+        if not future.done():
+            future.cancel()
 
 
 def create_admission(config, lane, tokenizer):
@@ -584,7 +620,7 @@ def create_admission(config, lane, tokenizer):
     server = None
     lifecycle = {'draining': False, 'completed': 0, 'active_requests': 0,
                  'inflight_batches': 0, 'kv_owners': 0, 'max_batch_size': 0,
-                 'max_inflight_batches': 0, 'admitted_requests': 0}
+                 'max_inflight_batches': 0, 'admitted_requests': 0, 'prompt_tokens_total': 0}
     if lane == 0 and config['execution'].get('mode') == 'http':
         import asyncio
         import uvicorn
@@ -612,14 +648,18 @@ def create_admission(config, lane, tokenizer):
                 raise HTTPException(503, 'PP service is draining')
             if body.get('model', 'Qwen3-14B') != 'Qwen3-14B':
                 raise HTTPException(400, 'Unknown model')
-            if body.get('temperature', 0) != 0 or body.get('n', 1) != 1:
+            if body.get('temperature') not in (None, 0) or body.get('n') not in (None, 1):
                 raise HTTPException(400, 'Only one greedy completion is supported')
-            if body.get('logprobs') is not None or body.get('stop') is not None:
+            if body.get('logprobs') not in (None, False) or body.get('stop') not in (None, []):
                 raise HTTPException(400, 'logprobs and custom stop strings are unsupported')
             prompt = body.get('prompt')
             if not isinstance(prompt, str):
                 raise HTTPException(400, 'A single text prompt is required')
-            maximum = body.get('max_tokens', 32)
+            maximum = body.get('max_tokens')
+            if maximum is None:
+                maximum = body.get('max_completion_tokens')
+            if maximum is None:
+                maximum = 32
             output_limit = config['execution'].get('max_output_tokens', 128)
             if type(maximum) is not int or not 1 <= maximum <= output_limit:
                 raise HTTPException(400, f'max_tokens must be between 1 and {output_limit}')
@@ -634,6 +674,7 @@ def create_admission(config, lane, tokenizer):
                 admission.put_nowait((item, future))
             except queue.Full:
                 raise HTTPException(429, 'PP admission queue is full')
+            lifecycle['prompt_tokens_total'] += len(ids)
             if not body.get('stream', False):
                 result = await asyncio.wrap_future(future)
                 lifecycle['completed'] += 1
@@ -643,32 +684,18 @@ def create_admission(config, lane, tokenizer):
                     usage=dict(prompt_tokens=len(ids), completion_tokens=len(result['generated_token_ids']),
                                total_tokens=len(ids)+len(result['generated_token_ids'])))
 
-            async def events():
-                try:
-                    while True:
-                        event = await asyncio.to_thread(future.token_events.get)
-                        if event is None:
-                            break
-                        yield 'data: '+json.dumps(dict(id='cmpl-'+item['id'], object='text_completion',
-                            created=int(time.time()), model='Qwen3-14B', choices=[event]), ensure_ascii=False)+'\n\n'
-                    result = await asyncio.wrap_future(future)
-                    lifecycle['completed'] += 1
-                    if body.get('stream_options', {}).get('include_usage', False):
-                        yield 'data: '+json.dumps(dict(id='cmpl-'+item['id'], choices=[],
-                            usage=dict(prompt_tokens=len(ids), completion_tokens=len(result['generated_token_ids']),
-                                       total_tokens=len(ids)+len(result['generated_token_ids']))))+'\n\n'
-                    yield 'data: [DONE]\n\n'
-                finally:
-                    if not future.done():
-                        future.cancel()
-            return StreamingResponse(events(), media_type='text/event-stream')
+            return StreamingResponse(completion_events(future, item, len(ids), lifecycle,
+                include_usage=(body.get('stream_options') or {}).get('include_usage', False)),
+                media_type='text/event-stream')
 
         @app.post('/v1/chat/completions')
         async def chat(body: dict):
             if lifecycle['draining']:
                 raise HTTPException(503, 'PP service is draining')
-            if body.get('stream', False) or body.get('temperature', 0) != 0:
-                raise HTTPException(400, 'Experimental PP accepts non-streaming greedy requests')
+            if body.get('temperature') not in (None, 0) or body.get('n') not in (None, 1):
+                raise HTTPException(400, 'Only one greedy completion is supported')
+            if body.get('logprobs') not in (None, False) or body.get('stop') not in (None, []):
+                raise HTTPException(400, 'logprobs and custom stop strings are unsupported')
             if body.get('model', 'Qwen3-14B') != 'Qwen3-14B':
                 raise HTTPException(400, 'Unknown model')
             messages = body.get('messages')
@@ -676,7 +703,11 @@ def create_admission(config, lane, tokenizer):
                     or any(not isinstance(m, dict) or m.get('role') not in {'user', 'system', 'assistant'}
                            or not isinstance(m.get('content'), str) for m in messages)):
                 raise HTTPException(400, 'Text messages required')
-            maximum = body.get('max_tokens', 32)
+            maximum = body.get('max_tokens')
+            if maximum is None:
+                maximum = body.get('max_completion_tokens')
+            if maximum is None:
+                maximum = 32
             output_limit = config['execution'].get('max_output_tokens', 128)
             if type(maximum) is not int or not 1 <= maximum <= output_limit:
                 raise HTTPException(400, f'max_tokens must be between 1 and {output_limit}')
@@ -685,12 +716,20 @@ def create_admission(config, lane, tokenizer):
             if len(ids) + maximum > config['execution']['max_model_len']:
                 raise HTTPException(400, 'Request exceeds configured context bound')
             future = concurrent.futures.Future()
+            if body.get('stream', False):
+                future.token_events = queue.Queue()
             item = dict(id=str(uuid.uuid4()), messages=messages, max_tokens=maximum,
-                        prompt_token_ids=ids, prompt=json.dumps(messages, ensure_ascii=False))
+                        prompt_token_ids=ids, prompt=json.dumps(messages, ensure_ascii=False),
+                        ignore_eos=bool(body.get('ignore_eos', False)))
             try:
                 admission.put_nowait((item, future))
             except queue.Full:
                 raise HTTPException(429, 'PP admission queue is full')
+            lifecycle['prompt_tokens_total'] += len(ids)
+            if body.get('stream', False):
+                return StreamingResponse(completion_events(future, item, len(ids), lifecycle, chat=True,
+                    include_usage=(body.get('stream_options') or {}).get('include_usage', False)),
+                    media_type='text/event-stream')
             result = await asyncio.wrap_future(future)
             lifecycle['completed'] += 1
             return dict(id='chatcmpl-'+item['id'], object='chat.completion', created=int(time.time()),

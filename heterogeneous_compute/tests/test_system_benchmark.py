@@ -22,6 +22,22 @@ from heterogeneous_compute.benchmark_telemetry import (
 SLO={'ttft_seconds':2,'tpot_seconds':.1,'e2e_seconds':20}
 
 
+def test_cross_vendor_preflight_requires_every_rank_on_its_physical_chip():
+    from heterogeneous_compute.system_benchmark import validate_cross_vendor_ranks
+    serving={'workers':{'one':{'executor':'cross-vendor','base_url':'http://head:18230/v1',
+        'placements':[{'node':'ascend-01','devices':[2,3]},{'node':'musa-01','devices':[0,1]}]}}}
+    snapshots={}
+    for stage,placement in enumerate(serving['workers']['one']['placements']):
+        snapshots[placement['node']]={'process':{'processes':[
+            {'executor':{'kind':'cross-vendor','stage':stage,'lane':lane,'physical_device':chip},
+             'inference_parameters':{'--port':'18230','--tp-communicator':'vllm'}}
+            for lane,chip in enumerate(placement['devices'])]}}
+    validate_cross_vendor_ranks(serving,snapshots)
+    snapshots['musa-01']['process']['processes'][0]['executor']['physical_device']=7
+    with pytest.raises(RuntimeError,match='placement'):
+        validate_cross_vendor_ranks(serving,snapshots)
+
+
 def test_pp_pool_inventory_and_receiver_cover_both_nodes():
     serving={'workers':{'replica':{'base_url':'http://head:18323/v1',
         'node':'head','devices':[0,1],'placements':[

@@ -444,6 +444,10 @@ def local(config, action, name):
     directory = ROOT / config["result_dir"] / name
     marker = directory / "process.json"
     service = config["services"][name]
+    if service['driver'] == 'external':
+        print(json.dumps({'service': name, 'externally_managed': True,
+                          'container': service['container']}))
+        return
     if action=='start' and service['driver']=='router':validate_router_runtime(router_configs(config)[name])
     if action == "start" and config.get("legacy_baselines_enabled") is False:
         old = legacy_processes()
@@ -587,7 +591,8 @@ def verify(config):
     coverage_complete = ready["expert_coverage_complete"] and registered_healthy == expected
     tests = []
     direct_results = verify_workers(config)
-    for model in [n for n, spec in config["backends"].items() if spec.get("task", "generate") == "generate"] + ["awq"]:
+    routing_alias = config.get('routing_alias', 'awq')
+    for model in [n for n, spec in config["backends"].items() if spec.get("task", "generate") == "generate"] + [routing_alias]:
         payload = {"model": model, "messages": [{"role": "user", "content": "What is 2+3? Reply with only the digit."}],
                    "max_tokens": 16, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}}
         response = http(base + "/v1/chat/completions", payload, timeout=120)
@@ -614,7 +619,7 @@ def verify(config):
                 r'^vllm_router_processed_requests_total\{worker="([^"]+)"\}\s+([0-9.eE+\-]+)', raw, re.M)})
         return result
     before = counters()
-    def pooled(_, model="awq"):
+    def pooled(_, model=routing_alias):
         response = http(base + "/v1/chat/completions", {"model": model, "messages": [{"role": "user", "content": "What is 2+3? Reply with only the digit."}],
             "max_tokens": 16, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}}, timeout=120)
         assert response["choices"][0]["message"]["content"].strip() == "5"
@@ -636,6 +641,13 @@ def verify(config):
             explicit_coverage_requests += count
         after = counters()
         dispatched = {worker: after.get(worker, 0) - before.get(worker, 0) for worker in expected}
+    # Startup health can change during the real generation checks. Require full
+    # live coverage at the end, instead of reporting an earlier warmup snapshot.
+    ready = http(base + '/ready')
+    registered_healthy = {w['url'] for spec in routers.values()
+                          for w in http(f"http://{spec['host']}:{spec['port']}/workers")['workers']
+                          if w['is_healthy']}
+    coverage_complete = ready['expert_coverage_complete'] and registered_healthy == expected
     if all(spec["policy"] == "round_robin" for spec in routers.values()):
         assert all(dispatched[url] > 0 for url in registered_healthy), dispatched
     embedding_result = {"skipped": True, "reason": "Embedding disabled in the active configuration"}
@@ -658,7 +670,7 @@ def verify(config):
                   "pooled_requests": pooled_count, "explicit_coverage_requests": explicit_coverage_requests,
                   "concurrency": 4, "worker_dispatch_deltas": dispatched},
               "embedding": embedding_result,
-              "scope": "Functional acceptance only; no throughput/stability/Kubernetes or cross-vendor PP claim",
+              "scope": "Gateway/official-Router functional acceptance; backend compute scope is retained in worker metadata; not a capacity or long-term stability test",
               "completed_at": datetime.now(timezone.utc).isoformat()}
     save(ROOT / config["result_dir"] / "acceptance.json", report)
     print(json.dumps(report, ensure_ascii=False))
