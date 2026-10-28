@@ -22,6 +22,32 @@ from heterogeneous_compute.benchmark_telemetry import (
 SLO={'ttft_seconds':2,'tpot_seconds':.1,'e2e_seconds':20}
 
 
+def test_pp_pool_inventory_and_receiver_cover_both_nodes():
+    serving={'workers':{'replica':{'base_url':'http://head:18323/v1',
+        'node':'head','devices':[0,1],'placements':[
+            {'node':'head','devices':[0,1]}, {'node':'worker','devices':[6,7]}]}},
+        'router':{'pools':{'ascend':{'nodes':['head'],'backend':'ascend-fp16'}}},
+        'services':{'gateway':{'node':'gateway'}}}
+    healthy=['http://head:18323']
+    assert pool_device_inventory(serving,healthy)=={'ascend':{
+        ('head',0),('head',1),('worker',6),('worker',7)}}
+    with patch('heterogeneous_compute.system_benchmark.ThreadingHTTPServer'):
+        receiver=Receiver(Path('.'),'http://127.0.0.1:18890',serving)
+    assert receiver.nodes=={'head','worker','gateway'}
+
+
+def test_gateway_generation_alias_can_omit_embedding():
+    from heterogeneous_compute.serving import gateway_config
+    serving={'routing_alias':'fp16','gateway':{'port':18600,'address':'localhost'},
+        'workers':{'replica':{'base_url':'http://head:18323/v1','node':'head'}},
+        'backends':{'ascend-fp16':{'model':'Qwen3-14B','base_url':'http://head:18323/v1'}},
+        'router':{'host':'127.0.0.1','pools':{
+            'ascend':{'port':18601,'backend':'ascend-fp16','nodes':['head']}}}}
+    routing=gateway_config(serving)
+    assert routing['random_routes']=={'fp16':['ascend-fp16']}
+    assert not routing.get('route_embeddings')
+
+
 def test_queue_observation_policy_keeps_slo_and_resource_gates():
     c={'minimum_success_ratio':.99,'minimum_slo_ratio':.95}
     r={'load_valid':True,'resource_stable':True,'queue_stable':False,'success_ratio':1,'slo_ratio':1}

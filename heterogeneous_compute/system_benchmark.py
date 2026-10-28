@@ -162,7 +162,8 @@ class Receiver:
     def __init__(self,directory,url,serving):
         self.directory=directory;self.latest={};self.history=[];self.routes={};self.network={};self.lock=threading.Lock()
         self.state={'phase':'waiting_for_collectors','finished':False,'time':time.time()}
-        nodes={w['node'] for w in generation_workers(serving).values()} | {serving['services']['gateway']['node']}
+        nodes={placement['node'] for w in generation_workers(serving).values()
+               for placement in w.get('placements', [w])} | {serving['services']['gateway']['node']}
         self.nodes=nodes
         self.gateway_node=serving['services']['gateway']['node']
         self.admission_enabled=bool(serving.get('admission'))
@@ -428,9 +429,9 @@ class Experiment:
                 if not parameters:continue
                 if parameters.get('--runner')=='pooling':continue
                 if int(parameters.get('--tensor-parallel-size',1))!=self.config['required_tp'] or int(parameters.get('--pipeline-parallel-size',1))!=self.config['required_pp']:
-                    raise RuntimeError('Running AWQ process does not use uniform TP2/PP1: '+node)
+                    raise RuntimeError('Running model process does not use the configured TP/PP: '+node)
                 if int(parameters.get('--max-model-len',0))<required_context:
-                    raise RuntimeError('Running AWQ context is too short for frozen workload: '+node)
+                    raise RuntimeError('Running model context is too short for frozen workload: '+node)
                 if node.startswith('s5000') and not parameters.get('--disable-custom-all-reduce'):
                     raise RuntimeError('MUSA process is not using the required standard MCCL path')
         r.phase('building_workload',workload=self.config.get('workload',{'name':'fixed'}))
@@ -712,15 +713,16 @@ class Experiment:
 
 
 def pool_device_inventory(serving,healthy_workers):
-    """Only devices of the frozen, healthy AWQ workers belong to a test pool."""
+    """Include every PP stage of the frozen, healthy generation workers."""
     healthy=set(healthy_workers);inventory={};matched=set()
     for name,router in router_configs(serving).items():
         pool=router.get('pool',name);devices=set()
         for worker in router_workers(serving,name).values():
             if worker['base_url'].removesuffix('/v1') not in healthy:continue
-            if not worker.get('devices'):raise ValueError('Frozen worker has no device inventory')
             matched.add(worker['base_url'].removesuffix('/v1'))
-            devices.update((worker['node'],int(device)) for device in worker['devices'])
+            for placement in worker.get('placements', [worker]):
+                if not placement.get('devices'):raise ValueError('Frozen worker has no device inventory')
+                devices.update((placement['node'],int(device)) for device in placement['devices'])
         if devices:inventory[pool]=devices
     if not healthy or matched!=healthy:raise ValueError('Frozen healthy worker device coverage is incomplete')
     return inventory

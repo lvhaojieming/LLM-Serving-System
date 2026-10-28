@@ -17,7 +17,9 @@ def run_native(config, spec, node, stage, directory, processes, save):
                '--host', node['host'], '--port', str(spec['api_port']), '--dtype', config['dtype'],
                '--tensor-parallel-size', '2', '--pipeline-parallel-size', '2',
                '--distributed-executor-backend', executor, '--enforce-eager', '--no-enable-prefix-caching',
-               '--max-model-len', '2048', '--max-num-seqs', '8', '--max-num-batched-tokens', '2048',
+               '--max-model-len', str(config.get('max_model_len', 2048)),
+               '--max-num-seqs', str(config.get('max_num_seqs', 8)),
+               '--max-num-batched-tokens', str(spec.get('max_num_batched_tokens', config.get('max_num_batched_tokens', 2048))),
                '--gpu-memory-utilization', '0.60', '--seed', str(config['benchmark']['seed']), *spec['engine_args']]
     if executor == 'mp':
         command += ['--nnodes', '2', '--node-rank', str(stage), '--master-addr', spec['nodes'][0]['host'],

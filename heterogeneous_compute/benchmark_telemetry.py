@@ -144,11 +144,12 @@ def process_sample():
             cmd = (d / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
             role = ('admission' if cmd.split(' ',1)[0].endswith('/haproxy') else
                     'gateway' if 'heteroserve.gateway' in cmd else 'router' if ('vllm_router.launch_router' in cmd or cmd.strip() == 'vllm::router') else
-                    'benchmark' if ('benchmark.py' in cmd or 'benchmark_telemetry.py' in cmd) else 'model' if 'serve ' in cmd else None)
+                    'benchmark' if ('benchmark.py' in cmd or 'benchmark_telemetry.py' in cmd) else
+                    'model' if ('serve ' in cmd or cmd.startswith(('ray::RayWorkerWrapper','ray::RayWorkerProc'))) else None)
             procs[int(d.name)] = dict(pid=int(d.name), ppid=int(stat[1]), role=role,
                 start_ticks=int(stat[19]), cpu_seconds=(int(stat[11])+int(stat[12]))/os.sysconf('SC_CLK_TCK'),
                 rss_bytes=int(stat[21])*os.sysconf('SC_PAGE_SIZE'), state=stat[0])
-            if role=='model':
+            if role=='model' and 'serve ' in cmd:
                 argv=shlex.split(cmd);parameters={}
                 for flag in ['--tensor-parallel-size','--pipeline-parallel-size','--port','--max-model-len','--served-model-name','--runner']:
                     if flag in argv and argv.index(flag)+1<len(argv):parameters[flag]=argv[argv.index(flag)+1]
@@ -433,7 +434,8 @@ def collect(config_path,node,central,max_seconds=86400):
     if not isinstance(gateway_metrics_timeout,(int,float)) or not 0<gateway_metrics_timeout<=15:
         raise ValueError('Gateway metrics timeout must be within (0, 15] seconds')
     gateway_metrics_url=f"http://127.0.0.1:{gateway_config(config)['port']}/metrics"
-    disabled_smi=False; started=time.monotonic(); failures=0
+    disabled_smi=node in config.get('telemetry',{}).get('skip_device_nodes',[])
+    started=time.monotonic(); failures=0
     pool=concurrent.futures.ThreadPoolExecutor(max_workers=12)
     while time.monotonic()-started<max_seconds:
         before=time.monotonic(); sample={'node':node,'vendor':vendor,'time':time.time(),'workers':{}}
@@ -507,7 +509,7 @@ def collect(config_path,node,central,max_seconds=86400):
         if node==gateway_node:
             sample['router_workers']=router_worker_snapshot(router_reports)
         if disabled_smi and 'device' not in sample:
-            sample['device']={'values':[],'unavailable':'First bounded SMI query timed out; not retried during this run'}
+            sample['device']={'values':[],'unavailable':'SMI disabled by configuration or after a bounded timeout; no retry during this run'}
         try:
             fetch(central+'/telemetry',sample)
         except Exception:

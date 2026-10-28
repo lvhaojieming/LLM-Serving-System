@@ -250,7 +250,7 @@ def gateway_config(config):
         for spec in routers.values():
             result["pools"][spec["backend"]].update(
                 base_url=f"http://{spec['host']}:{spec['port']}/v1", health_path="/readiness")
-        result["random_routes"] = {"awq": [r["backend"] for r in routers.values()]}
+        result["random_routes"] = {config.get("routing_alias", "awq"): [r["backend"] for r in routers.values()]}
         result.setdefault("random_route_health_seconds", 5)
         result["worker_registry"] = {"urls": [f"http://{r['host']}:{r['port']}/workers" for r in routers.values()]}
     else:

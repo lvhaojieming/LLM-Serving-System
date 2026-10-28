@@ -4,12 +4,17 @@ import importlib.util
 from pathlib import Path
 import unittest
 import shlex
+import tempfile
+from unittest.mock import Mock, patch
 
 
 MODULE = Path(__file__).resolve().parents[1]/'experiments/pp_baseline/manage.py'
 loader = importlib.util.spec_from_file_location('pp_baseline_manage', MODULE)
 manage = importlib.util.module_from_spec(loader)
 loader.loader.exec_module(manage)
+runner_loader = importlib.util.spec_from_file_location('pp_baseline_run_node', MODULE.with_name('run_node.py'))
+runner = importlib.util.module_from_spec(runner_loader)
+runner_loader.loader.exec_module(runner)
 
 
 def config():
@@ -22,6 +27,21 @@ def config():
 
 
 class ReplicaSelectionTests(unittest.TestCase):
+    def test_mixed_context_and_vendor_batch_budget_reach_native_cli(self):
+        cfg={'model_path':'/models/Qwen3-14B','model':'Qwen3-14B',
+             'dtype':'float16','benchmark':{'seed':20261010},
+             'max_model_len':4096,'max_num_batched_tokens':2048}
+        spec={'api_port':18397,'engine_args':[], 'max_num_batched_tokens':4096}
+        process=Mock(pid=123)
+        process.poll.return_value=1
+        with tempfile.TemporaryDirectory() as directory, patch.object(runner.subprocess,'Popen',return_value=process) as spawn:
+            with self.assertRaisesRegex(RuntimeError,'before readiness'):
+                runner.run_native(cfg,spec,{'host':'127.0.0.1'},0,Path(directory),[],lambda **kw:None)
+        argv=spawn.call_args.args[0]
+        self.assertEqual(argv[argv.index('--max-model-len')+1],'4096')
+        self.assertEqual(argv[argv.index('--max-num-batched-tokens')+1],'4096')
+        self.assertEqual(argv[argv.index('--pipeline-parallel-size')+1],'2')
+
     def test_resolved_replica_is_independent(self):
         original = config()
         before = copy.deepcopy(original)
