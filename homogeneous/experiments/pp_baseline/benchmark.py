@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
 import json
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -22,13 +23,19 @@ def main():
     config = json.loads(config_path.read_text())
     spec = config['vendors'][args.vendor]
     profile = config['benchmark']
-    result = ROOT/'artifacts/baselines/same-vendor-pp'/args.vendor/'performance'
+    result = ROOT/'artifacts/baselines/same-vendor-pp'/args.vendor
+    if spec.get('instance_id'):
+        if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,23}', spec['instance_id']):
+            raise ValueError('Invalid instance ID')
+        result /= spec['instance_id']
+    result /= 'performance'
     result.mkdir(parents=True, exist_ok=True)
     marker = result/'status.json'
     if marker.exists():
         raise RuntimeError('Refusing duplicate benchmark or overwrite of retained results')
     state = dict(status='waiting_for_model', started_at=datetime.now(timezone.utc).isoformat(),
-                 vendor=args.vendor, tp=2, pp=2, total_devices=4, precision='BF16',
+                 vendor=args.vendor, instance_id=spec.get('instance_id'), tp=2, pp=2, total_devices=4,
+                 precision={'float16':'FP16', 'bfloat16':'BF16'}[config['dtype']],
                  execution='native vLLM '+spec.get('executor','ray')+' executor; eager, prefix cache off',
                  client_vllm=importlib.metadata.version('vllm'),
                  config_sha256=hashlib.sha256(config_path.read_bytes()).hexdigest())

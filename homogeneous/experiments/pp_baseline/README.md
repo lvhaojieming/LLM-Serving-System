@@ -57,6 +57,66 @@ python homogeneous/experiments/pp_baseline/manage.py status --ssh-config '<clust
 start 拒绝重复启动和覆盖已保留运行状态；失败时先确认进程归属，保留必要
 诊断，再清理本次失败 rank 和状态，不能使用 ray stop/killall 清理共享服务。
 
+### 在原容器内增加跨节点实例
+
+每个 TP2/PP2 实例在两台机器上各使用两个芯片。每厂商四个实例共使用
+两节点各八个芯片，不能把它写成 TP4/PP2，也不能将芯片数当作板卡数。
+BI-V150 每板两个设备，每设备 32 GiB；每节点八个芯片对应四张板卡。
+
+配置的 `vendors.<vendor>.instances` 声明额外实例，原 `nodes`、`ray_port`、
+`api_port` 仍代表保留的基础实例。例如基础实例使用 `[4,5] / [0,1]` 时：
+
+```json
+"instances": {
+  "pp-02": {"devices": [[0,1], [2,3]], "ray_port": 33000, "api_port": 18398},
+  "pp-03": {"devices": [[2,3], [4,5]], "ray_port": 33200, "api_port": 18399},
+  "pp-04": {"devices": [[6,7], [6,7]], "ray_port": 33400, "api_port": 18400}
+}
+```
+
+配置校验拒绝同一节点芯片重叠、API/Ray 端口范围重叠和非法实例名。
+部署前还应检查真实设备占用；配置声明不是资源预留，不能停止其他任务。
+模型、精度、厂商环境及两端容器沿用同一配置。每实例独立 Ray 集群、
+API 端口和 `/tmp/moqe-pp/<vendor>/<instance>/`，复用同一套官方 vLLM PP。
+四个现有容器使用 `ipc=host`，共享内存以容器内 `df /dev/shm` 的实际挂载
+为准；不能把 Docker inspect 中未生效的默认 `ShmSize` 当作容量。
+节点内部使用共享内存，跨节点 PP 仍通过网络通信。
+
+```powershell
+python homogeneous/experiments/pp_baseline/manage.py start --config artifacts/baselines/same-vendor-pp/deployment-config.json --ssh-config '<cluster_ssh_config>' --vendor musa --instance pp-02
+python homogeneous/experiments/pp_baseline/manage.py status --config artifacts/baselines/same-vendor-pp/deployment-config.json --ssh-config '<cluster_ssh_config>' --vendor musa --instance pp-02
+```
+
+`--instance` 只选择该实例，不启动同池其他实例；省略时继续使用原基础实例。
+实例快照、日志、验收结果和可选性能结果分别保存在
+`artifacts/baselines/same-vendor-pp/<vendor>/<instance>/`，基础实例的历史路径不变。
+启动时上传已解析的独立配置，避免并行实例覆盖共用 `config.json`。
+真实回答在判定成功前保存，失败也保留具体输出。性能记录从配置读取
+FP16/BF16；本入口沿用原 eager 基线，不能标作图模式。
+
+只部署模型时不要执行 `benchmark`。回归检查可用已有 Python 标准库运行：
+`python homogeneous/tests/test_pp_baseline.py -v`。
+
+2026-10-28 扩容验收：Qwen3-14B、FP16、TP2/PP2、eager，每厂商四个实例。
+基础实例保留运行，新增实例复用相同四个容器与镜像；CPU/内存/PID 上限未恢复。
+
+| 厂商/实例 | 第一节点芯片 | 第二节点芯片 | API 端口 | Ray 基础端口 |
+|---|---|---|---|---|
+| 摩尔 base | .97: 4,5 | .96: 0,1 | 18397 | 32200 |
+| 摩尔 pp-02 | .97: 0,1 | .96: 2,3 | 18398 | 33000 |
+| 摩尔 pp-03 | .97: 2,3 | .96: 4,5 | 18399 | 33200 |
+| 摩尔 pp-04 | .97: 6,7 | .96: 6,7 | 18400 | 33400 |
+| 天数 base | .58: 6,7 | .60: 0,1 | 18358 | 32600 |
+| 天数 pp-02 | .58: 8,9 | .60: 2,3 | 18359 | 33600 |
+| 天数 pp-03 | .58: 10,11 | .60: 4,5 | 18360 | 33800 |
+| 天数 pp-04 | .58: 12,13 | .60: 6,7 | 18361 | 34000 |
+
+13:01 北京时间验收：八个 API 均健康且实际贪心算术生成正确，队列归零，
+SMI 确认每节点八个目标芯片有模型显存占用。只完成部署和功能验收，
+没有启动吞吐/稳定性压测，不能将此验收当作容量结论。
+本机保留 `artifacts/baselines/same-vendor-pp/deployment-config.json` 和
+`replica-acceptance.json`，包含实际启动参数、版本、回答与设备占用证据。
+
 海光 Ray 的原生 `pp_broadcast` 初始化仍停滞，配置已切换 `executor=mp`：
 两端分别传 `--nnodes 2 --node-rank 0/1 --master-addr <head> --master-port <port>`，
 第二节点使用 `--headless`。镜像已实际解析接受这些官方参数，但本轮服务初始化

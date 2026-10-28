@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime, timezone
 import importlib.metadata
 import json
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -48,9 +49,9 @@ def run_native(config, spec, node, stage, directory, processes, save):
                                          headers={'Content-Type':'application/json'})
         with urllib.request.urlopen(request, timeout=120) as response:
             acceptance = json.load(response)
+        (directory/'acceptance.json').write_text(json.dumps(acceptance, ensure_ascii=False, indent=2))
         if acceptance['choices'][0]['message']['content'].strip() != '5':
             raise RuntimeError('Greedy arithmetic acceptance failed')
-        (directory/'acceptance.json').write_text(json.dumps(acceptance, ensure_ascii=False, indent=2))
         save(status='ready', endpoint=endpoint, model_inference_verified=True, ready_at=datetime.now(timezone.utc).isoformat())
         raise RuntimeError('Native PP engine exited with '+str(engine.wait()))
 
@@ -67,6 +68,10 @@ def main():
     node = spec['nodes'][args.stage]
     base = spec['ray_port']
     directory = Path('/workspace/artifacts/baselines/same-vendor-pp')/args.vendor
+    if spec.get('instance_id'):
+        if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,23}', spec['instance_id']):
+            raise ValueError('Invalid instance ID')
+        directory /= spec['instance_id']
     directory.mkdir(parents=True, exist_ok=True)
     marker = directory/('stage'+str(args.stage)+'.json')
     if marker.exists():
@@ -81,7 +86,7 @@ def main():
                 listener.bind((node['host'], port))
         print(json.dumps(dict(preflight='passed', host=node['host'], devices=node['devices'], stage=args.stage)))
         return
-    state = dict(status='starting', vendor=args.vendor, stage=args.stage, host=node['host'],
+    state = dict(status='starting', vendor=args.vendor, instance_id=spec.get('instance_id'), stage=args.stage, host=node['host'],
                  physical_devices=node['devices'], started_at=datetime.now(timezone.utc).isoformat(),
                  versions={name:importlib.metadata.version(name) for name in ['torch', 'vllm', 'ray']})
     def save(**values):

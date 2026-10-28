@@ -1,9 +1,11 @@
 """Reuse vendor containers and cached images for native two-node TP2/PP2."""
 import argparse
 import concurrent.futures
+import copy
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -16,16 +18,63 @@ REL = 'homogeneous/experiments/pp_baseline'
 TASK = 'moqe-native-pp-image'
 
 
+def select_instance(config, vendor, instance):
+    """Resolve an additional replica without changing the retained base instance."""
+    resolved = copy.deepcopy(config)
+    spec = resolved['vendors'][vendor]
+    entries = spec.get('instances', {})
+    occupied = [{*node['devices']} for node in spec['nodes']]
+    ports = set(range(spec['ray_port'], spec['ray_port']+130)) | {spec['api_port']}
+    for ident, entry in entries.items():
+        if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,23}', ident):
+            raise ValueError('Invalid instance ID')
+        if set(entry) != {'devices', 'ray_port', 'api_port'} or len(entry['devices']) != 2:
+            raise ValueError('Each instance requires two device pairs and dedicated ports')
+        for stage, devices in enumerate(entry['devices']):
+            if (len(devices) != 2 or len(set(devices)) != 2 or
+                    any(type(d) is not int or d < 0 for d in devices)):
+                raise ValueError('TP2 requires two distinct physical device IDs per node')
+            if occupied[stage].intersection(devices):
+                raise ValueError('Instances overlap physical devices on stage '+str(stage))
+            occupied[stage].update(devices)
+        base, api = entry['ray_port'], entry['api_port']
+        if (type(base) is not int or type(api) is not int or
+                not 1024 <= base <= 65406 or not 1024 <= api <= 65535):
+            raise ValueError('Invalid instance ports')
+        reserved = set(range(base, base+130))
+        if api in reserved or ports.intersection(reserved | {api}):
+            raise ValueError('Instance API/Ray port ranges overlap')
+        ports.update(reserved | {api})
+    if instance:
+        entry = entries[instance]
+        spec.update(instance_id=instance, ray_port=entry['ray_port'], api_port=entry['api_port'])
+        for node, devices in zip(spec['nodes'], entry['devices']):
+            node['devices'] = devices
+    # Runtime snapshots are self-contained, already resolved configurations.
+    spec.pop('instances', None)
+    return resolved
+
+
 class Manager:
     def __init__(self, args):
         self.args = args
         self.config = json.loads(args.config.read_text(encoding='utf-8'))
+        if getattr(args, 'instance', None):
+            if args.vendor == 'all':
+                raise ValueError('--instance requires an explicit --vendor')
+            self.config = select_instance(self.config, args.vendor, args.instance)
         if self.config['tp'] != 2 or self.config['pp'] != 2 or self.config['resource_limits_enabled']:
             raise ValueError('This profile requires TP2/PP2 without container resource limits')
         self.artifacts = ROOT/'artifacts/baselines/same-vendor-pp'
         self.artifacts.mkdir(parents=True, exist_ok=True)
         self.client_upload_lock = threading.Lock()
         self.client_uploaded = False
+
+    def instance_key(self, name):
+        ident = self.config['vendors'][name].get('instance_id')
+        if ident and not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,23}', ident):
+            raise ValueError('Invalid instance ID')
+        return name+'/'+ident if ident else name
 
     def ssh(self, node, command, check=True):
         result = subprocess.run(['ssh', '-F', str(self.args.ssh_config), '-o', 'BatchMode=yes',
@@ -37,7 +86,7 @@ class Manager:
 
     def upload(self, node, source, destination):
         parent = str(Path(destination).parent).replace('\\', '/')
-        created = self.ssh(node, 'mkdir -p '+shlex.quote(parent), False)
+        created = self.ssh(node, 'mkdir -p '+shlex.quote(parent)+' && test -w '+shlex.quote(parent), False)
         if created.returncode and node.get('container') and parent.startswith(REMOTE+'/'):
             # Existing bind roots can be root-owned. Create/chown only this task's leaf.
             leaf = '/workspace/'+parent[len(REMOTE)+1:]
@@ -108,7 +157,7 @@ class Manager:
                    MCCL_SOCKET_IFNAME=node['interface'], HCCL_SOCKET_IFNAME=node['interface'],
                    HCCL_IF_IP=node['host'],
                    OMP_NUM_THREADS='2', TOKENIZERS_PARALLELISM='false',
-                   RAY_TMPDIR='/tmp/moqe-pp/'+name+'/s'+str(stage))
+                   RAY_TMPDIR='/tmp/moqe-pp/'+self.instance_key(name)+'/s'+str(stage))
         if name == 'ascend':
             # CANN numbers the mounted subset from zero; host cards remain node.devices.
             env['ASCEND_RT_VISIBLE_DEVICES'] = '0,1'
@@ -167,12 +216,21 @@ class Manager:
         identity = self.inspect(spec['nodes'][0], spec['image'])
         if self.inspect(spec['nodes'][1], spec['image']) != identity:
             raise RuntimeError('Both stages must use the exact same image ID')
-        directory = '/workspace/artifacts/baselines/same-vendor-pp/'+name
-        local = self.artifacts/name
+        key = self.instance_key(name)
+        directory = '/workspace/artifacts/baselines/same-vendor-pp/'+key
+        remote_directory = REMOTE+'/artifacts/baselines/same-vendor-pp/'+key
+        for stage, node in enumerate(spec['nodes']):
+            marker = remote_directory+'/stage'+str(stage)+'.json'
+            if self.ssh(node, 'test ! -e '+shlex.quote(marker), False).returncode:
+                raise RuntimeError('Retained run state exists; preserving its configuration: '+marker)
+        local = self.artifacts/key
         local.mkdir(parents=True, exist_ok=True)
-        (local/'config.json').write_bytes(self.args.config.read_bytes())
+        (local/'config.json').write_text(json.dumps(self.config, indent=2), encoding='utf-8')
         snapshot = dict(vendor=name, image=spec['image'], image_id=identity, tp=2, pp=2,
-                        config_sha256=hashlib.sha256(self.args.config.read_bytes()).hexdigest(), nodes=[])
+                        instance_id=spec.get('instance_id'),
+                        config_sha256=hashlib.sha256((local/'config.json').read_bytes()).hexdigest(),
+                        source_sha256={filename:hashlib.sha256(Path(__file__).with_name(filename).read_bytes()).hexdigest()
+                                       for filename in ['manage.py', 'run_node.py', 'network.py']}, nodes=[])
         for stage, node in enumerate(spec['nodes']):
             container_id = self.ensure_container(name, stage)
             driver_hashes = []
@@ -185,23 +243,22 @@ class Manager:
                 self.ssh(node, shlex.join(['docker', 'exec', node['container'], 'ln', '-sf', Path(library['target']).name, library['link']]))
                 driver_hashes.append(dict(library, sha256=digest))
             snapshot['nodes'].append(dict(node, container_id=container_id, driver_hashes=driver_hashes))
-            self.upload(node, self.args.config, REMOTE+'/'+REL+'/config.json')
+            self.upload(node, local/'config.json', remote_directory+'/config.json')
             self.upload(node, Path(__file__).with_name('run_node.py'), REMOTE+'/'+REL+'/run_node.py')
             self.upload(node, Path(__file__).with_name('network.py'), REMOTE+'/'+REL+'/network.py')
-            check = self.docker(name, stage, 'python3 /workspace/'+REL+'/run_node.py --config /workspace/'+REL+'/config.json --vendor '+name+' --stage '+str(stage)+' --check')
+            check = self.docker(name, stage, 'python3 /workspace/'+REL+'/run_node.py --config '+directory+'/config.json --vendor '+name+' --stage '+str(stage)+' --check')
             print(name, stage, check.stdout.strip(), flush=True)
         (local/'deployment.json').write_text(json.dumps(snapshot, indent=2), encoding='utf-8')
-        self.upload(spec['nodes'][0], local/'deployment.json', REMOTE+'/artifacts/baselines/same-vendor-pp/'+name+'/deployment.json')
-        self.upload(spec['nodes'][0], local/'config.json', REMOTE+'/artifacts/baselines/same-vendor-pp/'+name+'/config.json')
+        self.upload(spec['nodes'][0], local/'deployment.json', remote_directory+'/deployment.json')
         for stage in [0, 1]:
-            body = 'mkdir -p '+directory+'; python3 -u /workspace/'+REL+'/run_node.py --config /workspace/'+REL+'/config.json --vendor '+name+' --stage '+str(stage)+' > '+directory+'/stage'+str(stage)+'.log 2>&1'
+            body = 'mkdir -p '+directory+'; python3 -u /workspace/'+REL+'/run_node.py --config '+directory+'/config.json --vendor '+name+' --stage '+str(stage)+' > '+directory+'/stage'+str(stage)+'.log 2>&1'
             self.docker(name, stage, body, detach=True)
         return dict(status='initializing', deployment=snapshot)
 
     def status(self, name):
         spec = self.config['vendors'][name]
         node = spec['nodes'][0]
-        directory = REMOTE+'/artifacts/baselines/same-vendor-pp/'+name
+        directory = REMOTE+'/artifacts/baselines/same-vendor-pp/'+self.instance_key(name)
         result = {}
         for label, path in [('image', directory+'/image/status.json'), ('head', directory+'/stage0.json')]:
             read = self.ssh(node, 'cat '+shlex.quote(path), False)
@@ -220,16 +277,22 @@ class Manager:
 
     def benchmark(self, name):
         client = self.config['client']
+        key = self.instance_key(name)
+        local = self.artifacts/key
+        local.mkdir(parents=True, exist_ok=True)
+        config_path = local/'benchmark-config.json'
+        config_path.write_text(json.dumps(self.config, indent=2), encoding='utf-8')
+        remote_config = REMOTE+'/artifacts/baselines/same-vendor-pp/'+key+'/benchmark-config.json'
+        self.upload(client, config_path, remote_config)
         with self.client_upload_lock:
             if not self.client_uploaded:
-                self.upload(client, self.args.config, REMOTE+'/'+REL+'/config.json')
                 self.upload(client, Path(__file__).with_name('benchmark.py'), REMOTE+'/'+REL+'/benchmark.py')
                 self.upload(client, ROOT/'heterogeneous_compute/platforms/iluvatar/benchmark.sh',
                             REMOTE+'/heterogeneous_compute/platforms/iluvatar/benchmark.sh')
                 self.client_uploaded = True
-        result = '/workspace/artifacts/baselines/same-vendor-pp/'+name+'/performance'
-        body = ('mkdir -p '+result+'; exec python3 -u /workspace/'+REL+'/benchmark.py --config /workspace/'+REL+
-                '/config.json --vendor '+name+' > '+result+'/client.log 2>&1')
+        result = '/workspace/artifacts/baselines/same-vendor-pp/'+key+'/performance'
+        body = ('mkdir -p '+result+'; exec python3 -u /workspace/'+REL+'/benchmark.py --config '+
+                remote_config.replace(REMOTE, '/workspace', 1)+' --vendor '+name+' > '+result+'/client.log 2>&1')
         self.ssh(client, shlex.join(['docker', 'exec', '-d', client['container'], 'bash', '-lc', body]))
         return dict(status='benchmark_dispatched', client=client, result=result)
 
@@ -240,6 +303,7 @@ def main():
     parser.add_argument('--config', type=Path, default=Path(__file__).with_name('config.json'))
     parser.add_argument('--ssh-config', required=True, type=Path)
     parser.add_argument('--vendor', default='all')
+    parser.add_argument('--instance', help='Additional replica ID from vendor.instances; omit for retained base')
     args = parser.parse_args()
     manager = Manager(args)
     names = list(manager.config['vendors']) if args.vendor == 'all' else [args.vendor]
