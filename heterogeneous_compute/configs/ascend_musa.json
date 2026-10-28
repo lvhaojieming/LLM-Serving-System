@@ -11,7 +11,7 @@
       "stage": 0,
       "ssh_alias": "ascend910c-01",
       "host": "192.168.162.23",
-      "container": "heteroserve-ascend",
+      "container": "heteroserve-ascend-w4",
       "device": "npu",
       "devices": [
         0,
@@ -28,9 +28,9 @@
       "tp_backend": "hccl",
       "env": {
         "GLOO_SOCKET_IFNAME": "enp196s0f0",
-        "HCCL_HOST_SOCKET_PORT_RANGE": "60600-60631",
-        "HCCL_NPU_SOCKET_PORT_RANGE": "60700-60731",
-        "HCCL_IF_BASE_PORT": "60800",
+        "HCCL_HOST_SOCKET_PORT_RANGE": "auto",
+        "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
+        "HCCL_IF_BASE_PORT": "63200",
         "VLLM_USE_V1": "1",
         "OMP_NUM_THREADS": "2",
         "ASCEND_RT_VISIBLE_DEVICES": "0,1"
@@ -78,13 +78,13 @@
     ]
   ],
   "probe": "heterogeneous_compute/probes/communication_probe.py",
-  "results": "artifacts/baselines/ascend-musa/official-tp-graph",
+  "results": "artifacts/baselines/ascend-musa/replicated",
   "execution": {
     "model_path": "/models/Qwen3-14B",
     "tp_port": 29661,
     "pp_port": 29662,
-    "max_model_len": 2048,
-    "result_dir": "/workspace/artifacts/baselines/ascend-musa/official-tp-graph",
+    "max_model_len": 4096,
+    "result_dir": "/workspace/artifacts/baselines/ascend-musa/replicated/pp-01",
     "requests": [
       {
         "id": "math-first",
@@ -135,7 +135,8 @@
     "attention_backend": "vendor",
     "execution_mode": "piecewise_mlp_graph",
     "graph_max_tokens": 4,
-    "transport": "tcp"
+    "transport": "tcp",
+    "max_output_tokens": 1024
   },
   "validation": {
     "references": {
@@ -146,5 +147,55 @@
   "benchmark_client": {
     "ssh_alias": "iluvatar150-02",
     "container": "heteroserve-iluvatar-pp"
+  },
+  "instances": {
+    "pp-02": {
+      "devices": [
+        [
+          2,
+          3
+        ],
+        [
+          2,
+          3
+        ]
+      ],
+      "tp_port": 29761,
+      "pp_port": 29762,
+      "api_port": 18231,
+      "hccl_base_port": 63400
+    },
+    "pp-03": {
+      "devices": [
+        [
+          10,
+          11
+        ],
+        [
+          4,
+          5
+        ]
+      ],
+      "tp_port": 29861,
+      "pp_port": 29862,
+      "api_port": 18232,
+      "hccl_base_port": 63600
+    },
+    "pp-04": {
+      "devices": [
+        [
+          12,
+          13
+        ],
+        [
+          6,
+          7
+        ]
+      ],
+      "tp_port": 29961,
+      "pp_port": 29962,
+      "api_port": 18233,
+      "hccl_base_port": 63800
+    }
   }
 }

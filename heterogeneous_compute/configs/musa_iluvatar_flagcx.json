@@ -4,18 +4,18 @@
   "tp": 2,
   "pp": 2,
   "resource_limits_enabled": false,
-  "master": "192.168.162.97",
+  "master": "192.168.162.96",
   "port": 29850,
   "stages": [
     {
       "stage": 0,
-      "ssh_alias": "s5000-01",
-      "host": "192.168.162.97",
-      "container": "heteroserve-musa",
+      "ssh_alias": "s5000-02",
+      "host": "192.168.162.96",
+      "container": "heteroserve-musa-pp",
       "device": "musa",
       "devices": [
-        4,
-        5
+        0,
+        1
       ],
       "ranks": [
         0,
@@ -32,10 +32,10 @@
         "FLAGCX_DEBUG": "INFO",
         "FLAGCX_DEBUG_SUBSYS": "INIT,NET",
         "OMP_NUM_THREADS": "2",
-        "FLAGCX_SOCKET_IFNAME": "ens18f0",
-        "GLOO_SOCKET_IFNAME": "ens18f0",
-        "MUSA_VISIBLE_DEVICES": "4,5",
-        "MTHREADS_VISIBLE_DEVICES": "4,5",
+        "FLAGCX_SOCKET_IFNAME": "ens21f0",
+        "GLOO_SOCKET_IFNAME": "ens21f0",
+        "MUSA_VISIBLE_DEVICES": "0,1",
+        "MTHREADS_VISIBLE_DEVICES": "0,1",
         "VLLM_USE_V1": "0",
         "MCCL_IB_DISABLE": "1",
         "FLAGCX_SOCKET_NTHREADS": "1",
@@ -96,13 +96,13 @@
     ]
   ],
   "probe": "heterogeneous_compute/flagcx_transport.py",
-  "results": "artifacts/baselines/musa-iluvatar-flagcx",
+  "results": "artifacts/baselines/musa-iluvatar-flagcx/replicated",
   "execution": {
     "model_path": "/models/Qwen3-14B",
     "tp_port": 29861,
     "pp_port": 29862,
-    "max_model_len": 2048,
-    "result_dir": "/workspace/artifacts/baselines/musa-iluvatar-flagcx/vendor",
+    "max_model_len": 4096,
+    "result_dir": "/workspace/artifacts/baselines/musa-iluvatar-flagcx/replicated/pp-01",
     "requests": [
       {
         "id": "math-first",
@@ -142,7 +142,7 @@
     ],
     "mode": "http",
     "api_port": 18297,
-    "scope": "Custom TP2 PP2 scheduling adapter; official vendor attention and model custom ops; FlagCX device-buffer PP over Socket; native local TP",
+    "scope": "Vendor local TP and attention; MLP-only vendor graphs; project scheduler; FlagCX device-buffer Socket PP",
     "scheduler": "continuous",
     "max_active_requests": 8,
     "microbatch_size": 4,
@@ -151,7 +151,10 @@
     "prefill_chunk_tokens": 512,
     "transport": "flagcx",
     "attention_backend": "vendor",
-    "tp_communicator": "vllm"
+    "tp_communicator": "vllm",
+    "max_output_tokens": 1024,
+    "execution_mode": "piecewise_mlp_graph",
+    "graph_max_tokens": 4
   },
   "validation": {
     "references": {
@@ -166,5 +169,52 @@
     "build_source_sha256": "63b0944b916ce14618c4ef26ae58ff9950261e3a55262a6662d69e697716ae16",
     "library": "/workspace/artifacts/dependencies/flagcx/4dd8862e09be73c8e54f49b763186e80c365f195/FlagCX/build/lib/libheteroserve_flagcx.so",
     "network": "Socket (FLAGCX_IB_DISABLE=1); no GPUDirect/RDMA claim"
+  },
+  "instances": {
+    "pp-02": {
+      "devices": [
+        [
+          2,
+          3
+        ],
+        [
+          8,
+          9
+        ]
+      ],
+      "tp_port": 29961,
+      "pp_port": 29962,
+      "api_port": 18298
+    },
+    "pp-03": {
+      "devices": [
+        [
+          4,
+          5
+        ],
+        [
+          4,
+          5
+        ]
+      ],
+      "tp_port": 30061,
+      "pp_port": 30062,
+      "api_port": 18299
+    },
+    "pp-04": {
+      "devices": [
+        [
+          6,
+          7
+        ],
+        [
+          6,
+          7
+        ]
+      ],
+      "tp_port": 30161,
+      "pp_port": 30162,
+      "api_port": 18300
+    }
   }
 }

@@ -17,6 +17,27 @@ from heterogeneous_compute.manage import processes
 from heterogeneous_compute.benchmark import summarize
 
 class PipelineExecutionTests(unittest.TestCase):
+    def test_cross_vendor_replicas_do_not_share_devices_or_ports(self):
+        from pathlib import Path
+        from heterogeneous_compute.manage import resolve_instance
+        config = json.loads((Path(__file__).parents[1]/'configs/ascend_iluvatar.json').read_text(encoding='utf-8'))
+        resolved = resolve_instance(config, 'pp-03')
+        self.assertEqual(resolved['stages'][0]['env']['ASCEND_RT_VISIBLE_DEVICES'], '4,5')
+        self.assertEqual(resolved['stages'][1]['env']['CUDA_VISIBLE_DEVICES'], '10,11')
+        self.assertEqual(config['stages'][0]['devices'], [0, 1])
+        config['instances']['pp-03']['devices'][0] = [0, 1]
+        with self.assertRaises(ValueError):
+            resolve_instance(config, 'pp-03')
+
+    def test_metrics_remain_numeric_after_graph_execution(self):
+        from heterogeneous_compute.pipeline_execution import admission_metrics
+        text = admission_metrics(dict(active_requests=3, draining=False,
+            graphs=dict(mode='piecewise_mlp_graph', captures=40, replays=100)), 2)
+        self.assertIn('heteroserve_pp_queued_requests 2\n', text)
+        self.assertIn('heteroserve_pp_graphs_replays 100\n', text)
+        for line in text.splitlines():
+            float(line.split()[1])
+
     def test_overlap_evidence_excludes_unrelated_requests_and_old_windows(self):
         import tempfile
         import textwrap

@@ -1,5 +1,54 @@
 # 异构算力适配
 
+当前六节点跨厂商配置复用本目录执行器和现有容器，每组四个 TP2/PP2 实例：
+
+| 配置 | 两端节点 | 每实例设备 | API 端口 |
+| --- | --- | --- | --- |
+| `configs/ascend_musa.json` | `.23` / `.97` | 每端2芯片 | 18230–18233 |
+| `configs/musa_iluvatar_flagcx.json` | `.96` / `.60` | 每端2芯片 | 18297–18300 |
+| `configs/ascend_iluvatar.json` | `.24` / `.58` | 每端2芯片 | 18240–18243 |
+
+每组共16芯片，三组合计48芯片。实例由各配置的 `instances` 分配不重叠设备和
+专用端口，使用 `manage.py --instance pp-02` 等参数选择。当前模型为 BF16
+Qwen3-14B，上下文4096、最大输出1024；与 FP16 同厂商原生 Engine 基线分别记录。
+机内 TP 和模型算子复用厂商版本，跨厂商调度为项目实现。昇腾相关组合使用
+CPU 中转 TCP PP，摩尔/天数组合使用 FlagCX Socket 设备缓冲区传输。
+节点主机、配置和芯片数量只说明部署目标；实际验收状态以服务端结果为准。
+
+## Ascend / Iluvatar retained-container deployment
+
+`configs/ascend_iluvatar.json` configures Qwen3-14B BF16 TP2/PP2 on
+Ascend `.24` and Iluvatar `.58`. It reuses `heteroserve-ascend-w4` and
+`heteroserve-iluvatar`; it does not install another framework or replace containers.
+The base replica uses `.24[0,1]` / `.58[8,9]`, port18240. Named replicas
+`pp-02`, `pp-03`, `pp-04` use the remaining configured pairs, ports18241–18243.
+The full allocation is eight chips per host. Existing services on these exact
+devices must be drained and stopped before launching a replica.
+
+This profile explicitly uses the project cross-vendor scheduler and CPU-staged
+TCP PP transport. Local TP GroupCoordinator, model operators and Flash Attention
+come from the installed vendor stacks. It is not an unmodified vendor-supported
+cross-vendor vLLM Engine. Graph mode covers MLP/local TP compute islands through
+Ascend ACLGraphWrapper and Iluvatar's torch.cuda graph API; attention, KV handling
+and cross-node transfers are outside graph capture. Both stages' capture/replay
+counters are available in `/health` and `/metrics`.
+
+```powershell
+python heterogeneous_compute/manage.py start --ssh-config "$HOME/.ssh/config" --config heterogeneous_compute/configs/ascend_iluvatar.json
+python heterogeneous_compute/manage.py start --ssh-config "$HOME/.ssh/config" --config heterogeneous_compute/configs/ascend_iluvatar.json --instance pp-02
+```
+
+Use the same config and instance selection with `status`, `stop` or `abort`.
+The other two named replicas use the same command with their instance IDs.
+Resolved replica configurations are retained under the corresponding artifact
+directory; model requests and benchmark results remain on the server.
+Context4096 and max_output_tokens1024 cover the mixed workload's three lengths.
+Legacy profiles retain their original output limit128. The existing official
+`vllm bench serve` wrapper can test each replica with `--concurrencies 1 4 8`,
+`--num-prompts`, `--input-tokens`, `--output-tokens` and a unique `--result-dir`.
+Readiness alone is insufficient: require exact-answer sequential/concurrent
+checks, fixed token counts, graph replay evidence and empty queues after drain.
+
 统一 Gateway、官方 vLLM Router 与三厂商原生 AWQ/embedding 接入，见
 [部署与验收](serving.md)，配置入口为 `configs/serving.json`。
 

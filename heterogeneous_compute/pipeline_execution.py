@@ -402,8 +402,12 @@ def load_stage(config, stage, lane):
         # The installed engines have incompatible whole-engine graph runners.
         # Capture the official MLP+local TP path via the vendor graph APIs;
         # dynamic attention/KV and cross-node transport remain outside graphs.
-        from vllm.config import CompilationLevel
-        vconfig.compilation_config.level = CompilationLevel.NO_COMPILATION
+        if hasattr(vconfig.compilation_config, 'mode'):
+            from vllm.config import CompilationMode
+            vconfig.compilation_config.mode = CompilationMode.NONE
+        else:
+            from vllm.config import CompilationLevel
+            vconfig.compilation_config.level = CompilationLevel.NO_COMPILATION
     from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
     torch.set_default_dtype(torch.bfloat16)
     with set_current_vllm_config(vconfig), torch.device(device):
@@ -470,6 +474,21 @@ def load_stage(config, stage, lane):
             return forward
         attention.attn.forward = bind(attention, index)
     model.eval()
+    if execution_mode == 'piecewise_mlp_graph' and config['execution'].get('transport') == 'flagcx':
+        # Lazy capture synchronizes the whole device. Once FlagCX receive/send
+        # streams exist, that synchronization can wait on peer progress while
+        # the peer waits for this rank's next TP collective. Capture every
+        # supported shape before creating any PP channel or transport thread.
+        with torch.inference_mode(), set_current_vllm_config(vconfig):
+            for tokens in range(1, config['execution'].get('graph_max_tokens', 4) + 1):
+                inputs = torch.zeros((tokens, vconfig.model_config.hf_config.hidden_size), device=device,
+                                     dtype=torch.bfloat16)
+                synchronize_tp_inputs(state, cpu_group)
+                for runner in state.graph_runners:
+                    runner(inputs)
+            getattr(torch, device.type).synchronize()
+        print(json.dumps(dict(event='graphs_prewarmed_before_pp', stage=stage, lane=lane,
+                              graphs=graph_stats(state))), flush=True)
     print(json.dumps(dict(event='stage_loaded', stage=stage, lane=lane,
                           start_layer=start, end_layer=end,
                           parameter_bytes=sum(p.numel()*p.element_size() for p in model.parameters()),
@@ -484,10 +503,15 @@ def model_forward(model, state, device, *args):
     """Provide the installed Ascend plugin's official per-forward context."""
     if device.type == 'npu' and state.attention_backend == 'vendor':
         from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+        import inspect
+        if not hasattr(state, 'ascend_context_has_prefill'):
+            state.ascend_context_has_prefill = 'with_prefill' in inspect.signature(set_ascend_forward_context).parameters
+        options = {}
+        if state.ascend_context_has_prefill:
+            options['with_prefill'] = any(s['past'] == 0 or s['length'] > 1 for s in state.segments)
         with set_ascend_forward_context(None, state.vllm_config,
                 num_tokens=sum(s['length'] for s in state.segments),
-                with_prefill=any(s['past'] == 0 or s['length'] > 1 for s in state.segments),
-                model_instance=model):
+                model_instance=model, **options):
             return model(*args)
     return model(*args)
 
@@ -542,6 +566,18 @@ def open_channel(config, stage, lane):
     return channel
 
 
+def admission_metrics(lifecycle, queued):
+    values = {'queued_requests': queued}
+    for key, value in lifecycle.items():
+        if isinstance(value, (int, float)):
+            values[key] = value
+        elif isinstance(value, dict):
+            values.update({f'{key}_{name}': number for name, number in value.items()
+                           if isinstance(number, (int, float))})
+    return ''.join(f'heteroserve_pp_{key} {int(value) if isinstance(value, bool) else value}\n'
+                   for key, value in values.items())
+
+
 def create_admission(config, lane, tokenizer):
     """Shared HTTP admission for both scheduling policies."""
     admission = queue.Queue(maxsize=16)
@@ -567,8 +603,7 @@ def create_admission(config, lane, tokenizer):
 
         @app.get('/metrics')
         async def metrics():
-            return Response(f"heteroserve_pp_queued_requests {admission.qsize()}\n"+
-                            ''.join(f'heteroserve_pp_{key} {int(value)}\n' for key,value in lifecycle.items()),
+            return Response(admission_metrics(lifecycle, admission.qsize()),
                             media_type='text/plain')
 
         @app.post('/v1/completions')
@@ -585,8 +620,9 @@ def create_admission(config, lane, tokenizer):
             if not isinstance(prompt, str):
                 raise HTTPException(400, 'A single text prompt is required')
             maximum = body.get('max_tokens', 32)
-            if type(maximum) is not int or not 1 <= maximum <= 128:
-                raise HTTPException(400, 'max_tokens must be between 1 and 128')
+            output_limit = config['execution'].get('max_output_tokens', 128)
+            if type(maximum) is not int or not 1 <= maximum <= output_limit:
+                raise HTTPException(400, f'max_tokens must be between 1 and {output_limit}')
             ids = tokenizer.encode(prompt, add_special_tokens=False)
             if not ids or len(ids) + maximum > config['execution']['max_model_len']:
                 raise HTTPException(400, 'Empty or excessive context')
@@ -641,9 +677,10 @@ def create_admission(config, lane, tokenizer):
                            or not isinstance(m.get('content'), str) for m in messages)):
                 raise HTTPException(400, 'Text messages required')
             maximum = body.get('max_tokens', 32)
-            if type(maximum) is not int or not 1 <= maximum <= 128:
-                raise HTTPException(400, 'max_tokens must be between 1 and 128')
-            ids = tokenizer.apply_chat_template(messages, tokenize=True,
+            output_limit = config['execution'].get('max_output_tokens', 128)
+            if type(maximum) is not int or not 1 <= maximum <= output_limit:
+                raise HTTPException(400, f'max_tokens must be between 1 and {output_limit}')
+            ids = tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False,
                       add_generation_prompt=True, enable_thinking=False)
             if len(ids) + maximum > config['execution']['max_model_len']:
                 raise HTTPException(400, 'Request exceeds configured context bound')
@@ -757,7 +794,7 @@ def execute_serial(config, stage, lane):
                 request_id = item['id']
                 ids = item.get('prompt_token_ids')
                 if ids is None:
-                    ids = tokenizer.apply_chat_template([dict(role='user', content=item['prompt'])],
+                    ids = tokenizer.apply_chat_template([dict(role='user', content=item['prompt'])], return_dict=False,
                               tokenize=True, add_generation_prompt=True, enable_thinking=False)
                 if len(ids) + item['max_tokens'] > config['execution']['max_model_len']:
                     raise ValueError('Request exceeds configured context bound')
@@ -1044,7 +1081,7 @@ def execute_continuous(config, stage, lane):
                 if lane == 0 and settings.get('mode') != 'http':
                     for original in settings['requests']:
                         item = dict(original)
-                        item.setdefault('prompt_token_ids', tokenizer.apply_chat_template([dict(role='user', content=item['prompt'])],
+                        item.setdefault('prompt_token_ids', tokenizer.apply_chat_template([dict(role='user', content=item['prompt'])], return_dict=False,
                             tokenize=True, add_generation_prompt=True, enable_thinking=False))
                         admission.put_nowait((item, None))
                     lifecycle['draining'] = True

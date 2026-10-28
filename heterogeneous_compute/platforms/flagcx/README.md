@@ -1,11 +1,15 @@
 # 摩尔 S5000 / 天数 BI-V150 的 FlagCX 推理实验
 
 正式配置：`heterogeneous_compute/configs/musa_iluvatar_flagcx.json`。
-复用 `.97` 的 `heteroserve-musa`（物理设备 4/5）和 `.60` 的
-`heteroserve-iluvatar-pp`（逻辑设备 0/1），不新建容器、不添加 CPU/内存/PID 上限。
+当前六节点部署复用 `.96` 的 `heteroserve-musa-pp` 和 `.60` 的
+`heteroserve-iluvatar-pp`，基础实例各用设备0/1；`pp-02`、`pp-03`、`pp-04`
+通过同一配置提供另外三个实例，每台共用8个芯片。不新建容器、不添加
+CPU/内存/PID 上限。此前 `.97[4,5]` / `.60[0,1]` 实验的原配置和结果
+保存在旧结果目录中；当前运行输出放在 `replicated/pp-01` 等子目录。
 
 Qwen3-14B BF16 使用机内 TP2、跨厂商 PP2。摩尔执行 embedding 和前 20 层，
-天数执行后 20 层、norm 和 LM head。复用已有 vLLM 组件执行器和参考 attention；
+天数执行后 20 层、norm 和 LM head。当前配置复用官方本地 TP、模型算子和
+厂商 Flash Attention，以及现有项目跨厂商执行器；
 这不是厂商原生 vLLM Engine 的跨厂商运行，也不是 P/D 分离。
 现有严格权重加载检查验证各阶段没有缺失参数。
 
@@ -40,6 +44,12 @@ bash /workspace/heterogeneous_compute/platforms/flagcx/build.sh \
 此设置已通过两条 PP lane 的变长、重复、双向 BF16 精确值检查，最大张量
 1024×5120。它是本实验的实际通信配置，不能忽略该限制解释吞吐。
 
+图模式只覆盖 MLP 和本地 TP，不包含 attention、KV 和 PP 通信。FlagCX 配置
+必须在建立 PP 通道前预热1–4 token的全部图形状。运行期间首次捕获需要设备
+同步，与正在等待对端的 FlagCX 设备流重叠时曾发生停滞。启动日志中的
+`graphs_prewarmed_before_pp` 记录各 rank 的预热计数；运行验收还需确认实际
+请求的图回放计数继续增长。预热成功本身不代表并发或长输出验收通过。
+
 摩尔端还曾在异步发送线程读取 `Event.elapsed_time` 时出现
 `MUSA error: device not ready`，导致通道关闭。设备张量路径现在先显式同步
 两个生产者事件，再读取计时和交给 FlagCX，避免只依赖跨流 wait 的完成状态。
@@ -60,9 +70,9 @@ python heterogeneous_compute/manage.py benchmark --ssh-config '<ssh_config>' --c
 `start` 要求四份成功报告与当前配置哈希匹配。它只选择该配置的进程，不覆盖原
 `ascend_musa.json`，不操作其他服务。重复启动和重复压测会被拒绝。
 
-API 为 `http://192.168.162.97:18297/v1`。
+当前 API 为 `http://192.168.162.96:18297/v1`，其余实例端口18298–18300。
 结果、各 rank 日志、传输时间线和通信校验位于两端
-`/workspace/artifacts/baselines/musa-iluvatar-flagcx/`。
+`/workspace/artifacts/baselines/musa-iluvatar-flagcx/replicated/`。
 
 测速客户端在天数 `.60` 的现有容器运行，先做三条顺序问答和三条并发问答的
 准确答案检查；失败则不进入测速。之后调用现有 vLLM 0.23 官方 `bench serve`：

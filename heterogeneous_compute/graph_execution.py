@@ -41,16 +41,17 @@ class MLPGraphRunner:
                     CUDAGraphMode.PIECEWISE,
                     cudagraph_options=CUDAGraphOptions(weak_ref_output=False))
                 entry['output'] = self._npu_call(entry)
-            elif self.device.type == 'musa':
+            elif self.device.type in {'musa', 'cuda'}:
                 from vllm.distributed import get_tp_group
                 communicator = get_tp_group().device_communicator
                 custom = getattr(communicator, 'ca_comm', None)
                 capture = custom.capture() if custom is not None and not custom.disabled else nullcontext()
-                entry['graph'] = accelerator.MUSAGraph()
+                entry['graph'] = (accelerator.MUSAGraph() if self.device.type == 'musa'
+                                  else accelerator.CUDAGraph())
                 with capture, accelerator.graph(entry['graph']):
                     entry['output'] = self.forward(entry['input'])
             else:
-                raise ValueError('This graph adapter supports installed NPU/MUSA APIs only')
+                raise ValueError('This graph adapter supports installed NPU/MUSA/CUDA APIs only')
             self.entries[key] = entry
             self.captures += 1
             # Capture records operations; its output is not a completed live

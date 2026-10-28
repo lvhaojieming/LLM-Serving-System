@@ -278,6 +278,7 @@ def main():
     parser.add_argument('--result-dir', type=Path, help='Cross-vendor validation output; never overwrites an existing run')
     parser.add_argument('--concurrencies', type=int, nargs='+', default=[1, 2, 4, 8])
     parser.add_argument('--num-prompts', type=int, default=200)
+    parser.add_argument('--num-warmups', type=int, default=3)
     parser.add_argument('--input-tokens', type=int, default=256)
     parser.add_argument('--output-tokens', type=int, default=64)
     parser.add_argument('--seed', type=int, default=20261010)
@@ -342,7 +343,7 @@ def main():
             if output.exists():
                 raise RuntimeError('Refusing to overwrite retained benchmark results')
             command = benchmark_command(endpoint, config['execution']['model_path'], 'Qwen3-14B',
-                args.input_tokens, args.output_tokens, args.num_prompts, 3,
+                args.input_tokens, args.output_tokens, args.num_prompts, args.num_warmups,
                 concurrency, args.seed, output)
             (directory/(label+'-command.json')).write_text(json.dumps(command, indent=2))
             save(status='running', current_concurrency=concurrency, command=command)

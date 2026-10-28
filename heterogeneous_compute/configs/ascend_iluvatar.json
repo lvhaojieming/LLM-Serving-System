@@ -1,0 +1,196 @@
+{
+  "model": "Qwen/Qwen3-14B",
+  "dtype": "bfloat16",
+  "tp": 2,
+  "pp": 2,
+  "resource_limits_enabled": false,
+  "master": "192.168.162.24",
+  "port": 29750,
+  "stages": [
+    {
+      "stage": 0,
+      "ssh_alias": "ascend910c-02",
+      "host": "192.168.162.24",
+      "container": "heteroserve-ascend-w4",
+      "device": "npu",
+      "devices": [
+        0,
+        1
+      ],
+      "ranks": [
+        0,
+        1
+      ],
+      "planned_layers": [
+        0,
+        20
+      ],
+      "tp_backend": "hccl",
+      "env": {
+        "GLOO_SOCKET_IFNAME": "enp196s0f0",
+        "HCCL_HOST_SOCKET_PORT_RANGE": "auto",
+        "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
+        "HCCL_IF_BASE_PORT": "62000",
+        "VLLM_USE_V1": "1",
+        "OMP_NUM_THREADS": "2",
+        "ASCEND_RT_VISIBLE_DEVICES": "0,1"
+      }
+    },
+    {
+      "stage": 1,
+      "ssh_alias": "iluvatar150-01",
+      "host": "192.168.162.58",
+      "container": "heteroserve-iluvatar",
+      "device": "cuda",
+      "devices": [
+        8,
+        9
+      ],
+      "ranks": [
+        2,
+        3
+      ],
+      "planned_layers": [
+        20,
+        40
+      ],
+      "tp_backend": "nccl",
+      "env": {
+        "OMP_NUM_THREADS": "2",
+        "GLOO_SOCKET_IFNAME": "enp147s0f0",
+        "CUDA_VISIBLE_DEVICES": "8,9",
+        "IX_VISIBLE_DEVICES": "8,9",
+        "NCCL_SOCKET_IFNAME": "enp147s0f0",
+        "NCCL_IB_DISABLE": "1",
+        "NCCL_CUMEM_ENABLE": "0",
+        "VLLM_NCCL_SO_PATH": "/usr/local/corex/lib64/libixsysnccl.so"
+      }
+    }
+  ],
+  "layer_interval": "start inclusive, end exclusive; actual vLLM PP layer allocation",
+  "pp_rank_pairs": [
+    [
+      0,
+      2
+    ],
+    [
+      1,
+      3
+    ]
+  ],
+  "probe": "heterogeneous_compute/probes/communication_probe.py",
+  "results": "artifacts/baselines/ascend-iluvatar",
+  "execution": {
+    "model_path": "/models/Qwen3-14B",
+    "tp_port": 29761,
+    "pp_port": 29762,
+    "max_model_len": 4096,
+    "result_dir": "/workspace/artifacts/baselines/ascend-iluvatar/pp-01",
+    "requests": [
+      {
+        "id": "math-first",
+        "prompt": "2+3等于多少？只输出数字。",
+        "max_tokens": 8
+      },
+      {
+        "id": "capital",
+        "prompt": "法国的首都是哪里？只回答城市名。",
+        "max_tokens": 12
+      },
+      {
+        "id": "english",
+        "prompt": "What is 7 minus 4? Reply with only the digit.",
+        "max_tokens": 8
+      },
+      {
+        "id": "math-repeat",
+        "prompt": "2+3等于多少？只输出数字。",
+        "max_tokens": 8
+      },
+      {
+        "id": "explain",
+        "prompt": "请用一句话解释什么是流水线并行。",
+        "max_tokens": 32
+      },
+      {
+        "id": "sequence",
+        "prompt": "按顺序输出从1到10的整数，用逗号隔开，不要解释。",
+        "max_tokens": 32
+      },
+      {
+        "id": "context",
+        "prompt": "背景资料：今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。今天气温适宜，实验正在进行。请忽略背景资料，只回答9加8的结果，输出数字。",
+        "max_tokens": 8
+      }
+    ],
+    "mode": "http",
+    "api_port": 18240,
+    "scope": "Vendor model operators and local TP; project cross-vendor scheduler; CPU-staged TCP PP; MLP-only vendor graphs",
+    "scheduler": "continuous",
+    "max_active_requests": 8,
+    "microbatch_size": 4,
+    "max_inflight_batches": 2,
+    "max_batch_tokens": 1024,
+    "prefill_chunk_tokens": 512,
+    "tp_communicator": "vllm",
+    "attention_backend": "vendor",
+    "execution_mode": "piecewise_mlp_graph",
+    "graph_max_tokens": 4,
+    "transport": "tcp",
+    "max_output_tokens": 1024
+  },
+  "benchmark_client": {
+    "ssh_alias": "iluvatar150-01",
+    "container": "heteroserve-iluvatar"
+  },
+  "instances": {
+    "pp-02": {
+      "devices": [
+        [
+          2,
+          3
+        ],
+        [
+          6,
+          7
+        ]
+      ],
+      "tp_port": 29861,
+      "pp_port": 29862,
+      "api_port": 18241,
+      "hccl_base_port": 62200
+    },
+    "pp-03": {
+      "devices": [
+        [
+          4,
+          5
+        ],
+        [
+          10,
+          11
+        ]
+      ],
+      "tp_port": 29961,
+      "pp_port": 29962,
+      "api_port": 18242,
+      "hccl_base_port": 62400
+    },
+    "pp-04": {
+      "devices": [
+        [
+          6,
+          7
+        ],
+        [
+          12,
+          13
+        ]
+      ],
+      "tp_port": 30061,
+      "pp_port": 30062,
+      "api_port": 18243,
+      "hccl_base_port": 62600
+    }
+  }
+}
