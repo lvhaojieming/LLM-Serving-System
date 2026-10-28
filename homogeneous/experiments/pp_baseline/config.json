@@ -21,8 +21,8 @@
     "musa": {
       "image": "registry.mthreads.com/public/sqt-vllm-train-musa-bench:4.3.5_kuae2.1_hygon_ubuntu",
       "resource": "GPU", "ray_port": 32200, "api_port": 18397,
-      "engine_args": ["--block-size", "32"],
-      "env": {"VLLM_USE_V1": "0", "NCCL_IB_DISABLE": "1", "MCCL_IB_DISABLE": "1", "MCCL_NET": "Socket", "MCCL_DEBUG": "WARN"},
+      "engine_args": ["--block-size", "32", "--disable-custom-all-reduce"],
+      "env": {"VLLM_USE_V1": "0", "NCCL_IB_DISABLE": "1", "MCCL_IB_DISABLE": "1", "MCCL_NET": "Socket", "MCCL_DEBUG": "WARN", "MCCL_P2P_DISABLE": "1", "MCCL_SHM_DISABLE": "0"},
       "nodes": [
         {"ssh_alias": "s5000-01", "host": "192.168.162.97", "ssh_port": 22, "host_key_alias": "172.22.162.97", "container": "heteroserve-musa", "reuse": true, "devices": [2, 3], "interface": "ens18f0"},
         {"ssh_alias": "s5000-02", "host": "192.168.162.96", "ssh_port": 22, "host_key_alias": "172.22.162.96", "container": "heteroserve-musa-pp", "reuse": false, "devices": [0, 1], "interface": "ens21f0", "driver_libraries": [{"source": "/lib/x86_64-linux-gnu/libmusa.so.4.3.8", "target": "/lib/x86_64-linux-gnu/libmusa.so.4.3.8", "link": "/lib/x86_64-linux-gnu/libmusa.so.1"}]}

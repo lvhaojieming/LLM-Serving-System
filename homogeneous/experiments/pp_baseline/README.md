@@ -81,6 +81,12 @@ API 端口和 `/tmp/moqe-pp/<vendor>/<instance>/`，复用同一套官方 vLLM P
 四个现有容器使用 `ipc=host`，共享内存以容器内 `df /dev/shm` 的实际挂载
 为准；不能把 Docker inspect 中未生效的默认 `ShmSize` 当作容量。
 节点内部使用共享内存，跨节点 PP 仍通过网络通信。
+摩尔同时显式设置 `--disable-custom-all-reduce`、`MCCL_P2P_DISABLE=1` 和
+`MCCL_SHM_DISABLE=0`，复用已验证的标准 MCCL 同机 SHM 通道配置。
+`ipc=host` 只能证明共享内存挂载可用，不能单独证明 TP collective 使用 SHM；
+验收还需检查工作进程环境、引擎的 `disable_custom_all_reduce=True`，以及
+MCCL INFO 日志中的 SHM 通道。跨节点 PP 的 Socket 通信继续保留。
+原 AWQ/TP2 的提速数据不能直接当作 FP16/TP2/PP2 的性能结果。
 
 ```powershell
 python homogeneous/experiments/pp_baseline/manage.py start --config artifacts/baselines/same-vendor-pp/deployment-config.json --ssh-config '<cluster_ssh_config>' --vendor musa --instance pp-02
