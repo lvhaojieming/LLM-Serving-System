@@ -28,8 +28,11 @@ def select_instance(config, vendor, instance):
     for ident, entry in entries.items():
         if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,23}', ident):
             raise ValueError('Invalid instance ID')
-        if set(entry) != {'devices', 'ray_port', 'api_port'} or len(entry['devices']) != 2:
+        if (not {'devices', 'ray_port', 'api_port'}.issubset(entry) or
+                set(entry)-{'devices', 'ray_port', 'api_port', 'env'} or len(entry['devices']) != 2):
             raise ValueError('Each instance requires two device pairs and dedicated ports')
+        if not isinstance(entry.get('env', {}), dict):
+            raise ValueError('Instance environment must be a mapping')
         for stage, devices in enumerate(entry['devices']):
             if (len(devices) != 2 or len(set(devices)) != 2 or
                     any(type(d) is not int or d < 0 for d in devices)):
@@ -48,6 +51,7 @@ def select_instance(config, vendor, instance):
     if instance:
         entry = entries[instance]
         spec.update(instance_id=instance, ray_port=entry['ray_port'], api_port=entry['api_port'])
+        spec['env'] = {**spec.get('env', {}), **entry.get('env', {})}
         for node, devices in zip(spec['nodes'], entry['devices']):
             node['devices'] = devices
     # Runtime snapshots are self-contained, already resolved configurations.
@@ -151,7 +155,7 @@ class Manager:
         spec = self.config['vendors'][name]
         node = spec['nodes'][stage]
         devices = ','.join(map(str, node['devices']))
-        env = dict(spec['env'], HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1',
+        env = dict({**spec['env'], **node.get('env', {})}, HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1',
                    VLLM_HOST_IP=node['host'], RAY_ADDRESS=spec['nodes'][0]['host']+':'+str(spec['ray_port']),
                    GLOO_SOCKET_IFNAME=node['interface'], NCCL_SOCKET_IFNAME=node['interface'],
                    MCCL_SOCKET_IFNAME=node['interface'], HCCL_SOCKET_IFNAME=node['interface'],
@@ -159,8 +163,11 @@ class Manager:
                    OMP_NUM_THREADS='2', TOKENIZERS_PARALLELISM='false',
                    RAY_TMPDIR='/tmp/moqe-pp/'+self.instance_key(name)+'/s'+str(stage))
         if name == 'ascend':
-            # CANN numbers the mounted subset from zero; host cards remain node.devices.
-            env['ASCEND_RT_VISIBLE_DEVICES'] = '0,1'
+            # CANN numbers the container's mounted subset from zero.
+            mounted = sorted(node.get('container_devices', node['devices']))
+            if not set(node['devices']).issubset(mounted):
+                raise ValueError('Selected NPU devices are not mounted in the container')
+            env['ASCEND_RT_VISIBLE_DEVICES'] = ','.join(str(mounted.index(d)) for d in node['devices'])
         elif name == 'musa':
             env.update(MUSA_VISIBLE_DEVICES=devices, MTHREADS_VISIBLE_DEVICES=devices, CUDA_VISIBLE_DEVICES=devices)
         elif name == 'hygon':
@@ -185,6 +192,13 @@ class Manager:
                 raise RuntimeError('Existing container is paused/stopped; preserving its state')
             if info['Image'] != self.inspect(node, spec['image']):
                 raise RuntimeError('Container image differs from configured image')
+            if name == 'ascend':
+                prefix = '/dev/davinci'
+                mounted = sorted(int(d['PathOnHost'][len(prefix):])
+                                 for d in info['HostConfig']['Devices']
+                                 if d['PathOnHost'].startswith(prefix) and d['PathOnHost'][len(prefix):].isdigit())
+                if mounted != sorted(node.get('container_devices', node['devices'])):
+                    raise RuntimeError('Container NPU mounts differ from declared physical-to-logical mapping')
             return info['Id']
         if node['reuse']:
             raise RuntimeError('Required existing container is missing')
@@ -195,7 +209,7 @@ class Manager:
                 '--label', 'moqe.experiment=native-pp', '-v', REMOTE+':/workspace',
                 '-v', '/home/zhangjinhao/models:/models:ro']
         if name == 'ascend':
-            for device in node['devices']:
+            for device in node.get('container_devices', node['devices']):
                 argv += ['--device', '/dev/davinci'+str(device)]
             for device in ['davinci_manager', 'devmm_svm', 'hisi_hdc']:
                 argv += ['--device', '/dev/'+device]
@@ -210,6 +224,24 @@ class Manager:
             argv += ['--privileged']
         argv += ['--entrypoint', 'bash', spec['image'], '-lc', 'exec sleep infinity']
         return self.ssh(node, shlex.join(argv)).stdout.strip()
+
+    def configure_ray_environment(self, name, stage):
+        excluded = self.config['vendors'][name].get('ray_non_carry_over_env_vars', [])
+        if not excluded:
+            return None
+        if not isinstance(excluded, list) or any(not isinstance(v, str) for v in excluded):
+            raise ValueError('Ray environment exclusions must be a list of names')
+        # Use vLLM's supported exclusion file; retain existing user exclusions.
+        code = ("import pathlib,os,json; "
+                "p=pathlib.Path(os.environ.get('VLLM_CONFIG_ROOT','/root/.config/vllm'))/'ray_non_carry_over_env_vars.json'; "
+                "p.parent.mkdir(parents=True,exist_ok=True); "
+                "old=json.loads(p.read_text()) if p.exists() else []; "
+                "assert isinstance(old,list); "
+                "names=sorted(set(old)|set("+repr(excluded)+")); "
+                "p.write_text(json.dumps(names,indent=2)); "
+                "print(json.dumps(dict(path=str(p),names=names)))")
+        result = self.docker(name, stage, shlex.join(['python3', '-c', code]))
+        return json.loads(result.stdout)
 
     def start(self, name):
         spec = self.config['vendors'][name]
@@ -243,6 +275,7 @@ class Manager:
                 self.ssh(node, shlex.join(['docker', 'exec', node['container'], 'ln', '-sf', Path(library['target']).name, library['link']]))
                 driver_hashes.append(dict(library, sha256=digest))
             snapshot['nodes'].append(dict(node, container_id=container_id, driver_hashes=driver_hashes))
+            snapshot['nodes'][-1]['ray_environment'] = self.configure_ray_environment(name, stage)
             self.upload(node, local/'config.json', remote_directory+'/config.json')
             self.upload(node, Path(__file__).with_name('run_node.py'), REMOTE+'/'+REL+'/run_node.py')
             self.upload(node, Path(__file__).with_name('network.py'), REMOTE+'/'+REL+'/network.py')

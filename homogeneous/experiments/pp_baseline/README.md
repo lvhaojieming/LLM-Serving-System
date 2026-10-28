@@ -94,6 +94,15 @@ python homogeneous/experiments/pp_baseline/manage.py status --config artifacts/b
 ```
 
 `--instance` 只选择该实例，不启动同池其他实例；省略时继续使用原基础实例。
+额外实例可用 `env` 覆盖该实例的通信端口环境变量，共用环境的其余值保持不变。
+昇腾 `nodes[].container_devices` 声明容器挂载的完整主机芯片列表，`devices`
+选择该实例使用的两个主机芯片。启动前核对实际 Docker 挂载，按照挂载子集
+计算 `ASCEND_RT_VISIBLE_DEVICES`：只挂载 `[2,3]` 时选择 `[2,3]` 对应 `0,1`；
+挂载全部 `0..15` 时同样选择对应 `2,3`。不能在多实例共享全卡容器中固定为 `0,1`。
+`nodes[].env` 保存各节点独有的环境变量，优先于厂商共用环境。例如 A3 的
+`HCCL_LOGIC_SUPERPOD_ID` 需要按实际超节点划分配置，不能让设备 SDID 相同的
+两台机器误入同一逻辑超节点。`ray_non_carry_over_env_vars` 使用官方 vLLM
+`ray_non_carry_over_env_vars.json` 保留这类节点局部配置，合并而不覆盖已有排除项。
 实例快照、日志、验收结果和可选性能结果分别保存在
 `artifacts/baselines/same-vendor-pp/<vendor>/<instance>/`，基础实例的历史路径不变。
 启动时上传已解析的独立配置，避免并行实例覆盖共用 `config.json`。
@@ -122,6 +131,58 @@ SMI 确认每节点八个目标芯片有模型显存占用。只完成部署和�
 没有启动吞吐/稳定性压测，不能将此验收当作容量结论。
 本机保留 `artifacts/baselines/same-vendor-pp/deployment-config.json` 和
 `replica-acceptance.json`，包含实际启动参数、版本、回答与设备占用证据。
+
+### 昇腾主机 TCP/IP 路径
+
+2026-10-28 昇腾两节点对齐到现有 AWQ 环境镜像
+`heteroserve/ascend-migration:heteroserve-ascend-w4`（vLLM 0.26.0，
+vLLM-Ascend `155f68974c802633c19650ece430d41ee6802fa6`），模型仍使用原始
+Qwen3-14B FP16，不使用 AWQ 权重。`.24` 复用原容器，`.23` 原 AWQ 环境为
+0.11 且两端版本不兼容，因此同步已有镜像并创建一个长期复用的同环境容器；
+原容器和旧 PP 容器均保留，旧模型服务保持暂停。
+
+用户确认仅连接主机网络。该部署通过官方 Ray Compiled Graph 的主机通道
+传递 PP 中间张量，同机 TP 继续使用 HCCL。运行配置：
+
+```json
+"VLLM_USE_RAY_V2_EXECUTOR_BACKEND": "0",
+"VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE": "shm",
+"VLLM_USE_RAY_WRAPPED_PP_COMM": "0",
+"VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM": "0"
+```
+
+这里 `shm` 是 Ray 的节点内共享内存及跨节点 gRPC 通道，不是跨主机共享同一块
+`/dev/shm`。这是官方执行器配置，不修改 vLLM 的模型切分或张量传输实现。
+当前环境的 Ray V2 默认路径调用 worker 内部的 PP HCCL send/recv；
+选择 Compiled Graph 后，由 Ray 的 `execute_model_ray` 直接传递
+`IntermediateTensors`，避免要求跨节点的 NPU 数据面网络。
+保留 `--no-async-scheduling` 和 eager 模式作为该配置的明确执行条件。
+
+诊断中，按节点设置不同的 `HCCL_LOGIC_SUPERPOD_ID` 消除了 EI0014 SDID 重复，
+直接 HCCL PP 的下一条错误为两端设备 IP 均为 `0.0.0.0`（EI0015）。对目标
+2 号芯片的只读查询确认 RoCE Link DOWN、IPv4/IPv6 均未配置。未修改硬件
+SDID、网卡 IP、驱动或交换机。以上说明该次配置和现场条件，不表示 HCCL
+本身不支持跨节点。官方诊断参考：
+[superDeviceId 重复](https://www.hiascend.com/doc_center/source/zh/canncommercial/900/API/hcclug/hcclug_000046.html)。
+
+旧成功实验是 0.11/BF16/Compiled Graph `auto`，不能把它与 0.26/FP16/Ray V2
+默认路径视为相同配置；历史结果和必要诊断分别保留。
+
+当前昇腾分配如下；`.23` 的 4–9 号芯片属于旧实验已停用的三组设备，继续避开。
+本次 4/5、6/7 的尝试同样遇到 TSD/AICPU 初始化失败，保留诊断后改用此前
+已验收设备，没有重启整机或重置驱动。
+
+| 实例 | .23 芯片 | .24 芯片 | API 端口 | Ray 基础端口 |
+|---|---|---|---|---|
+| base | 2,3 | 2,3 | 18323 | 32000 |
+| pp-02 | 0,1 | 0,1 | 18324 | 34200 |
+| pp-03 | 10,11 | 4,5 | 18325 | 34400 |
+| pp-04 | 12,13 | 6,7 | 18326 | 34600 |
+
+两台各使用八个芯片，整组为四个独立 TP2/PP2 实例。
+部署验收与诊断保留在本机 `artifacts/baselines/same-vendor-pp/` 下的
+`ascend-awq-acceptance.json`、`ascend-hccl-diagnosis.json` 和
+`ascend-history-comparison.json`，有效旧结果保留于原目录。
 
 海光 Ray 的原生 `pp_broadcast` 初始化仍停滞，配置已切换 `executor=mp`：
 两端分别传 `--nnodes 2 --node-rank 0/1 --master-addr <head> --master-port <port>`，
